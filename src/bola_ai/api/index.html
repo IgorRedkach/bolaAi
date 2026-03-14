@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>BOLA AI</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.5rem; }
+    textarea { width: 100%; min-height: 120px; padding: 8px; }
+    button { padding: 8px 16px; margin: 4px; cursor: pointer; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; white-space: pre-wrap; }
+    .section { margin: 1.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>BOLA AI — Local BOLA analysis</h1>
+  <p>Paste or upload documentation (API specs, schemas). Then run analysis to get BOLA findings and verification steps.</p>
+
+  <div class="section">
+    <h2>Ingest</h2>
+    <textarea id="content" placeholder="Paste API spec, schema, or system description..."></textarea>
+    <br>
+    <button id="ingestBtn">Ingest text</button>
+    <span id="ingestStatus"></span>
+  </div>
+
+  <div class="section">
+    <h2>Analyze</h2>
+    <textarea id="query" placeholder="Optional: custom question (default: identify BOLA and verification steps)">Identify potential BOLA vulnerabilities and suggest verification steps.</textarea>
+    <br>
+    <button id="analyzeBtn">Run BOLA analysis</button>
+    <pre id="report"></pre>
+  </div>
+
+  <script>
+    const content = document.getElementById('content');
+    const query = document.getElementById('query');
+    const ingestBtn = document.getElementById('ingestBtn');
+    const ingestStatus = document.getElementById('ingestStatus');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const report = document.getElementById('report');
+
+    ingestBtn.onclick = async () => {
+      ingestStatus.textContent = 'Ingesting...';
+      try {
+        const fd = new FormData();
+        fd.set('content', content.value);
+        fd.set('source', 'ui');
+        const r = await fetch('/ingest', { method: 'POST', body: fd });
+        const j = await r.json();
+        ingestStatus.textContent = j.message || (r.ok ? 'OK' : r.statusText);
+      } catch (e) {
+        ingestStatus.textContent = 'Error: ' + e.message;
+      }
+    };
+
+    analyzeBtn.onclick = async () => {
+      report.textContent = 'Running analysis...';
+      try {
+        const r = await fetch('/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query.value || undefined })
+        });
+        const j = await r.json();
+        report.textContent = j.report || j.message || JSON.stringify(j);
+      } catch (e) {
+        report.textContent = 'Error: ' + e.message;
+      }
+    };
+  </script>
+</body>
+</html>

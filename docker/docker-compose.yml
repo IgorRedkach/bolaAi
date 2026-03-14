@@ -1,0 +1,62 @@
+# BOLA AI stack: app (RAG preloaded) + Ollama (BOLA-ready model). Volume app_data is ephemeral — wipe before/after use.
+# Default: OFFLINE — no internet. Ollama just runs serve; model must already be in ollama_data volume (see docs/OFFLINE_DEPLOY.md).
+# Optional: set OLLAMA_ONLINE_SETUP=1 to pull/create model once (uses internet); then remove it and run offline.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: bola-ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ "$${OLLAMA_ONLINE_SETUP:-0}" = "1" ]; then
+          ollama serve &
+          sleep 5
+          if ! ollama list 2>/dev/null | grep -q bola-analyzer; then
+            echo "Creating bola-analyzer (uses internet, one-time)..."
+            ollama pull qwen2.5-coder:1.5b && ollama create bola-analyzer -f /Modelfile
+          fi
+          wait
+        else
+          echo "Offline mode: starting Ollama (model must be in volume)."
+          exec ollama serve
+        fi
+    environment:
+      - OLLAMA_ONLINE_SETUP=${OLLAMA_ONLINE_SETUP:-0}
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./Modelfile:/Modelfile:ro
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q bola-analyzer || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 360s
+
+  bola-ai:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: bola-ai
+    ports:
+      - "8000:8000"
+    environment:
+      BOLA_AI_DATA: /data
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: bola-analyzer
+      # Set to "0" to skip RAG preload on first start (if low RAM)
+      BOLA_AI_PRELOAD: "1"
+      # DEBUG for more logs
+      BOLA_AI_LOG_LEVEL: "INFO"
+    volumes:
+      - app_data:/data
+      # Mount local src for latest code (e.g. logging) without rebuilding
+      - ../src:/app/src:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+volumes:
+  ollama_data:   # Model cache; wipe if you want to remove models
+  app_data:      # Chroma + ephemeral data; wipe after analysis

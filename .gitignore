@@ -1,0 +1,37 @@
+# Data: ignore Chroma/generated; keep data/knowledge and data/training for Docker build
+data/chroma/
+data/*.db
+*.db
+chroma/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.eggs/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Models (optional local cache)
+models/
+*.bin
+*.gguf
+
+# Env
+.env
+.env.local
