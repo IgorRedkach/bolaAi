@@ -1,97 +1,93 @@
-# E2E Testing (Real LLM)
+# E2E Testing (always live)
 
-E2E tests **talk to the real LLM** via the API and **assert on the content of the report**, not just HTTP status codes. They verify that:
+Runs after pytests and any manual test scripts when you are doing full quality sign-off.
 
-1. The stack is running with Ollama and the `bola-analyzer` model.
-2. Ingested documentation is used as context.
-3. The LLM returns BOLA-focused findings.
-4. The LLM provides **verification steps** (concrete instructions for auditors).
+**Agent quality loop:** Full-cycle agents follow **`docs/AGENT_PROMPT_FULL_CYCLE.md`**, track weak spots in **`docs/AGENT_WEAK_PLACES.md`**, and continue until registry + ISSUES are clear (see **`docs/ANALYSIS_AGENT_LOOP_STOP_GAP.md`**).
 
-## What we test
+**E2E is always live:** Tests that hit the real API + LLM **do not silently skip** — **`pytest tests/` fails at collection** if the API + Ollama are not reachable at `BOLA_AI_LIVE_URL` (default `http://localhost:8000`). If something fails, file or update an **OPEN** issue, fix it, and re-run the loop.
 
-- **test_llm_report_references_ingested_documentation** — We ingest sample project docs (see `tests/fixtures/sample_project_documentation.md`). The report must reference at least one resource/endpoint from that doc (e.g. patient, order, prescription, `/api/`). This proves the LLM read our input.
-- **test_llm_report_contains_verification_steps** — The report must contain the word "verification" or "step" and concrete instructions (e.g. "call", "token", "with two different user").
-- **test_llm_report_is_bola_focused** — The report must contain at least two BOLA-related terms (e.g. BOLA, ownership, authorization, access, permission).
-- **test_llm_report_is_not_error_or_generic** — The report must be long enough, have structure (headings/lists), and not be an error message.
+Quality is validated on the **real** stack, not optional mocks.
 
-If the API or Ollama is not available, the E2E tests are **skipped** (they do not fail the suite).
+## Files that require a live stack
 
-## Sample project documentation
+Confirm against current repo layout before you run:
 
-The file `tests/fixtures/sample_project_documentation.md` is a short, realistic project doc that describes:
+- `tests/test_e2e_llm.py` — LLM report content
+- `tests/test_issues_resolved.py` — issue acceptance vs real LLM
+- `tests/test_api_live.py` — health, ingest, analyze, UI
 
-- A "HealthHub" API with patients, orders, prescriptions, and internal cases.
-- Intentional BOLA red flags: no documented ownership or permission checks for object IDs, linked `case_team_members` without access rules, logs/queue visibility.
+Collection guard logic: **`tests/conftest.py`** (`pytest_collection_finish`).
 
-We ingest this doc and ask the LLM for BOLA findings and verification steps. The tests then assert that the **LLM output** mentions these resources and includes verification steps.
-
-## How to run E2E
-
-1. **Start the stack with the model** (so the LLM is actually running):
-
-   ```bash
-   # Offline: model must already be in volume.
-   docker compose -f docker/docker-compose.yml up -d
-
-   # Or one-time online setup to load the model:
-   OLLAMA_ONLINE_SETUP=1 docker compose -f docker/docker-compose.yml up -d
-   ```
-
-2. Wait until the API and Ollama are ready (e.g. `curl http://localhost:8000/health` shows `"ollama": true`).
-
-3. **Run the E2E tests** (they hit the live API and assert on report content):
-
-   ```bash
-   BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src pytest tests/test_e2e_llm.py -v -s
-   ```
-
-   Use `-s` to see print output and report excerpts if a check fails.
-
-4. Optional: run the live API QA script first to confirm health/ingest/analyze work:
-
-   ```bash
-   sh scripts/qa_api_live.sh http://localhost:8000
-   ```
-
-## Expectation: LLM is running
-
-When the LLM is running, you should see:
-
-- **Memory:** The process that runs the analyze request (Ollama or the app) may show a **memory spike** during analysis (model inference).
-- **Latency:** `/analyze` takes tens of seconds (e.g. 30–90 s) per request, not milliseconds.
-- **Content:** The report is long (hundreds to thousands of characters), mentions your endpoints/resources, and includes verification steps and BOLA-related wording.
-
-If E2E tests are **skipped**, the health check failed or `ollama` was not `true` — start the stack and ensure the model is loaded. If tests **fail** on content assertions, the report did not meet the criteria above (e.g. model not loaded, wrong model, or prompt/context issue).
-
-## Issue-resolution tests
-
-Open issues and their acceptance criteria are tracked in [docs/ISSUES.md](ISSUES.md). Each issue has an autotest in `tests/test_issues_resolved.py`. When an issue is fixed, mark it PASSED in ISSUES.md; the corresponding test should then pass when run against the live API:
+## Before you run pytest
 
 ```bash
-BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src pytest tests/test_issues_resolved.py -v -s
+cd docker && docker compose up -d
+PYTHONPATH=src python -m bola_ai.cli health --wait
+PYTHONPATH=src pytest tests/ -v
 ```
 
-## Manual communication test loop
+If you cannot run live tests, create an **OPEN** issue, stop the current “done” narrative, fix the blocker, and start a new improvement loop.
 
-After each code or prompt change, **talk to the application** (not only run autotests) to catch issues the tests might miss:
+Live E2E is not skipped by default; if the environment truly cannot run them, document that in open  ISSUES and start a new improvement loop.
 
-1. **Start the stack** (if not already running): `docker compose -f docker/docker-compose.yml up -d` (from `docker/`).
-2. **Ingest and analyze:** Ingest the sample doc, then call `POST /analyze` with a clear query (e.g. "Identify BOLA risks and give verification steps.").
-3. **Read the full report:** Inspect the response for:
-   - Duplicate headings (`### ###`), hallucinated endpoints (`/api/users/`, `/api/tenants`, paths not in the doc), missing two-token verification phrasing, or rationale that says "no authentication" when the doc requires auth.
-4. **If you find issues:** Fix them (prompt, post-processing in `runner._normalize_report`, or tests), run `pytest tests/test_issues_resolved.py`, then **restart the app** (`docker compose restart bola-ai`) and go back to step 2.
-5. **Stop** only when a full manual pass finds no issues.
+---
 
-Post-processing in `src/bola_ai/agent/runner.py` (`_normalize_report`) already fixes duplicate headings, appends a two-token verification reminder when missing, redacts common hallucinated paths, and replaces "without a token" with two-token phrasing (Issue 6).
+## What we assert (live LLM) — goals for any E2E pass
 
-## New manual test cases (multiple docs)
+1. **Fresh documentation every meaningful E2E cycle**  
+   Generate new test documentation from scratch for that run: think through the **system under test**, **plausible BOLA angles**, and **what you expect** the tool to surface before you write the doc.  
+   **Required intake path:** copy the doc into the shared Docker docs path (`shared_docs` on host, mounted to `/shared-docs` in container), then ingest via **`POST /ingest_shared`** (or CLI `bola-ai ingest-shared`) after **`POST /reset`**.
 
-To evaluate the tool on **multiple documentation fixtures** with clear expected outcomes:
+2. **Reports match tool goals**  
+   Responses should stay **BOLA-focused**, include **actionable verification steps**, and stay **grounded** in the ingested doc (paths, methods, no invented GraphQL/SOQL when the doc is REST-only, etc. — see **`docs/GOALS.md`**).
 
-1. **Fixtures** (in `tests/fixtures/`): `sample_project_documentation.md`, `doc_ecommerce_orders.md`, `doc_file_storage.md`, `doc_support_tickets.md`, `doc_crm_contacts.md`. Expected outcomes are in `tests/fixtures/expected_outcomes.md`.
-2. **Reset before each doc:** The API exposes `POST /reset` to clear the document store so each test case runs with only that doc (no mixing with previous ingests).
-3. **Run all manual test cases:**
-   ```bash
-   BOLA_AI_LIVE_URL=http://localhost:8000 python scripts/run_manual_test_cases.py --timeout 300
-   ```
-   The script resets, ingests each doc, calls analyze, and evaluates the report (doc-specific context, no hallucinated paths, two-token verification, no "without a token"). Use `--timeout 300` (or higher) so slow LLM responses do not cause timeouts.
+3. **Primary method: adaptive person-style E2E (not “the script = the test”)**  
+   think about possible question a person can ask for more details and support according to the generated context. Evaluate after each tool response. And verify responses according to the expectations you believe are correct for the context
+
+   **How adaptive E2E should work:**
+
+   | Step | What you do |
+   |------|----------------|
+   | **Start the stack** | Docker up, health OK. |
+   | **Pass generated data** | Reset → copy doc to `shared_docs/` → ingest with **`POST /ingest_shared`** using relative filename. |
+   | **First request** | One **`POST /analyze`** with a natural question tied to that doc (e.g. auditor angle on ID abuse). |
+   | **Read the answer** | Judge it against **your scenario**: coverage, grounding, verification logic (e.g. two valid tokens vs 401/404-only). |
+   | **Next request from context** | Ask a **new** question **informed by what the model just said** (deeper steps, challenge a finding, ask for curls with fake tokens, ask for a runbook, ask it to audit its own paths). **Separate request each time** — do not hide a long chain inside one opaque script unless you are only using the script as a smoke baseline. |
+   | **Repeat** | Continue **analyse response → decide next question → send next `POST /analyze`** until you are satisfied the tool has been **exercised enough** for this doc (several turns, not a fixed number — often **more** than six if answers were shallow or drifted). |
+   | **Per-response analysis** | For **every** tool response, briefly note: grounded? BOLA-relevant? verification sound? regressions vs earlier answers in the same session? |
+
+   **When to stop (“tested enough” for this cycle):** You have probed **follow-ups**, **edge of doc** (e.g. batch endpoints), and **hallucination risk** (paths in answer vs ingested text); you are not stopping only because the first reply “looked fine.”
+
+4. **Improvements become work items**  
+   Anything that should change product or process or possible improvements you see  → **`docs/ISSUES.md`** (bugs, `[E2E-LOOP]` if script-level regression) and/or **`docs/GOALS.md`** (new or tightened success criteria).
+
+---
+
+## NO Scripted minimum (smoke should be created but not as a substitude for the e2e test described before)
+
+`scripts/run_agent_e2e_loop_once.py` enforces **6** separate **`POST /analyze`** calls (3 persona questions + runbook/200–403 + fake-token curls + path self-audit) for a chosen fixture. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
+
+By default the script now stages the selected fixture into `shared_docs/` and ingests via **`POST /ingest_shared`** (set `BOLA_AI_E2E_USE_SHARED_VOLUME=0` only for debugging legacy behavior).
+
+Log output: **`docs/e2e_loop_last_run.json`**.
+Release sign-off = full **`pytest tests/`** with stack up.
+
+**Agents:** If live E2E cannot complete, or **OPEN** issues / unresolved goals remain, start new loop according **`AGENT_PROMPT_FULL_CYCLE.md`** §3b.
+
+---
+
+## Manual web verification (mandatory in every E2E cycle)
+
+After API-level E2E completes, verify the **interactive web chat** works:
+
+1. **Open `http://localhost:8000/chat`** in a browser (or use browser automation).
+2. **Verify page loads:** Header shows "BOLA AI" with a green status dot. Welcome message is visible.
+3. **Test "help" command:** Type `help` and send. Verify the usage guide appears with sections: Getting Started, Commands, Example Conversation, Tips.
+4. **Test "list files" command:** Type `list files` and send. Verify the shared docs listing appears.
+5. **Test "ingest" command:** Type `ingest <filename>` (using a file from the listing). Verify the success message shows character count and chunk count.
+6. **Test analysis question:** Type a BOLA-related question. Verify the response appears (may take 1-4 minutes) with markdown formatting (headings, bold, code blocks).
+7. **Test "status" command:** Type `status`. Verify system info appears (Ollama status, chunk count).
+
+**Pass criteria:** All 7 steps succeed. The chat UI renders markdown correctly, auto-scrolls, and the loading spinner appears during analysis.
+
+If any step fails, file an **OPEN** issue in `docs/ISSUES.md` and fix before claiming E2E completion.

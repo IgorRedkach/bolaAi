@@ -5,10 +5,10 @@ These tests verify that the LLM receives the ingested documentation and returns 
 findings with verification steps. They require a running stack with Ollama and the bola-analyzer
 model (e.g. docker compose up -d with model loaded).
 
-Run with: BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src pytest tests/test_e2e_llm.py -v -s
+Run with: PYTHONPATH=src pytest tests/test_e2e_llm.py -v -s
+(requires live stack; see tests/conftest.py — collection fails if API/Ollama down unless BOLA_AI_SKIP_LIVE_E2E=1).
 
-Skip if API or Ollama is not available. Fail if the report content does not match expectations
-(e.g. no verification steps, no BOLA-related terms, or report does not reference the ingested doc).
+Fail if the report content does not match expectations.
 """
 import os
 from pathlib import Path
@@ -17,25 +17,11 @@ import httpx
 import pytest
 
 BASE_URL = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000").rstrip("/")
-TIMEOUT_ANALYZE = 240.0
-
-# Only run these tests when explicitly opted in (same pattern as test_issues_resolved.py)
-_LIVE_MODE = bool(os.environ.get("BOLA_AI_LIVE_URL"))
+TIMEOUT_ANALYZE = 360.0  # match LLM + client policy (Issue 16)
 
 # Path to sample project doc (used so LLM has concrete endpoints to analyze)
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_DOC_PATH = FIXTURE_DIR / "sample_project_documentation.md"
-
-
-def _health_ok_and_ollama() -> bool:
-    try:
-        r = httpx.get(f"{BASE_URL}/health", timeout=10.0)
-        if r.status_code != 200:
-            return False
-        j = r.json()
-        return j.get("status") == "ok" and j.get("ollama") is True
-    except Exception:
-        return False
 
 
 @pytest.fixture(scope="module")
@@ -46,24 +32,26 @@ def sample_documentation():
     return path.read_text(encoding="utf-8")
 
 
-@pytest.mark.skipif(
-    not (_LIVE_MODE and _health_ok_and_ollama()),
-    reason="Live API with Ollama required; set BOLA_AI_LIVE_URL=http://localhost:8000 to enable",
-)
 class TestE2ELLM:
     """
     E2E: ingest project docs, call analyze, assert on LLM report content.
     Proves the LLM is running and returns BOLA findings with verification steps.
     """
 
+    @staticmethod
+    def _reset_and_ingest(client: httpx.Client, sample_documentation: str, source: str) -> None:
+        rr = client.post(f"{BASE_URL}/reset")
+        assert rr.status_code == 200, rr.text
+        ri = client.post(
+            f"{BASE_URL}/ingest",
+            data={"content": sample_documentation, "source": source},
+        )
+        assert ri.status_code == 200, ri.text
+
     def test_llm_report_references_ingested_documentation(self, sample_documentation):
         """Ingest sample project doc, analyze; report must reference our endpoints or resources."""
         with httpx.Client(timeout=TIMEOUT_ANALYZE) as client:
-            r = client.post(
-                f"{BASE_URL}/ingest",
-                data={"content": sample_documentation, "source": "sample_project_documentation.md"},
-            )
-            assert r.status_code == 200, r.text
+            self._reset_and_ingest(client, sample_documentation, "sample_project_documentation.md")
 
             r = client.post(
                 f"{BASE_URL}/analyze",
@@ -86,10 +74,7 @@ class TestE2ELLM:
     def test_llm_report_contains_verification_steps(self, sample_documentation):
         """Report must contain verification steps (auditor-facing instructions)."""
         with httpx.Client(timeout=TIMEOUT_ANALYZE) as client:
-            client.post(
-                f"{BASE_URL}/ingest",
-                data={"content": sample_documentation, "source": "e2e_fixture"},
-            )
+            self._reset_and_ingest(client, sample_documentation, "e2e_fixture")
             r = client.post(
                 f"{BASE_URL}/analyze",
                 json={"query": "List potential BOLA issues and how to verify each one."},
@@ -113,10 +98,7 @@ class TestE2ELLM:
     def test_llm_report_is_bola_focused(self, sample_documentation):
         """Report must contain BOLA-related security language."""
         with httpx.Client(timeout=TIMEOUT_ANALYZE) as client:
-            client.post(
-                f"{BASE_URL}/ingest",
-                data={"content": sample_documentation, "source": "e2e_fixture"},
-            )
+            self._reset_and_ingest(client, sample_documentation, "e2e_fixture")
             r = client.post(
                 f"{BASE_URL}/analyze",
                 json={"query": "What BOLA risks exist and how to verify them?"},
@@ -134,10 +116,7 @@ class TestE2ELLM:
     def test_llm_report_is_not_error_or_generic(self, sample_documentation):
         """Report must not be an error message or empty/generic placeholder."""
         with httpx.Client(timeout=TIMEOUT_ANALYZE) as client:
-            client.post(
-                f"{BASE_URL}/ingest",
-                data={"content": sample_documentation, "source": "e2e_fixture"},
-            )
+            self._reset_and_ingest(client, sample_documentation, "e2e_fixture")
             r = client.post(f"{BASE_URL}/analyze", json={})
             assert r.status_code == 200, r.text
 

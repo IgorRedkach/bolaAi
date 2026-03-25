@@ -14,7 +14,8 @@ BOLA AI is a local-only security analysis stack that runs in Docker. It combines
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │  │
 │  │  │   Ollama    │  │  ChromaDB   │  │  FastAPI app        │ │  │
 │  │  │ (Qwen 2.5   │  │  (vectors   │  │  - /ingest          │ │  │
-│  │  │  Coder)     │  │   + docs)   │  │  - /analyze         │ │  │
+│  │  │  Coder)     │  │   + docs)   │  │  - /ingest_shared   │ │  │
+│  │  │             │  │             │  │  - /analyze         │ │  │
 │  │  └──────┬──────┘  └──────┬──────┘  │  - /health          │ │  │
 │  │         │                │         └──────────┬──────────┘ │  │
 │  │         └────────────────┴────────────────────┘             │  │
@@ -44,6 +45,7 @@ BOLA AI is a local-only security analysis stack that runs in Docker. It combines
 - **Role:** Orchestrate ingestion, RAG retrieval, and LLM calls; expose REST API and serve a minimal UI.
 - **Endpoints:**
   - `POST /ingest` — Upload or paste documentation; chunk and embed into ChromaDB.
+  - `POST /ingest_shared` — Ingest UTF-8 documentation from the shared Docker docs path (`/shared-docs`) by relative filename.
   - `POST /analyze` — Run BOLA-oriented analysis: RAG context + prompt → LLM → structured findings + verification steps.
   - `GET /health` — Health check (app + optional Ollama/Chroma checks).
   - `GET /` — Simple HTML UI for upload and analysis.
@@ -68,6 +70,7 @@ BOLA AI is a local-only security analysis stack that runs in Docker. It combines
 
 - **Single service (all-in-one):** One Docker image runs FastAPI, ChromaDB, and Ollama. The model can be baked in at build time (larger image) or mounted from a volume that is populated once and then reused.
 - **Ephemeral volume:** Mount `./data` (or similar) for Chroma and optional model cache. Documentation states that this volume should be wiped before use (clean state) and after use (no residual sensitive data).
+- **Shared docs path:** Mount `./shared_docs` to `/shared-docs` so users can copy test docs into a host folder and ingest by filename (`/ingest_shared`) during E2E and audit workflows.
 - **Network:** Default run can use `--network=host` for simplicity; for strict “no outbound” policy, run with `--network=none` and ensure the model and any base images are already present.
 
 ## Memory Management (target &lt;10 GB)

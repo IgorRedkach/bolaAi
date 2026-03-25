@@ -27,14 +27,6 @@ Then start the API:
 ```bash
 export PYTHONPATH=src
 uvicorn bola_ai.api.app:create_app --host 0.0.0.0 --port 8000 --factory
-# Or: python run_api.py
-```
-
-**Option B — without Ollama (ingest + UI only)**  
-Ingest and UI work; `/analyze` will fail until Ollama is available. Use fake embedder to save memory:
-
-```bash
-export BOLA_AI_FAKE_EMBEDDER=1
 export PYTHONPATH=src
 uvicorn bola_ai.api.app:create_app --host 0.0.0.0 --port 8000 --factory
 # Or from repo root: sh scripts/run_api_lowmem.sh
@@ -124,16 +116,22 @@ PYTHONPATH=src python src/training/load_knowledge.py
 
 ## Tests (low memory)
 
-Tests use a fake embedder so they don’t load sentence-transformers/torch:
+**Timeouts (Issue 16–17):**
 
-```bash
-BOLA_AI_FAKE_EMBEDDER=1 PYTHONPATH=src pytest tests/ -v
-# Or: sh scripts/run_tests.sh
-```
+| What | Env / behavior | Policy |
+|------|----------------|--------|
+| **LLM reply** (`/analyze`) | `BOLA_AI_LLM_CHAT_TIMEOUT` (default **300s**); client `BOLA_AI_ANALYZE_CLIENT_TIMEOUT` (**360s**) | Do **not** raise LLM timeout to mask slow inference. |
+| **Ingest / learn docs** | `BOLA_AI_INGEST_TIMEOUT` (**600s**) | CLI `ingest`, scripts; embedding can be slow. |
+| **Stack startup** | `bola-ai health --wait`, `BOLA_AI_STACK_WAIT_SECONDS` (**900s**) | Wait for Ollama after `docker compose up`. |
+| **Ollama probe** | `BOLA_AI_OLLAMA_STARTUP_PROBE_TIMEOUT` (**60s**) | Cold `ollama list`, not chat. |
+
+For `curl` on `/analyze`, use e.g. `-m 360`. For large ingests, ensure client timeout ≥ `BOLA_AI_INGEST_TIMEOUT`.
 
 **Live API QA:** `docker compose up -d` then `sh scripts/qa_api_live.sh http://localhost:8000`. Or `pytest tests/test_api_live.py -v` with API running.
 
-**E2E (real LLM):** Tests that **talk to the LLM** and assert on report **content**. See [docs/E2E_TESTING.md](docs/E2E_TESTING.md). Run: `BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src pytest tests/test_e2e_llm.py tests/test_issues_resolved.py -v -s`. Open issues and their autotests: [docs/ISSUES.md](docs/ISSUES.md).
+**Per-test timing (live E2E):** [docs/PERFORMANCE_TESTING.md](docs/PERFORMANCE_TESTING.md) — `python scripts/run_live_e2e_tests_one_by_one.py` → `docs/live_e2e_test_timings.md`.
+
+**E2E (always live):** With the stack up, run **`PYTHONPATH=src pytest tests/`** — live E2E is **required** when those tests are collected (fails fast if API/Ollama down). See [docs/E2E_TESTING.md](docs/E2E_TESTING.md). Emergency without Docker: `BOLA_AI_SKIP_LIVE_E2E=1`. Issues: [docs/ISSUES.md](docs/ISSUES.md).
 
 Monitor memory: run `sh scripts/check_memory.sh 2` in another terminal; if Python exceeds ~10 GB, kill it. See [docs/MEMORY.md](docs/MEMORY.md).
 

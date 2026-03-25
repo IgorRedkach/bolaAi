@@ -1,11 +1,23 @@
 # Open issues and improvement tracker
 
-When an issue is fixed, mark it **PASSED** and add an autotest that would have failed before the fix. Autotests live in `tests/test_issues_resolved.py`.
+**Agent policy:** If a quality run **fails** or the **loop is interrupted**, add or keep an **OPEN** issue describing what failed or what was left undone. The **next** agent loop must work **OPEN** issues, goals, and improvements until cleared. You **may** write progress summaries anytime, but you **must not stop** the improvement work until **no OPEN issues**, **no unresolved goals**, and **no further improvements** you can name (see `AGENT_PROMPT_FULL_CYCLE.md`).
 
-**Run issue-resolution tests (E2E, real LLM):**
+When an issue is fixed, mark it **PASSED** and add an autotest that would have failed before the fix.
+
+- **Regular / product issues:** Autotests in `tests/test_issues_resolved.py`.
+- **Agent E2E loop failures** (strict coverage miss, loop doc timeout, bad follow-up on **that loop’s** data): Title prefix **`[E2E-LOOP]`**. Autotests in **`tests/test_e2e_loop_failures.py`** only — **not** mixed into `test_issues_resolved.py`. Run that file **separately** when fixing/verifying those issues.
+
+**Run issue-resolution tests (live E2E, mandatory when collected):**
 ```bash
-BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src pytest tests/test_issues_resolved.py -v -s
+# Stack must be up (default http://localhost:8000)
+PYTHONPATH=src pytest tests/test_issues_resolved.py -v -s
 ```
+
+**Run E2E-loop failure regressions (live, when tests exist):**
+```bash
+PYTHONPATH=src pytest tests/test_e2e_loop_failures.py -v -s
+```
+
 Requires the stack running with Ollama and `bola-analyzer` model.
 
 **Prompt and RAG:** Prompt was updated to reduce hallucination and off-topic findings (see `src/bola_ai/agent/prompts.py`). If issues persist, consider adding BOLA-only examples to RAG or retraining.
@@ -180,6 +192,94 @@ Requires the stack running with Ollama and `bola-analyzer` model.
 
 ---
 
+## Issue 15: Report must not show Patient/Document/Order API when doc is claims-only (grounding)
+
+**Status:** PASSED
+
+**Description:** When ingested documentation describes only claims/policies (e.g. `/api/v2/claims/{claimId}`), the report must not list findings for "Patient API", "Document API", "Order API", or other resources not in the doc. Paths and finding titles must be grounded to the documentation.
+
+**Acceptance:** Normalization redacts unknown paths and replaces hallucinated finding titles (Patient API, Document API, etc.) with "Endpoint from documentation" when those resources are not in the ingested doc. Unit test verifies this.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_grounds_claims_only_doc`
+
+---
+
+## Issue 16: /analyze timeout on complex queries (fake-data / request-generation step)
+
+**Status:** PASSED
+
+**Description:** The /analyze endpoint can exceed **120s** client timeouts because Ollama chat uses up to **300s** (`llm.chat`). Clients (CLI, curl, scripts) were timing out before the LLM finished.
+
+**Acceptance:** Default HTTP client timeout for analyze is **≥ LLM chat timeout** (360s default via `BOLA_AI_ANALYZE_CLIENT_TIMEOUT` / `config.ANALYZE_CLIENT_TIMEOUT`). CLI `analyze` uses that value. E2E docs state minimum client timeout for `/analyze`. Example reports must not put Bearer tokens in query strings; use `Authorization` header (prompt + `_normalize_report`).
+
+**Autotest when passed:** `tests/test_config.py::test_analyze_client_timeout_covers_llm_chat_timeout`, `tests/test_agent.py::test_normalize_report_fixes_bearer_token_in_query_string`
+
+---
+
+## Issue 17: Separate timeouts — learning/startup vs LLM inference reply
+
+**Status:** PASSED
+
+**Description:** Short timeouts on **ingest** (30s) and **health** caused failures during **embedding** and **Docker/Ollama startup**, while the team policy is: **do not** extend waits for the model **finishing a chat reply** as a workaround for slow inference. Time for the tool to **learn** from documents (ingest/chunk/embed) and for **stack/training start** must be configurable and generous; **LLM response** caps stay inference-sized.
+
+**Acceptance:**
+
+- **Inference:** `BOLA_AI_LLM_CHAT_TIMEOUT` (default **300s**) drives Ollama chat; **do not raise** to make slow generation “pass”—tune model/prompt/hardware instead. `BOLA_AI_ANALYZE_CLIENT_TIMEOUT` (default 360s) only needs to be ≥ LLM timeout so the HTTP client does not abort first.
+- **Learning:** `BOLA_AI_INGEST_TIMEOUT` (default **600s**) for `POST /ingest` from CLI/scripts (embedding can be slow on CPU).
+- **Startup / training:** `BOLA_AI_STACK_WAIT_SECONDS` (default **900s**) for `bola-ai health --wait`; `BOLA_AI_OLLAMA_STARTUP_PROBE_TIMEOUT` (default **60s**) for Ollama reachability checks; Docker Compose Ollama **healthcheck** `start_period` **600s**, longer **timeout** for cold `ollama list`.
+
+**Autotest when passed:** `tests/test_config.py::test_ingest_timeout_allows_learning_not_inference`, `test_stack_startup_waits_separate_from_llm`
+
+---
+
+## Issue 18: E2E always live (no silent skip)
+
+**Status:** PASSED
+
+**Description:** E2E tests previously **skipped** when `BOLA_AI_LIVE_URL` was unset or the stack was down, so `pytest tests/` could look green without real LLM validation.
+
+**Acceptance:** Collecting `test_e2e_llm.py`, `test_issues_resolved.py`, or `test_api_live.py` **fails at collection** if API + Ollama are not reachable (clear message). Full `pytest tests/` is the standard sign-off with stack up. **`BOLA_AI_SKIP_LIVE_E2E=1`** skips those tests only for emergency CI.
+
+**Autotest when passed:** Manual: start stack → `pytest tests/` runs live E2E; without stack → collection exit 1; with `SKIP` → live tests skipped.
+
+---
+
+## Issue 19: Live E2E test timeout from accumulated ingested chunks
+
+**Status:** PASSED
+
+**Description:** `tests/test_e2e_llm.py` ingested fixture docs without resetting the store between tests. Over a full `pytest tests/` run this could accumulate chunks and make one analyze call hit timeout (`{"detail":"timed out"}`), creating flaky failures.
+
+**Acceptance:** Each live E2E test case in `test_e2e_llm.py` resets the store before ingesting its fixture so every assertion runs on a clean context and avoids cross-test accumulation.
+
+**Autotest when passed:** `tests/test_e2e_llm.py` (helper `_reset_and_ingest` used by all four tests), validated in full `pytest tests/` run.
+
+---
+
+## Issue 20: Broken curl URL after path redaction in q5 follow-up
+
+**Status:** PASSED
+
+**Description:** In some q5 follow-up answers, grounding redaction could leave malformed examples like `https:/[use only endpoints from the documentation]`, which is not actionable for auditors.
+
+**Acceptance:** When redaction touches URL examples, normalization replaces malformed placeholders with a grounded fallback URL using an allowed documented path (e.g. `https://api.example.com/<allowed-path>`).
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_replaces_broken_redacted_url_with_grounded_placeholder`
+
+---
+
+## Issue 21: Invalid BOLA confirmation when user A is denied
+
+**Status:** PASSED
+
+**Description:** Some generated instructions incorrectly said that if user A (owner) does not receive data then BOLA is confirmed. Denial to user A can indicate missing object, wrong environment, or auth mismatch and does not itself prove BOLA.
+
+**Acceptance:** Normalization rewrites this logic to require object existence and proper two-user comparison; user-A denial alone must not be treated as confirmation.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_rewrites_invalid_user_a_denied_confirmation`
+
+---
+
 ## Retraining / model improvements (when applicable)
 
 - If prompt and RAG changes do not resolve the above, **retrain or adapt the model** using the tool's instruments:
@@ -188,3 +288,44 @@ Requires the stack running with Ollama and `bola-analyzer` model.
   - **Ollama model:** Update `docker/Modelfile` (system prompt) and recreate the model: `ollama create bola-analyzer -f Modelfile`. For full fine-tuning, use `data/training/bola_training.jsonl` with Ollama or external tools.
 - You can also update any part of the tool (prompts, post-processing in `agent/runner.py`, RAG, API) to enforce output shape or content when the LLM is inconsistent.
 - Track in this file: "Model retraining: [x] not needed (prompt + post-processing resolved all issues) / [ ] planned / [ ] done (date)."
+
+---
+
+## Issue 22: [E2E-LOOP] Curl examples in multi-finding reports use wrong path
+
+**Status:** PARTIALLY MITIGATED — `_fix_curl_path_mismatch()` now corrects wrong paths in fenced code blocks; inline paths in prose remain (1.5B model capacity limit)
+
+**Description:** When a response includes multiple findings, curl example paths for findings 2, 3, ... often reuse the path from finding 1 (the first retrieved RAG chunk) instead of the specific path for each finding. For example, a `PATCH /accounts/{accountId}/contact` finding's curl example shows `/accounts/{accountId}/usage` (another endpoint in the same document).
+
+**Root cause:** The 1.5B model anchors on the first retrieved context path and copies it into subsequent curl example blocks without reasoning about which path belongs to which finding.
+
+**Workaround:** System prompt reinforced to explicitly instruct path accuracy per finding. Auditors should verify that each curl example's path matches its finding heading and substitute if needed. The finding title (heading) is always correct — only the curl path may be wrong.
+
+**Acceptance:** Remains OPEN until a larger model or fine-tuning resolves this. No automated test exists for this (path correctness requires per-finding context linkage).
+
+---
+
+## Issue 23: [E2E-LOOP] Benefits Portal — WP-017 through WP-020 discovered and fixed
+
+**Status:** VERIFIED
+
+**Session:** 2026-03-24 (agent prompt — Benefits Portal API — with per-response adaptive analysis)
+
+**Doc fixture:** `shared_docs/doc_onetime_benefits_portal_20260324b.md`
+
+**Expected risks:**
+1. GET /employees/{employeeId}/benefits — read BOLA
+2. PUT /employees/{employeeId}/beneficiary — write BOLA
+3. GET /plans/{planId}/enrollment-history — plan admin BOLA
+4. GET /companies/{companyId}/employees — list BOLA
+5. POST /coverage-changes — body-field BOLA (submittingEmployeeId)
+
+**Per-response adaptive analysis found:**
+- WP-017: Hallucinated endpoint findings with redacted headings surviving in report → FIXED
+- WP-018: Inverted rationale ("The server restricts this endpoint to...") → FIXED
+- WP-019: GET curl examples with `-d submittingEmployeeId` body payloads → FIXED
+- WP-020: Repeated `#### Rationale:` sub-blocks under same `###` finding → FIXED
+
+**Final sign-off:** 12/12 quality checks PASS. 5/5 endpoint coverage. Unit test count: 52/52.
+
+---

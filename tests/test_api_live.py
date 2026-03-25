@@ -1,26 +1,16 @@
 """
-Live API tests: hit a running API (e.g. docker compose up) and assert on responses.
-Skip if API is not available (e.g. BOLA_AI_LIVE_URL unset and localhost:8000 not responding).
-Run with: BOLA_AI_FAKE_EMBEDDER=1 PYTHONPATH=src pytest tests/test_api_live.py -v
-Or against container: BOLA_AI_LIVE_URL=http://localhost:8000 pytest tests/test_api_live.py -v
+Live E2E: hit a running API + Ollama (docker compose up). Mandatory when this file is collected.
+See tests/conftest.py — start stack before pytest tests/.
 """
 import os
-import pytest
+
 import httpx
+import pytest
 
 BASE_URL = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000")
-TIMEOUT = 120.0
+TIMEOUT_ANALYZE = 360.0
 
 
-def _api_available() -> bool:
-    try:
-        r = httpx.get(f"{BASE_URL.rstrip('/')}/health", timeout=5.0)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-@pytest.mark.skipif(not _api_available(), reason="Live API not available at BOLA_AI_LIVE_URL / localhost:8000")
 class TestLiveAPI:
     """Tests that run against a live API (container or uvicorn)."""
 
@@ -36,7 +26,7 @@ class TestLiveAPI:
         r = httpx.post(
             f"{BASE_URL.rstrip('/')}/ingest",
             data={"content": "GET /api/users/{id}. No ownership check. GET /api/patients/{id}. No caller verification.", "source": "test_live"},
-            timeout=30.0,
+            timeout=600.0,
         )
         assert r.status_code == 200, r.text
         j = r.json()
@@ -46,7 +36,7 @@ class TestLiveAPI:
         r = httpx.post(
             f"{BASE_URL.rstrip('/')}/analyze",
             json={"query": "Identify BOLA risks and suggest verification steps."},
-            timeout=TIMEOUT,
+            timeout=TIMEOUT_ANALYZE,
         )
         assert r.status_code == 200, r.text
         j = r.json()

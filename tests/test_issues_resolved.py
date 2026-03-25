@@ -1,8 +1,8 @@
 """
 Autotests for issues in docs/ISSUES.md. When an issue is marked PASSED, the corresponding test
-should pass when run against the live API (E2E with real LLM). Run with:
-  BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src pytest tests/test_issues_resolved.py -v -s
-Uses the same sample project documentation as test_e2e_llm.py; requires Ollama and model.
+should pass against the live API (E2E with real LLM). Run:
+  PYTHONPATH=src pytest tests/test_issues_resolved.py -v -s
+Stack must be up (conftest fails collection otherwise). Optional: BOLA_AI_LIVE_URL.
 """
 import os
 import re
@@ -12,7 +12,8 @@ import httpx
 import pytest
 
 BASE_URL = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000").rstrip("/")
-TIMEOUT = 300.0  # LLM can be slow; allow 5 min per analyze
+TIMEOUT = 360.0  # LLM analyze (Issue 16)
+INGEST_TIMEOUT = float(os.environ.get("BOLA_AI_INGEST_TIMEOUT", "600"))
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_DOC_PATH = FIXTURE_DIR / "sample_project_documentation.md"
 
@@ -27,18 +28,14 @@ DOC_ENDPOINTS = {
 }
 
 
-def _health_ok_and_ollama() -> bool:
-    try:
-        r = httpx.get(f"{BASE_URL}/health", timeout=10.0)
-        return r.status_code == 200 and (r.json() or {}).get("ollama") is True
-    except Exception:
-        return False
-
-
 def _ingest_and_analyze(client: httpx.Client, query: str) -> str:
-    client.post(f"{BASE_URL}/reset")
+    client.post(f"{BASE_URL}/reset", timeout=60.0)
     doc = SAMPLE_DOC_PATH.read_text(encoding="utf-8")
-    client.post(f"{BASE_URL}/ingest", data={"content": doc, "source": "issues_test"})
+    client.post(
+        f"{BASE_URL}/ingest",
+        data={"content": doc, "source": "issues_test"},
+        timeout=INGEST_TIMEOUT,
+    )
     for attempt in range(3):
         r = client.post(f"{BASE_URL}/analyze", json={"query": query}, timeout=TIMEOUT)
         if r.status_code == 200:
@@ -51,10 +48,6 @@ def _ingest_and_analyze(client: httpx.Client, query: str) -> str:
     return (r.json() or {}).get("report", "")
 
 
-@pytest.mark.skipif(
-    not _health_ok_and_ollama(),
-    reason="Live API with Ollama required",
-)
 class TestIssuesResolved:
     """Tests that assert issue-resolution criteria from docs/ISSUES.md."""
 

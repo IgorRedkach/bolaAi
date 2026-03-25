@@ -14,6 +14,13 @@ from pathlib import Path
 import httpx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+try:
+    from bola_ai import config as _bola_config
+
+    _INGEST_T = float(_bola_config.INGEST_HTTP_TIMEOUT)
+except Exception:
+    _INGEST_T = 600.0
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 
 # (doc_basename, must_mention_substrings, must_not_contain_patterns, doc_path)
@@ -154,11 +161,23 @@ def evaluate_report(doc_name: str, report: str, must_mention: list, must_not: li
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--timeout", type=float, default=300, help="Analyze request timeout (seconds); 300 recommended for slow LLM")
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=300,
+        help="POST /analyze timeout only (LLM inference); do not use to extend ingest",
+    )
+    ap.add_argument(
+        "--ingest-timeout",
+        type=float,
+        default=None,
+        help="POST /ingest timeout (embedding/learning); default from BOLA_AI_INGEST_TIMEOUT",
+    )
     ap.add_argument("--base-url", default=os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000"))
     args = ap.parse_args()
     base = args.base_url.rstrip("/")
     timeout = args.timeout
+    ingest_timeout = float(args.ingest_timeout) if args.ingest_timeout is not None else _INGEST_T
     all_issues = []
     for doc_name, must_mention, must_not, doc_path in TEST_CASES:
         path = FIXTURES / doc_path
@@ -167,17 +186,17 @@ def main():
             continue
         content = path.read_text()
         print(f"\n=== {doc_name} ===")
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=max(60.0, timeout, ingest_timeout)) as client:
             # Reset store so this doc is the only one (avoids mixing with previous test cases)
             try:
-                r = client.post(f"{base}/reset")
+                r = client.post(f"{base}/reset", timeout=60.0)
                 if r.status_code != 200:
                     print(f"  [WARN] Reset returned {r.status_code} (continuing anyway)")
             except Exception as e:
                 print(f"  [WARN] Reset failed: {e} (continuing)")
             # Health
             try:
-                r = client.get(f"{base}/health")
+                r = client.get(f"{base}/health", timeout=30.0)
                 if r.status_code != 200:
                     print(f"  [FAIL] API health {r.status_code}")
                     all_issues.append((doc_name, ["API not healthy"]))
@@ -188,7 +207,12 @@ def main():
                 continue
             # Ingest
             try:
-                r = client.post(f"{base}/ingest", files={"content": (None, content)}, data={"source": doc_name})
+                r = client.post(
+                    f"{base}/ingest",
+                    files={"content": (None, content)},
+                    data={"source": doc_name},
+                    timeout=ingest_timeout,
+                )
                 if r.status_code != 200:
                     print(f"  [FAIL] Ingest {r.status_code}: {r.text[:200]}")
                     all_issues.append((doc_name, [f"Ingest {r.status_code}"]))
@@ -201,7 +225,11 @@ def main():
             report = None
             for attempt in range(2):
                 try:
-                    r = client.post(f"{base}/analyze", json={"query": "Identify BOLA risks and give verification steps for each."})
+                    r = client.post(
+                        f"{base}/analyze",
+                        json={"query": "Identify BOLA risks and give verification steps for each."},
+                        timeout=timeout,
+                    )
                     if r.status_code == 200:
                         data = r.json()
                         report = data.get("report", "")

@@ -20,15 +20,14 @@ rss_self
 
 echo ""
 echo "=== Step 1: run tests (tool = pytest, fake embedder) ==="
-export BOLA_AI_FAKE_EMBEDDER=1
 export PYTHONPATH=src
+export BOLA_AI_FAKE_EMBEDDER=1
 python -m pytest tests/ -v --tb=short 2>&1 | tee /tmp/bola_pytest_out.txt || true
 echo "[memory] agent after pytest:"; rss_self
 echo "[memory] tool (pytest) see session start/end above in test output"
 
 echo ""
 echo "=== Step 2: run API demo (tool = uvicorn), log memory at each request ==="
-export BOLA_AI_FAKE_EMBEDDER=1
 export BOLA_AI_LOG_MEMORY=1
 export PYTHONPATH=src
 LOG=/tmp/bola_api_log.txt

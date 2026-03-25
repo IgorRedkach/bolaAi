@@ -7,6 +7,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("BOLA_AI_DATA", "data"))
 CHROMA_PATH = DATA_DIR / "chroma"
 COLLECTION_NAME = "bola_docs"
+SHARED_DOCS_DIR = Path(os.environ.get("BOLA_AI_SHARED_DOCS_DIR", "/shared-docs"))
 
 # Ollama
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -18,6 +19,22 @@ EMBEDDING_MODEL = os.environ.get("BOLA_AI_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 # API
 API_HOST = os.environ.get("BOLA_AI_HOST", "0.0.0.0")
 API_PORT = int(os.environ.get("BOLA_AI_PORT", "8000"))
+
+# --- Inference (LLM "ready to talk"): do NOT raise these to mask slow generation — fix model/prompt/load instead.
+# Ollama chat completion max wait (seconds). Default 300; lowering is OK for fast hardware; raising is discouraged.
+LLM_CHAT_TIMEOUT_SECONDS = float(os.environ.get("BOLA_AI_LLM_CHAT_TIMEOUT", "300"))
+# HTTP client timeout for POST /analyze only — must be >= LLM_CHAT_TIMEOUT_SECONDS so the client does not abort first.
+ANALYZE_CLIENT_TIMEOUT = float(os.environ.get("BOLA_AI_ANALYZE_CLIENT_TIMEOUT", "360"))
+
+# --- Learning from documents (ingest / embedding / chunking): can be slow on CPU; separate from inference.
+# CLI and scripts use this for POST /ingest (not for /analyze).
+INGEST_HTTP_TIMEOUT = float(os.environ.get("BOLA_AI_INGEST_TIMEOUT", "600"))
+
+# --- Stack startup / training (Ollama up, model listed, first embed load): not LLM reply latency.
+# Max seconds CLI `health --wait` polls until API reports ollama ready.
+STACK_READY_WAIT_SECONDS = float(os.environ.get("BOLA_AI_STACK_WAIT_SECONDS", "900"))
+# Ollama /api/tags probe (cold start); not chat inference.
+OLLAMA_STARTUP_PROBE_TIMEOUT = float(os.environ.get("BOLA_AI_OLLAMA_STARTUP_PROBE_TIMEOUT", "60"))
 
 # Test / low-memory: use fake embedder (no sentence-transformers load)
 USE_FAKE_EMBEDDER = os.environ.get("BOLA_AI_FAKE_EMBEDDER", "").lower() in ("1", "true", "yes")

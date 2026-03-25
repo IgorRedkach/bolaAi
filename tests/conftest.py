@@ -83,3 +83,55 @@ def client(temp_data_dir):
         config.CHROMA_PATH = orig_path
         config.USE_FAKE_EMBEDDER = orig_fake
         app_mod._store = None
+
+
+# --- Live E2E is mandatory when any of these files are collected (docs/E2E_TESTING.md) ---
+_LIVE_E2E_FILES = ("test_e2e_llm.py", "test_issues_resolved.py", "test_api_live.py")
+
+
+def _live_stack_reachable() -> bool:
+    import httpx
+
+    base = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000").rstrip("/")
+    try:
+        r = httpx.get(f"{base}/health", timeout=20.0)
+        return r.status_code == 200 and (r.json() or {}).get("ollama") is True
+    except Exception:
+        return False
+
+
+def _item_path_str(item) -> str:
+    p = getattr(item, "path", None) or getattr(item, "fspath", None)
+    return str(p) if p else ""
+
+
+def pytest_collection_modifyitems(config, items):
+    """When BOLA_AI_SKIP_LIVE_E2E=1, skip live E2E files (emergency CI only)."""
+    if os.environ.get("BOLA_AI_SKIP_LIVE_E2E", "").lower() not in ("1", "true", "yes"):
+        return
+    skip = pytest.mark.skip(reason="BOLA_AI_SKIP_LIVE_E2E=1 (not default; live E2E is mandatory normally)")
+    for item in items:
+        if any(f in _item_path_str(item) for f in _LIVE_E2E_FILES):
+            item.add_marker(skip)
+
+
+def pytest_collection_finish(session):
+    """Fail fast if live E2E tests are selected but the stack is not up."""
+    if os.environ.get("BOLA_AI_SKIP_LIVE_E2E", "").lower() in ("1", "true", "yes"):
+        return
+    base = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000").rstrip("/")
+    for item in session.items:
+        name = _item_path_str(item)
+        if not any(f in name for f in _LIVE_E2E_FILES):
+            continue
+        if not _live_stack_reachable():
+            pytest.exit(
+                f"\n\n*** LIVE E2E REQUIRED ***\n"
+                f"Selected tests require a running API + Ollama at {base}.\n"
+                f"Start: cd docker && docker compose up -d\n"
+                f"Then: PYTHONPATH=src python -m bola_ai.cli health --wait\n"
+                f"Run full suite: PYTHONPATH=src pytest tests/ -v\n\n"
+                f"Emergency only (CI without GPU): BOLA_AI_SKIP_LIVE_E2E=1 pytest ...\n",
+                returncode=1,
+            )
+        break

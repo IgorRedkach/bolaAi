@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOLA AI — Chat</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #252836;
+  --border: #2e3140;
+  --text: #e4e6eb;
+  --text2: #8b8fa3;
+  --accent: #4f8cff;
+  --accent2: #3a6fd8;
+  --user-bg: #1e3a5f;
+  --bot-bg: #1a1d27;
+  --error: #e74c3c;
+  --success: #27ae60;
+  --code-bg: #161822;
+  --radius: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+/* Header */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+header .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+header .dot.offline { background: var(--error); }
+header .dot.starting { background: #f39c12; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+header .status {
+  font-size: 0.8rem;
+  color: var(--text2);
+  margin-left: auto;
+}
+/* Startup banner */
+#startup-banner {
+  background: linear-gradient(135deg, #1a1400 0%, #2a1f00 100%);
+  border-bottom: 1px solid #5a4800;
+  padding: 14px 20px;
+  text-align: center;
+  font-size: 0.88rem;
+  color: #f0d060;
+  flex-shrink: 0;
+  display: none;
+}
+#startup-banner .spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid #f0d060;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+#startup-banner.visible { display: block; }
+#input-area.disabled textarea { opacity: 0.4; pointer-events: none; }
+#input-area.disabled button { opacity: 0.3; pointer-events: none; }
+/* Messages area */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.msg {
+  max-width: 85%;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  line-height: 1.55;
+  font-size: 0.92rem;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.msg.user {
+  align-self: flex-end;
+  background: var(--user-bg);
+  border-bottom-right-radius: 4px;
+}
+.msg.bot {
+  align-self: flex-start;
+  background: var(--surface2);
+  border-bottom-left-radius: 4px;
+  max-width: 90%;
+}
+.msg.bot.error { border-left: 3px solid var(--error); }
+.msg.bot.loading {
+  color: var(--text2);
+  font-style: italic;
+}
+.msg.bot.loading::after {
+  content: '';
+  display: inline-block;
+  width: 16px; height: 16px;
+  border: 2px solid var(--text2);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Markdown inside messages */
+.msg h2 { font-size: 1.05rem; margin: 12px 0 6px; color: var(--accent); }
+.msg h3 { font-size: 0.95rem; margin: 10px 0 4px; color: var(--accent); }
+.msg h4 { font-size: 0.9rem; margin: 8px 0 4px; }
+.msg p { margin: 4px 0; }
+.msg ul, .msg ol { margin: 4px 0 4px 20px; }
+.msg li { margin: 2px 0; }
+.msg code {
+  background: var(--code-bg);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+.msg pre {
+  background: var(--code-bg);
+  padding: 10px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 0.83em;
+  border: 1px solid var(--border);
+}
+.msg pre code { background: none; padding: 0; }
+.msg table { border-collapse: collapse; margin: 8px 0; font-size: 0.85em; }
+.msg th, .msg td { border: 1px solid var(--border); padding: 4px 8px; }
+.msg th { background: var(--surface); }
+.msg strong { color: #fff; }
+.msg a { color: var(--accent); }
+.msg hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+/* Input area */
+#input-area {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 14px 20px;
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+#input-area textarea {
+  flex: 1;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 10px 14px;
+  font-size: 0.92rem;
+  font-family: inherit;
+  resize: none;
+  min-height: 44px;
+  max-height: 120px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+#input-area textarea:focus { border-color: var(--accent); }
+#input-area textarea::placeholder { color: var(--text2); }
+#send-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0 20px;
+  font-size: 0.92rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+#send-btn:hover { background: var(--accent2); }
+#send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Welcome */
+.welcome {
+  text-align: center;
+  color: var(--text2);
+  margin: auto;
+  max-width: 500px;
+}
+.welcome h2 { color: var(--text); font-size: 1.2rem; margin-bottom: 8px; }
+.welcome p { font-size: 0.9rem; margin: 4px 0; }
+.welcome .hint { margin-top: 14px; font-size: 0.82rem; opacity: 0.7; }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="health-dot"></div>
+  <h1>BOLA AI</h1>
+  <span class="status" id="status-text">Connecting...</span>
+</header>
+
+<div id="startup-banner">
+  <span class="spinner"></span>
+  Starting up — downloading model and loading knowledge base. This takes a few minutes on first run...
+</div>
+
+<div id="messages">
+  <div class="welcome" id="welcome">
+    <h2>Welcome to BOLA AI</h2>
+    <p>Local, offline BOLA vulnerability analysis</p>
+    <p>Type <strong>help</strong> for usage guide</p>
+    <p class="hint">Copy docs to shared_docs/ → say "ingest filename" → ask questions</p>
+  </div>
+</div>
+
+<div id="input-area">
+  <textarea id="user-input" placeholder="Ask about BOLA risks, type 'help', or 'ingest filename'..." rows="1"></textarea>
+  <button id="send-btn">Send</button>
+</div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('user-input');
+const sendBtn = document.getElementById('send-btn');
+const healthDot = document.getElementById('health-dot');
+const statusText = document.getElementById('status-text');
+const welcomeEl = document.getElementById('welcome');
+const startupBanner = document.getElementById('startup-banner');
+const inputArea = document.getElementById('input-area');
+let busy = false;
+let systemReady = false;
+
+function mdToHtml(md) {
+  if (!md) return '';
+  let h = md
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^---$/gm, '<hr>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Code blocks
+  h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${code.trim()}</code></pre>`);
+  // Tables
+  h = h.replace(/^\|(.+)\|$/gm, (m) => {
+    const cells = m.split('|').filter(c => c.trim());
+    if (cells.every(c => /^[\s-:]+$/.test(c))) return '';
+    const tag = 'td';
+    return '<tr>' + cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
+  });
+  h = h.replace(/(<tr>[\s\S]*?<\/tr>)/g, (m) => {
+    if (!m.trim()) return m;
+    return '<table>' + m + '</table>';
+  });
+  // Lists
+  h = h.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+  h = h.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
+  h = h.replace(/<\/ul>\s*<ul>/g, '');
+  // Numbered lists
+  h = h.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
+  // Paragraphs (remaining lines)
+  h = h.replace(/\n{2,}/g, '\n<br><br>\n');
+  h = h.replace(/\n/g, '<br>');
+  h = h.replace(/<br>\s*(<h[234]>)/g, '$1');
+  h = h.replace(/(<\/h[234]>)\s*<br>/g, '$1');
+  h = h.replace(/<br>\s*(<pre>)/g, '$1');
+  h = h.replace(/(<\/pre>)\s*<br>/g, '$1');
+  h = h.replace(/<br>\s*(<hr>)/g, '$1');
+  h = h.replace(/<br>\s*(<ul>)/g, '$1');
+  h = h.replace(/(<\/ul>)\s*<br>/g, '$1');
+  h = h.replace(/<br>\s*(<table>)/g, '$1');
+  h = h.replace(/(<\/table>)\s*<br>/g, '$1');
+  return h;
+}
+
+function addMsg(role, content, type) {
+  if (welcomeEl) welcomeEl.remove();
+  const div = document.createElement('div');
+  div.className = `msg ${role}` + (type === 'error' ? ' error' : '') + (type === 'loading' ? ' loading' : '');
+  if (role === 'bot' && type !== 'loading') {
+    div.innerHTML = mdToHtml(content);
+  } else {
+    div.textContent = content;
+  }
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || busy || !systemReady) return;
+  busy = true;
+  sendBtn.disabled = true;
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  addMsg('user', text);
+  const loader = addMsg('bot', 'Thinking...', 'loading');
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    const data = await res.json();
+    loader.remove();
+    addMsg('bot', data.content || 'No response', data.type);
+  } catch (e) {
+    loader.remove();
+    addMsg('bot', 'Connection error: ' + e.message, 'error');
+  }
+  busy = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+}
+
+sendBtn.addEventListener('click', sendMessage);
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+});
+
+function setReady(ready) {
+  systemReady = ready;
+  if (ready) {
+    startupBanner.classList.remove('visible');
+    inputArea.classList.remove('disabled');
+    inputEl.focus();
+  } else {
+    startupBanner.classList.add('visible');
+    inputArea.classList.add('disabled');
+  }
+}
+
+async function checkHealth() {
+  try {
+    const r = await fetch('/health');
+    const j = await r.json();
+    if (j.ollama) {
+      healthDot.className = 'dot';
+      statusText.textContent = `Ollama: online · ${j.documents_chunks} chunks`;
+      setReady(true);
+    } else {
+      healthDot.className = 'dot starting';
+      statusText.textContent = 'Ollama: starting...';
+      setReady(false);
+    }
+  } catch {
+    healthDot.className = 'dot offline';
+    statusText.textContent = 'Connecting...';
+    setReady(false);
+  }
+}
+
+checkHealth();
+let healthInterval = setInterval(async () => {
+  await checkHealth();
+  if (systemReady) {
+    clearInterval(healthInterval);
+    healthInterval = setInterval(checkHealth, 30000);
+  }
+}, 3000);
+</script>
+</body>
+</html>

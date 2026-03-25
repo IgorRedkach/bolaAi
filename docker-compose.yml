@@ -1,7 +1,14 @@
-# BOLA AI — DEVELOPMENT compose (builds from local source).
-# For end users: use the root docker-compose.yml instead (pulls pre-built image from ghcr.io).
-# Default: OFFLINE — no internet. Ollama just runs serve; model must already be in ollama_data volume (see docs/OFFLINE_DEPLOY.md).
-# Optional: set OLLAMA_ONLINE_SETUP=1 to pull/create model once (uses internet); then remove it and run offline.
+# BOLA AI — Quick start for users.
+# Uses the pre-built image from ghcr.io (no local build needed).
+#
+#   First run (needs internet):
+#     OLLAMA_ONLINE_SETUP=1 docker compose up -d
+#
+#   After that (fully offline):
+#     docker compose up -d
+#
+#   Open http://localhost:8000/chat and type "help".
+#
 services:
   ollama:
     image: ollama/ollama:latest
@@ -13,7 +20,7 @@ services:
           ollama serve &
           sleep 5
           if ! ollama list 2>/dev/null | grep -q bola-analyzer; then
-            echo "Creating bola-analyzer (uses internet, one-time)..."
+            echo "Creating bola-analyzer model (one-time download)..."
             ollama pull qwen2.5-coder:1.5b && ollama create bola-analyzer -f /Modelfile
           fi
           wait
@@ -25,7 +32,7 @@ services:
       - OLLAMA_ONLINE_SETUP=${OLLAMA_ONLINE_SETUP:-0}
     volumes:
       - ollama_data:/root/.ollama
-      - ./Modelfile:/Modelfile:ro
+      - ./docker/Modelfile:/Modelfile:ro
     ports:
       - "11434:11434"
     healthcheck:
@@ -36,9 +43,7 @@ services:
       start_period: 600s
 
   bola-ai:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    image: ghcr.io/igorredkach/bolai:latest
     container_name: bola-ai
     ports:
       - "8000:8000"
@@ -46,19 +51,15 @@ services:
       BOLA_AI_DATA: /data
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: bola-analyzer
-      # Set to "0" to skip RAG preload on first start (if low RAM)
       BOLA_AI_PRELOAD: "1"
-      # DEBUG for more logs
       BOLA_AI_LOG_LEVEL: "INFO"
     volumes:
       - app_data:/data
-      - ../shared_docs:/shared-docs
-      # Mount local src for latest code (e.g. logging) without rebuilding
-      - ../src:/app/src:ro
+      - ./shared_docs:/shared-docs
     depends_on:
       ollama:
         condition: service_healthy
 
 volumes:
-  ollama_data:   # Model cache; wipe if you want to remove models
-  app_data:      # Chroma + ephemeral data; wipe after analysis
+  ollama_data:
+  app_data:

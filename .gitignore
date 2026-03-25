@@ -4,6 +4,13 @@ data/*.db
 *.db
 chroma/
 
+# Shared docs: user-supplied API docs (not committed); keep .gitkeep
+shared_docs/*
+!shared_docs/.gitkeep
+
+# Inbox: scratch/staging area
+inbox/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -22,6 +29,10 @@ env/
 *.swp
 *.swo
 
+# Agent E2E loop artifacts (regenerated each loop)
+docs/e2e_loop_last_run.json
+docs/live_e2e_test_timings.md
+
 # Testing
 .coverage
 htmlcov/
@@ -35,3 +46,7 @@ models/
 # Env
 .env
 .env.local
+
+# OS
+.DS_Store
+Thumbs.db

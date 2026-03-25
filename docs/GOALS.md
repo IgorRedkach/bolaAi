@@ -2,7 +2,7 @@
 
 ## Mission
 
-Build a **free, local-only AI security tool** for government and regulated organizations (e.g., healthcare, finance, government agencies) in the United States. The tool helps reduce security and compliance risk by analyzing documentation, schemas, and APIs to predict **Broken Object-Level Authorization (BOLA)** and related issues, then either tests automatically or gives auditors clear, actionable verification steps.
+Build a **world-class, portable, local-only AI security tool** for government and regulated organizations (e.g., healthcare, finance, government agencies) in the United States. The tool helps keep **critical systems safe** (national interests) by reducing security and compliance risk: it analyzes documentation, schemas, and APIs to predict **Broken Object-Level Authorization (BOLA)** and related issues, then either tests automatically or gives auditors clear, actionable verification steps. **Quality is non-negotiable:** no shortcuts, no cutting content or relaxing criteria to make steps “pass”; problems (timeouts, failures, poor output) must be **analyzed and fixed at the root**, not worked around.
 
 ## Primary Risk Focus: BOLA (Broken Object-Level Authorization)
 
@@ -79,13 +79,25 @@ These illustrate the kinds of issues the tool is meant to help find and verify.
 - Can be **trained or adapted** on BOLA patterns and organizational docs via local data and optional fine-tuning.
 - **Easy to tear down**: one workflow to wipe volumes and remove the container when the analysis is complete.
 - **Deployable by chunks:** There is a documented and scripted way to export the built image (and model data) as chunked files, transfer them to another machine (e.g. without internet), reassemble, and run the stack locally.
+- **Shared-volume document intake:** Users can place documentation in the Docker-shared docs path and ingest by relative filename (no manual paste required), including agent E2E loops.
+- **Self-verification before answer:** The tool **verifies its own results** before returning an answer to the customer, from a **critical perspective**, to reduce hallucinations. For example: check that every endpoint or resource mentioned in the report appears in the ingested documentation; flag or correct invented paths, wrong verification logic (e.g. 401/404 used to “confirm” BOLA), or off-topic findings; **REST-only docs:** strip invented **GraphQL** code fences in `runner._normalize_report` when context states no GraphQL / REST-only. This may be implemented as post-processing (e.g. normalization, path grounding, validation rules) and/or prompt instructions so that outputs are critically checked against the provided context before being shown to the user.
 
-All agents and LLMs used in the project should align with these goals: no internet at runtime, BOLA-focused, auditor-friendly, and disposable.
+All agents and LLMs used in the project should align with these goals: no internet at runtime, BOLA-focused, auditor-friendly, disposable, and **no quality tricks** (no shortening prompts, cutting scope, or relaxing bar to avoid failures—fix root causes instead).
+
+---
+
+## Goal governance (do not delete user goals)
+
+- Existing goals in this file are **append-only** unless the user explicitly asks to delete a goal.
+- Agents may **edit wording** for clarity, split one goal into multiple goals, or mark a goal as superseded/deprecated, but they must keep the original intent traceable in this file.
+- If a goal is replaced, keep an explicit note like: `Supersedes: <old goal text/ID>` instead of deleting history.
+- If an agent thinks a goal is obsolete and the user did not request deletion, move it to a short **Deprecated goals** subsection instead of removing it.
 
 ---
 
 ## Goals checklist (implementation)
 
+- [x] **E2E always live:** `pytest tests/` **requires** a running API + Ollama when live E2E files are collected (see docs/E2E_TESTING.md); no silent skip. Unit-only runs exclude those files. In-process tests use fake embedder where applicable (docs/MEMORY.md).
 - [x] **No internet at runtime** — Tool does not send any requests to the open internet; runs autonomously offline.
 - [x] Free, local-only tool
 - [x] BOLA-focused analysis with verification steps
@@ -98,8 +110,27 @@ All agents and LLMs used in the project should align with these goals: no intern
 - [x] Strategy that tool consumes less than 10 GB
 - [x] Train/adapt via RAG knowledge base + generated training data (generate_data.py, load_knowledge.py)
 - [x] API + CLI for terminal and scripted use (run every time via `python -m bola_ai.cli` or `bola-ai`)
-- [x] Low-memory option (BOLA_AI_FAKE_EMBEDDER, docs/MEMORY.md)
 - [x] Automation tests (pytest with fake embedder). Do not wipe and delete container for test purposes on every test run only when specifically wiping is tested.
 - [x] **Trained, ready-to-go container:** RAG preloaded with BOLA knowledge; Ollama model `bola-analyzer` from Modelfile. For offline: use pre-loaded Ollama volume or optional online setup profile to pull model once, then run offline.
 - [x] Communicate with the model to give fake system info and get suggestions.
 - [x] **Download built image by chunks:** Scripts and docs to export image (and optional model volume) as chunked files, transfer to air-gapped machine, reassemble, and run locally (see docs/OFFLINE_DEPLOY.md and scripts/).
+- [x] **Self-verification before answer:** Tool verifies its own results before answering the customer (path grounding, redaction of unknown endpoints, correction of 401/404 BOLA logic, two-token verification phrasing) to reduce hallucinations. Implemented in `runner.py` via `_normalize_report`; can be extended with additional validation (e.g. explicit checklist before return).
+- [x] **No quality shortcuts:** Agent and development process require analyzing and fixing root causes for failures (timeouts, bad output); no shortening queries, cutting content, or relaxing criteria to make steps “pass.” Documented in GOALS and agent prompt.
+- [x] **Timeouts split (Issue 17):** Longer waits for **ingest**, **stack startup**, and **training load**; **LLM inference** timeout (`BOLA_AI_LLM_CHAT_TIMEOUT`) not increased to mask slow replies — improve model/prompt/hardware instead.
+- [x] **Agent E2E loop:** Each quality loop uses **new** generated docs, **new** person-style questions, and **expectations tied only to that run’s data** (see AGENT_PROMPT_FULL_CYCLE.md E). E2E-loop failures are **`[E2E-LOOP]`** issues with tests in **`tests/test_e2e_loop_failures.py`**, run **separately** from `test_issues_resolved.py`.
+- [x] **Failures/interruptions → OPEN issues:** Failed or interrupted loops create **OPEN** tasks in ISSUES.md; the next loop continues until those (and goals) are satisfied — see AGENT_PROMPT hard requirement 3b.
+- [x] **Progress writes OK, stopping is not:** Agents may document what’s done mid-loop but must **continue** until OPEN issues, goals, and improvements are cleared — see AGENT_PROMPT (“Progress notes vs stopping”).
+- [x] **Weak-place registry:** Gaps are tracked in **`docs/AGENT_WEAK_PLACES.md`**; **OPEN** rows block “done”; agents **chain fix → re-verify loops** in-session per **`docs/AGENT_PROMPT_FULL_CYCLE.md`** and **`docs/ANALYSIS_AGENT_LOOP_STOP_GAP.md`**.
+- [x] **Goal immutability by default:** Agents must not delete user-defined goals from `docs/GOALS.md` unless the user explicitly requests deletion; goals are edited/superseded with traceability.
+- [x] **Shared Docker volume ingestion workflow:** Users can provide docs by copying files into shared docs volume/path (`shared_docs` ↔ `/shared-docs`), then ingest via API/CLI (`POST /ingest_shared`, `bola-ai ingest-shared`). Agent E2E uses this path by default.
+
+---
+
+## Interactive Web Chat Interface
+
+- [x] **Web chat UI:** Interactive chat page at `/chat` (same port 8000) where users can converse with the BOLA agent in natural language. Messages and responses displayed in a chat bubble layout with markdown rendering. Works fully offline (no CDN dependencies).
+- [x] **Smart message routing:** Backend `/api/chat` endpoint that intelligently routes user messages: ingest commands trigger document ingestion from shared volume; help/usage questions return guidance; analysis questions go to the LLM; status/reset commands are handled directly.
+- [x] **Shared docs awareness:** Users can say "I copied files to the volume" or "list files" and the tool responds with available documents and offers to ingest them. `GET /api/shared_docs` endpoint lists files in the shared docs directory.
+- [x] **Usage guidance:** When asked "how do I use this tool?" or "help", the tool returns clear, structured guidance covering all features (ingest, analyze, shared docs, reset, chat commands). This makes the tool self-documenting for new users.
+- [x] **Manual web E2E verification:** Agent prompt E2E includes a step to open `http://localhost:8000/chat` in a browser and verify the chat interface works (send a message, see response, test ingest command). Documented in `docs/E2E_TESTING.md`.
+- [x] **Startup loading indicator:** When Ollama is not yet ready (model downloading, container booting), the chat UI shows a clear loading/startup state instead of appearing broken. The health dot turns red/amber, a banner explains the system is starting up, and chat input is disabled until the backend is healthy. Prevents user confusion during first-run model download.
