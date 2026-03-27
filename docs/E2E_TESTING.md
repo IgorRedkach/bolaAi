@@ -8,6 +8,26 @@ Runs after pytests and any manual test scripts when you are doing full quality s
 
 Quality is validated on the **real** stack, not optional mocks.
 
+---
+
+## MANDATORY: Pre-commit/pre-deploy E2E gate (WP-022)
+
+**NO code change may be committed or pushed without completing a full E2E cycle.** This is non-negotiable. Unit tests passing alone is NOT sufficient. The following must ALL be true before `git commit`:
+
+1. Shared folder cleaned (only `.gitkeep`)
+2. Fresh test data generated (new API doc with unique endpoints)
+3. Expected risks listed before running
+4. Stack restarted or reset + ingest via chat/API
+5. Analysis run with per-response R1-R7 checklist
+6. Strict coverage verified: every expected risk has matching finding
+7. Wider communication: 6+ analysis calls including follow-ups
+8. Web UI verification: all 7 manual checks pass
+9. No hallucinated endpoints in any response
+
+**Why this exists:** Agent repeatedly pushed code after unit tests without E2E, leading to 3 production bugs (BUG-003, source filter gap, BUG-004) caught only by the user. See WP-022.
+
+---
+
 ## Files that require a live stack
 
 Confirm against current repo layout before you run:

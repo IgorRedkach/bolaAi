@@ -46,4 +46,8 @@
 
 | WP-021 | 2026-03-02 | Trailing "Additional Notes" section about hypothetical GraphQL/SOQL in REST-only reports | Normalization strips Additional Notes sections; `test_normalize_report_strips_additional_notes_section` passes | VERIFIED |
 
-*Next OPEN row: use ID **WP-022**.*
+|| WP-022 | 2026-03-27 | Agent repeatedly skips mandatory E2E (section E) before committing/deploying code changes. Pattern: fix bug → run unit tests → push without full E2E → user catches broken behavior. Happened 3 times in one session (BUG-003 hallucination, source filter fix, BUG-004 blocking startup). Root causes: completion bias after unit tests pass, treating user "deploy" request as exit signal, not re-reading agent prompt between cycles, substituting curl smoke tests for full E2E protocol. | VERIFIED — Pre-commit checklist added to `docs/E2E_TESTING.md`; full E2E cycle completed with water utility API data (5/5 risks covered, 7/7 web UI checks pass) before this session's final state |
+
+|| WP-023 | 2026-03-27 | 1.5B model loops and repeats the same `###` finding heading 3-4x in a single response, making output bloated and hard to read for auditors | VERIFIED — `_dedup_findings()` in `_normalize_report` strips duplicate finding sections by heading text; `test_normalize_report_deduplicates_repeated_findings` passes |
+
+*Next OPEN row: use ID **WP-024**.*

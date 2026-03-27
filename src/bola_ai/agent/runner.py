@@ -268,6 +268,26 @@ def _normalize_report(
             result.append(section)
         return "".join(result)
     report = _dedup_subheadings(report)
+    # WP-023: Strip duplicate ### finding sections (same heading text repeated).
+    # The 1.5B model often loops and emits the same finding 3-4x.
+    def _dedup_findings(report_text: str) -> str:
+        heading_positions = [m.start() for m in re.finditer(r"(?m)^###\s", report_text)]
+        if not heading_positions:
+            return report_text
+        prefix = report_text[: heading_positions[0]]
+        boundaries = heading_positions + [len(report_text)]
+        seen: set[str] = set()
+        kept: list[str] = [prefix]
+        for i in range(len(heading_positions)):
+            section = report_text[boundaries[i] : boundaries[i + 1]]
+            heading_line = section.split("\n", 1)[0].strip().lower()
+            heading_line = re.sub(r"\*+", "", heading_line).strip()
+            if heading_line in seen:
+                continue
+            seen.add(heading_line)
+            kept.append(section)
+        return "".join(kept)
+    report = _dedup_findings(report)
     # WP-015: "Call with an invalid token" tests authentication, not BOLA.
     # Replace with the correct two-valid-user phrasing.
     report = re.sub(

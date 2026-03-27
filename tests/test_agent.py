@@ -496,3 +496,28 @@ def test_normalize_report_strips_additional_notes_section():
     assert "GraphQL operations" not in out
     assert "/aid/v1/students" in out
 
+
+def test_normalize_report_deduplicates_repeated_findings():
+    """WP-023: Duplicate ### finding headings (same endpoint repeated 3-4x by model) must be deduped."""
+    raw = (
+        "## Potential findings\n\n"
+        "### GET /water/v2/customers/{customerId}\n"
+        "**Rationale:** No ownership check.\n"
+        "**Verification steps:** Use two tokens.\n\n"
+        "### GET /water/v2/districts/{districtId}/customers\n"
+        "**Rationale:** No district filter.\n\n"
+        "### GET /water/v2/customers/{customerId}\n"
+        "**Rationale:** No ownership check (repeated).\n\n"
+        "### GET /water/v2/districts/{districtId}/customers\n"
+        "**Rationale:** No district filter (repeated).\n\n"
+        "### GET /water/v2/customers/{customerId}\n"
+        "**Rationale:** Third copy.\n\n"
+    )
+    out = _normalize_report(raw)
+    assert out.count("### GET /water/v2/customers/{customerId}") == 1
+    assert out.count("### GET /water/v2/districts/{districtId}/customers") == 1
+    assert "No ownership check." in out
+    assert "No district filter." in out
+    assert "repeated" not in out
+    assert "Third copy" not in out
+
