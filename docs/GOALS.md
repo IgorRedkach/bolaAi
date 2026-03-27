@@ -143,3 +143,10 @@ All agents and LLMs used in the project should align with these goals: no intern
 - [x] **Analysis requires user documents:** The tool must NEVER run BOLA analysis if only preloaded RAG knowledge exists (no user documents ingested). Instead, it returns clear instructions: list available files, suggest ingesting them. Prevents hallucinated findings from generic training data.
 - [x] **Broader ingest vocabulary:** The tool understands a wide range of natural language phrases for ingesting files: "get my files", "investigate my documents", "take a look", "scan the folder", "check my docs", "analyze my files", "read the documents", "look at my files", "process the docs", etc. All trigger bulk ingest from the shared folder.
 - [x] **Chat history persistence:** Chat conversation is preserved across page reloads via localStorage. A "Clear" button lets users wipe history.
+
+---
+
+## Startup Reliability & Testing Process
+
+- [x] **Non-blocking auto-ingest:** Auto-ingest runs in a background thread so the server starts accepting connections immediately. Health endpoint reports `auto_ingest_status` for UI progress display.
+- [ ] **All-in-one image smoke test in E2E:** Any feature that touches startup behavior, embedding, or store initialization MUST be validated against the actual all-in-one image (cold start, real embedder), not just the dev stack or unit tests with FakeEmbedder. Prevents "works in dev, breaks in prod" regressions.

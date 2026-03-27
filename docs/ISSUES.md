@@ -377,3 +377,21 @@ chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than m
 5. Add `source_filter` to `DocStore.search()` — when analyzing, only retrieve chunks from user-ingested documents, preventing training data from contaminating results
 
 ---
+
+## BUG-004: Auto-ingest blocks server startup — tool unresponsive on fresh image (OPEN → FIXED)
+
+**Reported:** User pulled fresh `ghcr.io/igorredkach/bolai:latest`, placed a file in shared docs, started container. Logs show "Auto-ingest: found 1 file(s)..." then the embedder model loading (~2 min), then "RAG store ready; chunks=439" — but the server never starts serving HTTP requests.
+
+**Root cause:** `_auto_ingest_shared_docs()` ran synchronously inside the FastAPI `lifespan` context manager. The lifespan doesn't `yield` (i.e., the server doesn't start accepting connections) until auto-ingest completes. In the all-in-one image, the first call to `get_store()` triggers real embedder model loading (~2 min), then `add_document()` embeds all user doc chunks (more minutes). Total startup block: 3-5+ minutes during which the server is completely dead.
+
+**Why it was missed in testing:**
+1. Unit tests use `FakeEmbedder` — instant, no real model loading
+2. Dev Docker stack has the embedder model cached — loads in seconds
+3. Only the fresh all-in-one image (the user's actual deployment path) hits the cold-start delay
+4. No test existed that validated the server becomes responsive during auto-ingest
+
+**Fix:** Move auto-ingest into a background `threading.Thread(daemon=True)` that starts during lifespan but doesn't block the `yield`. The server starts serving immediately. The health endpoint reports `auto_ingest_status` so the UI shows progress.
+
+**Process improvement:** Add goal requiring that any feature touching startup must be tested against the actual all-in-one image flow, not just the dev stack.
+
+---

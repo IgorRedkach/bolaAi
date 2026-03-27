@@ -416,12 +416,19 @@ async function checkHealth() {
     const r = await fetch('/health');
     const j = await r.json();
     if (j.ollama) {
-      healthDot.className = 'dot';
+      const ais = j.auto_ingest_status || 'done';
       const ud = j.user_documents || 0;
-      statusText.textContent = ud > 0
-        ? `Online · ${j.documents_chunks} chunks · ${ud} doc(s) ingested`
-        : `Online · ${j.documents_chunks} chunks · No user docs`;
-      setReady(true);
+      if (ais !== 'idle' && ais !== 'done') {
+        healthDot.className = 'dot starting';
+        statusText.textContent = `Online · Auto-ingesting docs...`;
+        setReady(true);
+      } else {
+        healthDot.className = 'dot';
+        statusText.textContent = ud > 0
+          ? `Online · ${j.documents_chunks} chunks · ${ud} doc(s) ingested`
+          : `Online · ${j.documents_chunks} chunks · No user docs`;
+        setReady(true);
+      }
     } else {
       healthDot.className = 'dot starting';
       statusText.textContent = 'Ollama: starting...';

@@ -290,7 +290,8 @@ def test_chat_reset_clears_user_docs(chat_client, tmp_path):
 # --- Auto-ingest on startup ---
 
 def test_auto_ingest_on_startup(tmp_path):
-    """App auto-ingests files from shared docs on startup."""
+    """App auto-ingests files from shared docs on startup (background thread)."""
+    import time
     from unittest.mock import patch
     from bola_ai.api import app as app_mod
     from bola_ai import config as cfg
@@ -309,12 +310,21 @@ def test_auto_ingest_on_startup(tmp_path):
         from fastapi.testclient import TestClient
         a = create_app()
         with TestClient(a) as client:
+            for _ in range(60):
+                if app_mod._auto_ingest_status == "done":
+                    break
+                time.sleep(0.5)
+
+            assert app_mod._auto_ingest_status == "done", (
+                f"Auto-ingest did not complete: {app_mod._auto_ingest_status}"
+            )
             assert app_mod.has_user_docs()
             assert "net_log.md" in app_mod._user_doc_sources
             assert "har.md" in app_mod._user_doc_sources
 
             r = client.get("/health")
             assert r.json()["user_documents"] == 2
+            assert r.json()["auto_ingest_status"] == "done"
 
     app_mod._store = None
     app_mod._user_doc_sources.clear()

@@ -1,6 +1,7 @@
 """FastAPI app: ingest, analyze, health."""
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -53,18 +54,30 @@ def _track_user_doc(source: str) -> None:
     _user_doc_sources.add(source)
 
 
+_auto_ingest_status: str = "idle"
+
+
 def _auto_ingest_shared_docs():
-    """Auto-ingest files from shared docs folder."""
+    """Auto-ingest files from shared docs folder (runs in background thread)."""
+    global _auto_ingest_status
     shared_root = app_config.SHARED_DOCS_DIR.resolve()
     if not shared_root.exists():
         logger.info("Auto-ingest: shared docs dir not found (%s)", shared_root)
+        _auto_ingest_status = "done"
         return
     files = [f for f in sorted(shared_root.iterdir()) if f.is_file() and not f.name.startswith(".")]
     if not files:
         logger.info("Auto-ingest: no files in shared docs")
+        _auto_ingest_status = "done"
         return
+    _auto_ingest_status = f"ingesting {len(files)} file(s)..."
     logger.info("Auto-ingest: found %d file(s) in shared docs, ingesting...", len(files))
-    store = get_store()
+    try:
+        store = get_store()
+    except Exception as e:
+        logger.error("Auto-ingest: failed to initialize store: %s", e)
+        _auto_ingest_status = f"error: {e}"
+        return
     for f in files:
         try:
             text = f.read_text(encoding="utf-8")
@@ -75,13 +88,17 @@ def _auto_ingest_shared_docs():
             logger.warning("Auto-ingest: skipped %s (not UTF-8)", f.name)
         except Exception as e:
             logger.warning("Auto-ingest: failed %s: %s", f.name, e)
+    _auto_ingest_status = "done"
     logger.info("Auto-ingest: done. User docs: %s, total chunks: %d",
                  list(_user_doc_sources), store.count())
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _auto_ingest_shared_docs()
+    global _auto_ingest_status
+    _auto_ingest_status = "starting"
+    t = threading.Thread(target=_auto_ingest_shared_docs, daemon=True)
+    t.start()
     yield
 
 
@@ -99,15 +116,21 @@ def create_app() -> FastAPI:
     def health():
         from bola_ai.agent.llm import is_available
         ollama_ok = is_available()
-        store = get_store()
-        logger.info("Health check: ollama=%s chunks=%s user_docs=%s",
-                     ollama_ok, store.count(), len(_user_doc_sources))
+        ingesting = _auto_ingest_status not in ("idle", "done")
+        try:
+            store = get_store()
+            chunks = store.count()
+        except Exception:
+            chunks = 0
+        logger.info("Health check: ollama=%s chunks=%s user_docs=%s auto_ingest=%s",
+                     ollama_ok, chunks, len(_user_doc_sources), _auto_ingest_status)
         return {
             "status": "ok",
             "ollama": ollama_ok,
-            "documents_chunks": store.count(),
+            "documents_chunks": chunks,
             "user_documents": len(_user_doc_sources),
             "user_doc_sources": sorted(_user_doc_sources),
+            "auto_ingest_status": _auto_ingest_status,
         }
 
     @app.post("/reset")
