@@ -134,3 +134,12 @@ All agents and LLMs used in the project should align with these goals: no intern
 - [x] **Usage guidance:** When asked "how do I use this tool?" or "help", the tool returns clear, structured guidance covering all features (ingest, analyze, shared docs, reset, chat commands). This makes the tool self-documenting for new users.
 - [x] **Manual web E2E verification:** Agent prompt E2E includes a step to open `http://localhost:8000/chat` in a browser and verify the chat interface works (send a message, see response, test ingest command). Documented in `docs/E2E_TESTING.md`.
 - [x] **Startup loading indicator:** When Ollama is not yet ready (model downloading, container booting), the chat UI shows a clear loading/startup state instead of appearing broken. The health dot turns red/amber, a banner explains the system is starting up, and chat input is disabled until the backend is healthy. Prevents user confusion during first-run model download.
+
+---
+
+## User Document Awareness & Analysis Integrity
+
+- [x] **Auto-ingest on startup:** When the container starts and files exist in the shared docs folder (`/shared-docs`), auto-ingest them so the user doesn't have to manually say "ingest". The chat UI shows what was auto-ingested. Health endpoint reports `user_documents` count and `user_doc_sources`.
+- [x] **Analysis requires user documents:** The tool must NEVER run BOLA analysis if only preloaded RAG knowledge exists (no user documents ingested). Instead, it returns clear instructions: list available files, suggest ingesting them. Prevents hallucinated findings from generic training data.
+- [x] **Broader ingest vocabulary:** The tool understands a wide range of natural language phrases for ingesting files: "get my files", "investigate my documents", "take a look", "scan the folder", "check my docs", "analyze my files", "read the documents", "look at my files", "process the docs", etc. All trigger bulk ingest from the shared folder.
+- [x] **Chat history persistence:** Chat conversation is preserved across page reloads via localStorage. A "Clear" button lets users wipe history.

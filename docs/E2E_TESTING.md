@@ -26,9 +26,47 @@ PYTHONPATH=src python -m bola_ai.cli health --wait
 PYTHONPATH=src pytest tests/ -v
 ```
 
-If you cannot run live tests, create an **OPEN** issue, stop the current “done” narrative, fix the blocker, and start a new improvement loop.
+If you cannot run live tests, create an **OPEN** issue, stop the current "done" narrative, fix the blocker, and start a new improvement loop.
 
 Live E2E is not skipped by default; if the environment truly cannot run them, document that in open  ISSUES and start a new improvement loop.
+
+---
+
+## Critical: shared folder lifecycle in E2E
+
+Every E2E cycle **must** follow this exact sequence to prevent hallucinated findings:
+
+### 1. Clean shared folder
+Remove ALL files from `shared_docs/` (the host-side folder) **before** starting the stack. Only `.gitkeep` should remain.
+
+```bash
+rm -f shared_docs/*.md shared_docs/*.txt shared_docs/*.har
+ls shared_docs/   # should show only .gitkeep
+```
+
+### 2. Generate fresh test data
+Either pick an existing fixture from `tests/fixtures/` or generate a new one. The test document must contain specific, unique API endpoints so you can verify the tool references **your** document and not generic training data.
+
+### 3. Copy to shared_docs/ and start (or restart) the stack
+```bash
+cp tests/fixtures/doc_banking_api.md shared_docs/
+docker compose restart bola-ai   # triggers auto-ingest on startup
+```
+
+Or, if the container is already running, use the chat:
+```
+You: ingest
+Bot: Ingested 1 file(s) from shared_docs/ (N total chunks): ...
+```
+
+### 4. Verify auto-ingest happened
+```bash
+curl -s http://localhost:8000/health | python -m json.tool
+```
+Check that `user_documents` > 0 and `user_doc_sources` lists your file(s).
+
+### 5. Verify analysis guard works
+Before ingesting (or after reset), any analysis question should return a `type: "info"` response saying "No documents have been ingested yet" — NOT an analysis. This prevents hallucination from generic training data.
 
 ---
 
@@ -36,43 +74,55 @@ Live E2E is not skipped by default; if the environment truly cannot run them, do
 
 1. **Fresh documentation every meaningful E2E cycle**  
    Generate new test documentation from scratch for that run: think through the **system under test**, **plausible BOLA angles**, and **what you expect** the tool to surface before you write the doc.  
-   **Required intake path:** copy the doc into the shared Docker docs path (`shared_docs` on host, mounted to `/shared-docs` in container), then ingest via **`POST /ingest_shared`** (or CLI `bola-ai ingest-shared`) after **`POST /reset`**.
+   **Required intake path:** copy the doc into the shared Docker docs path (`shared_docs` on host, mounted to `/shared-docs` in container), then either let auto-ingest handle it on startup, or say "ingest" in the chat after **`reset`**.
 
-2. **Reports match tool goals**  
+2. **Analysis requires user documents**  
+   The tool must **refuse** to run BOLA analysis if no user documents are ingested. It must show a message listing available files and how to ingest them. This is the guard against hallucinated findings from generic training data.
+
+3. **Reports match tool goals**  
    Responses should stay **BOLA-focused**, include **actionable verification steps**, and stay **grounded** in the ingested doc (paths, methods, no invented GraphQL/SOQL when the doc is REST-only, etc. — see **`docs/GOALS.md`**).
 
-3. **Primary method: adaptive person-style E2E (not “the script = the test”)**  
-   think about possible question a person can ask for more details and support according to the generated context. Evaluate after each tool response. And verify responses according to the expectations you believe are correct for the context
+4. **Answers are grounded in generated data**  
+   After ingesting your test doc, verify that:
+   - Endpoints mentioned in the report **exist** in your test document
+   - The tool does NOT mention endpoints from other fixtures or training data
+   - Verification steps reference the correct HTTP methods and paths from YOUR doc
+
+5. **Primary method: adaptive person-style E2E (not "the script = the test")**  
+   Think about possible questions a person can ask for more details and support according to the generated context. Evaluate after each tool response. And verify responses according to the expectations you believe are correct for the context.
 
    **How adaptive E2E should work:**
 
    | Step | What you do |
    |------|----------------|
+   | **Clean shared folder** | Remove all files except `.gitkeep`. |
    | **Start the stack** | Docker up, health OK. |
-   | **Pass generated data** | Reset → copy doc to `shared_docs/` → ingest with **`POST /ingest_shared`** using relative filename. |
-   | **First request** | One **`POST /analyze`** with a natural question tied to that doc (e.g. auditor angle on ID abuse). |
-   | **Read the answer** | Judge it against **your scenario**: coverage, grounding, verification logic (e.g. two valid tokens vs 401/404-only). |
-   | **Next request from context** | Ask a **new** question **informed by what the model just said** (deeper steps, challenge a finding, ask for curls with fake tokens, ask for a runbook, ask it to audit its own paths). **Separate request each time** — do not hide a long chain inside one opaque script unless you are only using the script as a smoke baseline. |
-   | **Repeat** | Continue **analyse response → decide next question → send next `POST /analyze`** until you are satisfied the tool has been **exercised enough** for this doc (several turns, not a fixed number — often **more** than six if answers were shallow or drifted). |
-   | **Per-response analysis** | For **every** tool response, briefly note: grounded? BOLA-relevant? verification sound? regressions vs earlier answers in the same session? |
+   | **Verify guard** | Ask a BOLA question — should get "No documents ingested" response. |
+   | **Pass generated data** | Copy doc to `shared_docs/`. Say "ingest" in chat (or restart for auto-ingest). |
+   | **Verify ingest** | Check health endpoint: `user_documents` > 0. |
+   | **First request** | One analysis question tied to that doc. |
+   | **Read the answer** | Judge it against **your scenario**: coverage, grounding, verification logic. |
+   | **Next request from context** | Ask a **new** question **informed by what the model just said**. |
+   | **Repeat** | Continue until satisfied the tool has been exercised enough. |
+   | **Per-response analysis** | For **every** response: grounded? BOLA-relevant? verification sound? |
 
-   **When to stop (“tested enough” for this cycle):** You have probed **follow-ups**, **edge of doc** (e.g. batch endpoints), and **hallucination risk** (paths in answer vs ingested text); you are not stopping only because the first reply “looked fine.”
-
-4. **Improvements become work items**  
-   Anything that should change product or process or possible improvements you see  → **`docs/ISSUES.md`** (bugs, `[E2E-LOOP]` if script-level regression) and/or **`docs/GOALS.md`** (new or tightened success criteria).
+6. **Improvements become work items**  
+   Anything that should change product or process → **`docs/ISSUES.md`** and/or **`docs/GOALS.md`**.
 
 ---
 
-## NO Scripted minimum (smoke should be created but not as a substitude for the e2e test described before)
+## NO Scripted minimum (smoke should be created but not as a substitute for the e2e test described before)
 
-`scripts/run_agent_e2e_loop_once.py` enforces **6** separate **`POST /analyze`** calls (3 persona questions + runbook/200–403 + fake-token curls + path self-audit) for a chosen fixture. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
+`scripts/run_agent_e2e_loop_once.py` enforces **6** separate analysis calls. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
 
-By default the script now stages the selected fixture into `shared_docs/` and ingests via **`POST /ingest_shared`** (set `BOLA_AI_E2E_USE_SHARED_VOLUME=0` only for debugging legacy behavior).
+The script now:
+1. Cleans `shared_docs/` before starting
+2. Stages the fixture into `shared_docs/`
+3. Verifies auto-ingest or explicitly ingests via chat
+4. Verifies answers reference the ingested document's endpoints
 
 Log output: **`docs/e2e_loop_last_run.json`**.
 Release sign-off = full **`pytest tests/`** with stack up.
-
-**Agents:** If live E2E cannot complete, or **OPEN** issues / unresolved goals remain, start new loop according **`AGENT_PROMPT_FULL_CYCLE.md`** §3b.
 
 ---
 
@@ -81,12 +131,12 @@ Release sign-off = full **`pytest tests/`** with stack up.
 After API-level E2E completes, verify the **interactive web chat** works:
 
 1. **Open `http://localhost:8000/chat`** in a browser (or use browser automation).
-2. **Verify page loads:** Header shows "BOLA AI" with a green status dot. Welcome message is visible.
+2. **Verify page loads:** Header shows "BOLA AI" with a green status dot. Welcome message is visible. Status shows user doc count.
 3. **Test "help" command:** Type `help` and send. Verify the usage guide appears with sections: Getting Started, Commands, Example Conversation, Tips.
-4. **Test "list files" command:** Type `list files` and send. Verify the shared docs listing appears.
-5. **Test "ingest" command:** Type `ingest <filename>` (using a file from the listing). Verify the success message shows character count and chunk count.
-6. **Test analysis question:** Type a BOLA-related question. Verify the response appears (may take 1-4 minutes) with markdown formatting (headings, bold, code blocks).
-7. **Test "status" command:** Type `status`. Verify system info appears (Ollama status, chunk count).
+4. **Test analysis guard:** After reset, type a BOLA question. Verify you get "No documents have been ingested yet" (NOT an analysis).
+5. **Test broad ingest phrases:** Type "get the files" or "investigate my documents" or "take a look". Verify bulk ingest is triggered.
+6. **Test analysis question:** Type a BOLA-related question. Verify the response references endpoints from the ingested document.
+7. **Test "status" command:** Type `status`. Verify system info includes user document count and source names.
 
 **Pass criteria:** All 7 steps succeed. The chat UI renders markdown correctly, auto-scrolls, and the loading spinner appears during analysis.
 

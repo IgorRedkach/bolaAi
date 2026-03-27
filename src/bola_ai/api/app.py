@@ -1,6 +1,7 @@
 """FastAPI app: ingest, analyze, health."""
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,7 @@ from bola_ai.rag.store import DocStore
 
 # Lazy singleton store
 _store: Optional[DocStore] = None
+_user_doc_sources: set[str] = set()
 
 
 def get_store() -> DocStore:
@@ -43,6 +45,46 @@ def get_store() -> DocStore:
     return _store
 
 
+def has_user_docs() -> bool:
+    return len(_user_doc_sources) > 0
+
+
+def _track_user_doc(source: str) -> None:
+    _user_doc_sources.add(source)
+
+
+def _auto_ingest_shared_docs():
+    """Auto-ingest files from shared docs folder."""
+    shared_root = app_config.SHARED_DOCS_DIR.resolve()
+    if not shared_root.exists():
+        logger.info("Auto-ingest: shared docs dir not found (%s)", shared_root)
+        return
+    files = [f for f in sorted(shared_root.iterdir()) if f.is_file() and not f.name.startswith(".")]
+    if not files:
+        logger.info("Auto-ingest: no files in shared docs")
+        return
+    logger.info("Auto-ingest: found %d file(s) in shared docs, ingesting...", len(files))
+    store = get_store()
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8")
+            store.add_document(text, source=f.name)
+            _track_user_doc(f.name)
+            logger.info("Auto-ingest: %s (%d chars)", f.name, len(text))
+        except UnicodeDecodeError:
+            logger.warning("Auto-ingest: skipped %s (not UTF-8)", f.name)
+        except Exception as e:
+            logger.warning("Auto-ingest: failed %s: %s", f.name, e)
+    logger.info("Auto-ingest: done. User docs: %s, total chunks: %d",
+                 list(_user_doc_sources), store.count())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _auto_ingest_shared_docs()
+    yield
+
+
 def create_app() -> FastAPI:
     setup_logging(level=getattr(app_config, "LOG_LEVEL", "INFO"))
     log_memory(logger, "create_app start")
@@ -50,6 +92,7 @@ def create_app() -> FastAPI:
         title="BOLA AI",
         description="Local AI agent for BOLA (Broken Object-Level Authorization) analysis",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     @app.get("/health")
@@ -57,11 +100,14 @@ def create_app() -> FastAPI:
         from bola_ai.agent.llm import is_available
         ollama_ok = is_available()
         store = get_store()
-        logger.info("Health check: ollama=%s chunks=%s", ollama_ok, store.count())
+        logger.info("Health check: ollama=%s chunks=%s user_docs=%s",
+                     ollama_ok, store.count(), len(_user_doc_sources))
         return {
             "status": "ok",
             "ollama": ollama_ok,
             "documents_chunks": store.count(),
+            "user_documents": len(_user_doc_sources),
+            "user_doc_sources": sorted(_user_doc_sources),
         }
 
     @app.post("/reset")
@@ -69,6 +115,7 @@ def create_app() -> FastAPI:
         """Clear the document store (for testing: ensures each test case runs with only the ingested doc)."""
         store = get_store()
         store.reset()
+        _user_doc_sources.clear()
         return {"status": "ok", "message": "Store reset", "chunks": store.count()}
 
     @app.post("/ingest")
@@ -82,6 +129,7 @@ def create_app() -> FastAPI:
         if content:
             logger.info("Ingest: content length=%s source=%s", len(content or ""), source)
             store.add_document(content, source=source)
+            _track_user_doc(source)
             n = store.count()
             logger.info("Ingest done: total chunks=%s", n)
             log_memory(logger, "after ingest (content)")
@@ -94,7 +142,9 @@ def create_app() -> FastAPI:
                 logger.warning("Ingest: file %s not UTF-8", file.filename)
                 raise HTTPException(400, "File must be UTF-8 text.")
             logger.info("Ingest: file=%s size=%s", file.filename, len(text))
-            store.add_document(text, source=file.filename or "upload")
+            src_name = file.filename or "upload"
+            store.add_document(text, source=src_name)
+            _track_user_doc(src_name)
             n = store.count()
             logger.info("Ingest done: total chunks=%s", n)
             log_memory(logger, "after ingest (file)")
@@ -124,7 +174,9 @@ def create_app() -> FastAPI:
         except UnicodeDecodeError:
             raise HTTPException(400, "Shared file must be UTF-8 text.")
         logger.info("Ingest shared: path=%s size=%s", target, len(text))
-        store.add_document(text, source=source or target.name)
+        src_name = source or target.name
+        store.add_document(text, source=src_name)
+        _track_user_doc(src_name)
         n = store.count()
         logger.info("Ingest shared done: total chunks=%s", n)
         log_memory(logger, "after ingest (shared)")
@@ -145,7 +197,8 @@ def create_app() -> FastAPI:
         query = body.query if body and body.query else None
         logger.info("Analyze: query=%s chunks_available=%s", query or "(default)", store.count())
         try:
-            result = analyze_for_bola(store, custom_query=query)
+            user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
+            result = analyze_for_bola(store, custom_query=query, source_filter=user_sources)
             logger.info("Analyze: completed report_len=%s", len(result or ""))
             log_memory(logger, "after analyze")
             return {"status": "ok", "report": result}
@@ -236,9 +289,16 @@ Bot: ## Verification steps ...
             from bola_ai.agent.llm import is_available
             store = get_store()
             ollama_ok = is_available()
+            user_docs_info = f"**{len(_user_doc_sources)}** ({', '.join(sorted(_user_doc_sources))})" if _user_doc_sources else "None"
             return {
                 "role": "assistant",
-                "content": f"**System status:**\n- Ollama: {'online' if ollama_ok else 'offline'}\n- Ingested chunks: {store.count()}\n- Shared docs folder: `shared_docs/` (in your project directory)",
+                "content": (
+                    f"**System status:**\n"
+                    f"- Ollama: {'online' if ollama_ok else 'offline'}\n"
+                    f"- Total chunks in store: {store.count()}\n"
+                    f"- User documents ingested: {user_docs_info}\n"
+                    f"- Shared docs folder: `shared_docs/` (in your project directory)"
+                ),
                 "type": "info",
             }
 
@@ -246,6 +306,7 @@ Bot: ## Verification steps ...
         if msg_lower in ("reset", "clear", "start over"):
             store = get_store()
             store.reset()
+            _user_doc_sources.clear()
             return {"role": "assistant", "content": "Document store cleared. You can now ingest new documents.", "type": "info"}
 
         # List files
@@ -266,15 +327,30 @@ Bot: ## Verification steps ...
         # Ingest command — single file or bulk
         import re as _re
 
-        # Check for bare "ingest" / "ready" / "documents are ready" → bulk ingest all
         _bulk_triggers = (
             "ingest", "ingest all", "load all", "import all",
             "documents are ready", "docs are ready", "files are ready",
             "ready to ingest", "ready to analyze", "i copied the documents",
             "i copied the files", "i put the files", "all files",
+            "get the files", "get my files", "get files", "get the documents",
+            "get my documents", "get documents", "get my docs", "get docs",
+            "investigate", "investigate my files", "investigate my documents",
+            "investigate the files", "investigate the documents",
+            "take a look", "take a look at my files", "take a look at my documents",
+            "scan", "scan the folder", "scan my files", "scan the files",
+            "scan my documents", "scan the documents",
+            "check my docs", "check my files", "check the files", "check the documents",
+            "analyze my files", "analyze my documents", "analyze the files",
+            "read the documents", "read my documents", "read the files", "read my files",
+            "look at my files", "look at the files", "look at my documents",
+            "process the docs", "process the files", "process my files",
+            "process my documents", "process the documents",
+            "load the files", "load my files", "load the documents", "load my documents",
+            "read the folder", "read shared folder", "read the shared folder",
         )
         is_bulk = msg_lower.strip() in _bulk_triggers or _re.search(
-            r"\b(?:ready|copied|put|placed|added)\b.*\b(?:documents?|files?|docs?)\b",
+            r"\b(?:ready|copied|put|placed|added|get|investigate|scan|check|look|take|process|analyze|read|load)\b"
+            r".*\b(?:documents?|files?|docs?|folder)\b",
             msg_lower,
         )
 
@@ -311,6 +387,7 @@ Bot: ## Verification steps ...
                 return {"role": "assistant", "content": f"File `{filename}` is not valid UTF-8 text.", "type": "error"}
             store = get_store()
             store.add_document(text, source=filename)
+            _track_user_doc(filename)
             n = store.count()
             return {
                 "role": "assistant",
@@ -332,6 +409,7 @@ Bot: ## Verification steps ...
                 try:
                     text = f.read_text(encoding="utf-8")
                     store.add_document(text, source=f.name)
+                    _track_user_doc(f.name)
                     ingested.append(f"- **{f.name}** ({len(text):,} chars)")
                 except UnicodeDecodeError:
                     errors.append(f"- `{f.name}` (skipped — not UTF-8)")
@@ -343,16 +421,40 @@ Bot: ## Verification steps ...
             parts.append("\n\nYou can now ask me about BOLA risks in these documents.")
             return {"role": "assistant", "content": "".join(parts), "type": "info"}
 
-        # Default: BOLA analysis
+        # Default: BOLA analysis — requires user documents
         store = get_store()
-        if store.count() == 0:
+        if not has_user_docs():
+            shared_root = app_config.SHARED_DOCS_DIR.resolve()
+            available = []
+            if shared_root.exists():
+                available = [f.name for f in sorted(shared_root.iterdir()) if f.is_file() and not f.name.startswith(".")]
+            if available:
+                file_list = "\n".join(f"- `{f}`" for f in available[:15])
+                return {
+                    "role": "assistant",
+                    "content": (
+                        "**No documents have been ingested yet.** I can only analyze BOLA risks in your API documentation, not generic patterns.\n\n"
+                        f"**Files available in `shared_docs/` ({len(available)}):**\n{file_list}\n\n"
+                        "Say **ingest** to load all files, or **ingest <filename>** for a specific one.\n\n"
+                        "Type **help** for full usage guide."
+                    ),
+                    "type": "info",
+                }
             return {
                 "role": "assistant",
-                "content": "No documents ingested yet. Please ingest first:\n- Copy files into `shared_docs/` in your project folder\n- Then say `ingest` to load all, or `ingest <filename>` for one\n\nType `help` for full usage guide.",
+                "content": (
+                    "**No documents have been ingested yet.** I need your API documentation to analyze BOLA risks.\n\n"
+                    "**How to get started:**\n"
+                    "1. Copy your API documentation (markdown, text, HAR logs) into the `shared_docs/` folder\n"
+                    "2. Say **ingest** to load all files, or **ingest <filename>** for a specific one\n"
+                    "3. Then ask me about BOLA risks\n\n"
+                    "Type **help** for full usage guide."
+                ),
                 "type": "info",
             }
         try:
-            result = analyze_for_bola(store, custom_query=msg)
+            user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
+            result = analyze_for_bola(store, custom_query=msg, source_filter=user_sources)
             return {"role": "assistant", "content": result, "type": "analysis"}
         except _httpx.TimeoutException:
             return {

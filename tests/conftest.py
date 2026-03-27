@@ -70,11 +70,16 @@ def client(temp_data_dir):
     """Test client with overridden data dir and fake embedder (no heavy deps)."""
     import bola_ai.api.app as app_mod
     app_mod._store = None
+    app_mod._user_doc_sources.clear()
     import bola_ai.config as config
     orig_path = config.CHROMA_PATH
     orig_fake = getattr(config, "USE_FAKE_EMBEDDER", False)
+    orig_shared = config.SHARED_DOCS_DIR
     config.CHROMA_PATH = temp_data_dir
     config.USE_FAKE_EMBEDDER = True
+    empty_shared = temp_data_dir / "empty_shared"
+    empty_shared.mkdir()
+    config.SHARED_DOCS_DIR = empty_shared
     try:
         app = create_app()
         with TestClient(app) as c:
@@ -82,7 +87,9 @@ def client(temp_data_dir):
     finally:
         config.CHROMA_PATH = orig_path
         config.USE_FAKE_EMBEDDER = orig_fake
+        config.SHARED_DOCS_DIR = orig_shared
         app_mod._store = None
+        app_mod._user_doc_sources.clear()
 
 
 # --- Live E2E is mandatory when any of these files are collected (docs/E2E_TESTING.md) ---

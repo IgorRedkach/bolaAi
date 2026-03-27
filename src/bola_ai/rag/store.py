@@ -93,14 +93,27 @@ class DocStore:
             all_ids.extend(ids)
         return all_ids
 
-    def search(self, query: str, n_results: int = 10) -> list[dict[str, Any]]:
-        """Return top-n chunks with metadata and distances."""
+    def search(
+        self,
+        query: str,
+        n_results: int = 10,
+        source_filter: Optional[list[str]] = None,
+    ) -> list[dict[str, Any]]:
+        """Return top-n chunks with metadata and distances.
+
+        Args:
+            source_filter: if provided, only return chunks whose ``source``
+                metadata is in this list (ChromaDB ``$in`` filter).
+        """
         q_emb = self.embedder.embed_query(query)
-        result = self._collection.query(
-            query_embeddings=[q_emb],
-            n_results=min(n_results, 50),
-            include=["documents", "metadatas", "distances"],
-        )
+        kwargs: dict[str, Any] = {
+            "query_embeddings": [q_emb],
+            "n_results": min(n_results, 50),
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if source_filter:
+            kwargs["where"] = {"source": {"$in": source_filter}}
+        result = self._collection.query(**kwargs)
         out = []
         docs = result["documents"][0] if result["documents"] else []
         metas = result["metadatas"][0] if result["metadatas"] else []

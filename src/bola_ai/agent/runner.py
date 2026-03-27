@@ -20,13 +20,19 @@ def run_analysis(
     *,
     n_context: int = 10,
     model: Optional[str] = None,
+    source_filter: Optional[list[str]] = None,
 ) -> str:
     """
     Retrieve relevant chunks from the store, build prompt, call LLM, return response.
+
+    Args:
+        source_filter: if provided, only retrieve chunks from these sources
+            (user documents), preventing training data contamination.
     """
     log_memory(logger, "run_analysis start")
-    logger.info("RAG search: n_context=%s query_len=%s", n_context, len(query or ""))
-    context_parts = store.search(query, n_results=n_context)
+    logger.info("RAG search: n_context=%s query_len=%s source_filter=%s",
+                n_context, len(query or ""), source_filter)
+    context_parts = store.search(query, n_results=n_context, source_filter=source_filter)
     context = "\n\n".join(
         p["content"] for p in context_parts if p.get("content")
     ).strip()
@@ -623,8 +629,9 @@ def analyze_for_bola(
     store: DocStore,
     custom_query: Optional[str] = None,
     n_context: Optional[int] = None,
+    source_filter: Optional[list[str]] = None,
 ) -> str:
     """Convenience: run BOLA-focused analysis with default or custom query."""
     k = cfg.N_CONTEXT if n_context is None else n_context
     query = custom_query or "Identify potential BOLA vulnerabilities and suggest verification steps."
-    return run_analysis(store, query=query, n_context=k)
+    return run_analysis(store, query=query, n_context=k, source_filter=source_filter)

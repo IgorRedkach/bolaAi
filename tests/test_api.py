@@ -92,18 +92,26 @@ def test_index_html(api_client: TestClient):
 # --- Chat endpoint tests ---
 
 @pytest.fixture
-def chat_client():
-    """Create a test client with fake embedder for chat tests."""
+def chat_client(tmp_path):
+    """Create a test client with fake embedder for chat tests.
+
+    Sets SHARED_DOCS_DIR to an empty temp dir so auto-ingest doesn't interfere.
+    """
     from unittest.mock import patch
     from bola_ai.api import app as app_mod
     from bola_ai import config as cfg
     app_mod._store = None
-    with patch.object(cfg, "USE_FAKE_EMBEDDER", True):
+    app_mod._user_doc_sources.clear()
+    empty_shared = tmp_path / "empty_shared"
+    empty_shared.mkdir()
+    with patch.object(cfg, "USE_FAKE_EMBEDDER", True), \
+         patch.object(cfg, "SHARED_DOCS_DIR", empty_shared):
         from bola_ai.api.app import create_app
         from fastapi.testclient import TestClient
         a = create_app()
         yield TestClient(a)
     app_mod._store = None
+    app_mod._user_doc_sources.clear()
 
 
 def test_chat_help_returns_usage_guide(chat_client):
@@ -220,4 +228,152 @@ def test_store_add_document_succeeds_with_real_chroma(tmp_path):
     chunk_ids = store.add_document(doc, source="normal.md")
     assert len(chunk_ids) > 0
     assert store.count() == len(chunk_ids)
+
+
+# --- Analysis guard: no user docs → block analysis ---
+
+def test_chat_analysis_blocked_without_user_docs(chat_client):
+    """Analysis should be refused when no user documents are ingested, even if store has RAG knowledge chunks."""
+    r = chat_client.post("/api/chat", json={"message": "What BOLA risks exist?"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "info"
+    assert "no documents" in data["content"].lower() or "not been ingested" in data["content"].lower()
+
+
+def test_chat_analysis_allowed_after_ingest(chat_client, tmp_path):
+    """Analysis proceeds after user ingests a document."""
+    from unittest.mock import patch
+    from bola_ai import config as cfg
+    from bola_ai.api import app as app_mod
+
+    doc_dir = tmp_path / "shared_for_ingest"
+    doc_dir.mkdir()
+    (doc_dir / "api.md").write_text("GET /api/v1/users/{userId}\nReturns user info. No ownership check.")
+
+    with patch.object(cfg, "SHARED_DOCS_DIR", doc_dir):
+        r = chat_client.post("/api/chat", json={"message": "ingest api.md"})
+    assert r.status_code == 200
+    assert "ingested" in r.json()["content"].lower()
+
+    assert app_mod.has_user_docs()
+
+    with patch("bola_ai.agent.runner.chat") as mock_llm:
+        mock_llm.return_value = "## BOLA Risk: GET /api/v1/users/{userId}"
+        r = chat_client.post("/api/chat", json={"message": "What BOLA risks exist?"})
+    assert r.status_code == 200
+    assert r.json()["type"] == "analysis"
+
+
+def test_chat_reset_clears_user_docs(chat_client, tmp_path):
+    """After reset, user doc tracking is cleared and analysis is blocked again."""
+    from unittest.mock import patch
+    from bola_ai import config as cfg
+    from bola_ai.api import app as app_mod
+
+    doc_dir = tmp_path / "shared_for_reset"
+    doc_dir.mkdir()
+    (doc_dir / "api.md").write_text("GET /api/v1/orders/{id}")
+
+    with patch.object(cfg, "SHARED_DOCS_DIR", doc_dir):
+        chat_client.post("/api/chat", json={"message": "ingest api.md"})
+    assert app_mod.has_user_docs()
+
+    chat_client.post("/api/chat", json={"message": "reset"})
+    assert not app_mod.has_user_docs()
+
+    r = chat_client.post("/api/chat", json={"message": "Analyze BOLA"})
+    assert r.json()["type"] == "info"
+    assert "no documents" in r.json()["content"].lower() or "not been ingested" in r.json()["content"].lower()
+
+
+# --- Auto-ingest on startup ---
+
+def test_auto_ingest_on_startup(tmp_path):
+    """App auto-ingests files from shared docs on startup."""
+    from unittest.mock import patch
+    from bola_ai.api import app as app_mod
+    from bola_ai import config as cfg
+
+    app_mod._store = None
+    app_mod._user_doc_sources.clear()
+
+    shared = tmp_path / "shared_auto"
+    shared.mkdir()
+    (shared / "net_log.md").write_text("GET /api/v1/accounts/{accountId}\nNo ownership check.")
+    (shared / "har.md").write_text("POST /api/v1/transfers\nNo tenant filter.")
+
+    with patch.object(cfg, "USE_FAKE_EMBEDDER", True), \
+         patch.object(cfg, "SHARED_DOCS_DIR", shared):
+        from bola_ai.api.app import create_app
+        from fastapi.testclient import TestClient
+        a = create_app()
+        with TestClient(a) as client:
+            assert app_mod.has_user_docs()
+            assert "net_log.md" in app_mod._user_doc_sources
+            assert "har.md" in app_mod._user_doc_sources
+
+            r = client.get("/health")
+            assert r.json()["user_documents"] == 2
+
+    app_mod._store = None
+    app_mod._user_doc_sources.clear()
+
+
+# --- Broader ingest phrases ---
+
+@pytest.mark.parametrize("phrase", [
+    "get the files",
+    "get my documents",
+    "investigate my files",
+    "take a look at my documents",
+    "scan the folder",
+    "check my docs",
+    "analyze my files",
+    "read the documents",
+    "look at my files",
+    "process the docs",
+    "load the files",
+    "I placed my files in the folder",
+    "I added documents to shared",
+])
+def test_chat_broad_ingest_phrases(chat_client, tmp_path, phrase):
+    """Various natural language phrases should trigger bulk ingest."""
+    from unittest.mock import patch
+    from bola_ai import config as cfg
+
+    doc_dir = tmp_path / "shared_phrases"
+    doc_dir.mkdir(exist_ok=True)
+    (doc_dir / "test.md").write_text("GET /api/v1/test/{id}\nNo auth check.")
+
+    with patch.object(cfg, "SHARED_DOCS_DIR", doc_dir):
+        r = chat_client.post("/api/chat", json={"message": phrase})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "info", f"Phrase '{phrase}' should trigger ingest but got type={data['type']}: {data['content'][:200]}"
+    assert "test.md" in data["content"] or "1 file(s)" in data["content"], (
+        f"Phrase '{phrase}' did not ingest: {data['content'][:200]}"
+    )
+
+
+# --- Health endpoint reports user docs ---
+
+def test_health_shows_user_doc_count(chat_client, tmp_path):
+    """Health endpoint should report user document count."""
+    from unittest.mock import patch
+    from bola_ai import config as cfg
+
+    r = chat_client.get("/health")
+    assert r.json()["user_documents"] == 0
+
+    doc_dir = tmp_path / "shared_health"
+    doc_dir.mkdir()
+    (doc_dir / "doc.md").write_text("Some content.")
+
+    with patch.object(cfg, "SHARED_DOCS_DIR", doc_dir):
+        chat_client.post("/api/chat", json={"message": "ingest doc.md"})
+
+    r = chat_client.get("/health")
+    assert r.json()["user_documents"] == 1
+    assert "doc.md" in r.json()["user_doc_sources"]
 

@@ -356,3 +356,24 @@ chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than m
 **Fix:** Use separate env vars: `OLLAMA_HOST=127.0.0.1:11434` (for Ollama binary) and `OLLAMA_BASE_URL=http://127.0.0.1:11434` (for the Python app). Update `config.py` to prefer `OLLAMA_BASE_URL` over `OLLAMA_HOST`.
 
 ---
+
+## BUG-003: Analysis guard never triggers — LLM hallucinates from training data (OPEN → FIXED)
+
+**Reported:** User loaded fresh image with their network logs in the shared folder, asked BOLA questions, and got hallucinated analysis about "patient APIs" and "prescriptions" that had nothing to do with their documents.
+
+**Root cause:** The analysis guard (`store.count() == 0` at line 348 of `app.py`) never triggers because the RAG knowledge preload adds ~439 chunks of generic BOLA training examples to the store at startup. Since `count()` includes both preloaded knowledge AND user documents, the guard thinks documents are loaded and sends the query to the LLM, which retrieves generic training examples and hallucinates.
+
+**Symptoms:**
+1. User places files in shared folder and starts container
+2. Files are never auto-ingested
+3. User asks a question — gets "analysis" based on training patterns, not their documents
+4. Results mention endpoints/APIs not present in the user's documentation
+
+**Fix:**
+1. Track user-ingested document sources separately (`_user_doc_sources` set)
+2. Change analysis guard to check `_user_doc_sources` instead of `store.count()`
+3. Auto-ingest files from `/shared-docs` on app startup
+4. Broaden ingest trigger phrases to match natural language ("get my files", "investigate", "take a look", "scan", etc.)
+5. Add `source_filter` to `DocStore.search()` — when analyzing, only retrieve chunks from user-ingested documents, preventing training data from contaminating results
+
+---
