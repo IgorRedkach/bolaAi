@@ -178,3 +178,46 @@ def test_chat_bulk_ingest_ready_phrase(chat_client, tmp_path):
     assert "1 file(s)" in data["content"]
     assert "test.md" in data["content"]
 
+
+def test_store_add_document_batches_large_input(tmp_path):
+    """DocStore.add_document batches ChromaDB adds to stay under max batch size."""
+    from unittest.mock import MagicMock
+    from bola_ai.rag.store import DocStore, CHROMA_MAX_BATCH
+    from bola_ai.rag.fake_embedder import FakeEmbedder
+
+    store = DocStore(
+        persist_directory=tmp_path / "chroma",
+        embedder=FakeEmbedder(),
+    )
+    big_doc = ("GET /api/v1/resource/{id}\nNo ownership check.\n\n") * 40000
+    mock_coll = MagicMock()
+    batch_sizes = []
+    def track_add(**kw):
+        batch_sizes.append(len(kw["ids"]))
+    mock_coll.add = track_add
+    store._collection = mock_coll
+
+    chunk_ids = store.add_document(big_doc, source="big.md")
+    assert len(chunk_ids) > CHROMA_MAX_BATCH, (
+        f"Test doc should produce >{CHROMA_MAX_BATCH} chunks, got {len(chunk_ids)}"
+    )
+    assert len(batch_sizes) > 1, "Should have called add() multiple times"
+    assert all(b <= CHROMA_MAX_BATCH for b in batch_sizes), (
+        f"All batches should be <= {CHROMA_MAX_BATCH}, got {batch_sizes}"
+    )
+
+
+def test_store_add_document_succeeds_with_real_chroma(tmp_path):
+    """DocStore.add_document works end-to-end with real ChromaDB for normal documents."""
+    from bola_ai.rag.store import DocStore
+    from bola_ai.rag.fake_embedder import FakeEmbedder
+
+    store = DocStore(
+        persist_directory=tmp_path / "chroma",
+        embedder=FakeEmbedder(),
+    )
+    doc = ("GET /api/v1/resource/{id}\nNo ownership check.\n\n") * 500
+    chunk_ids = store.add_document(doc, source="normal.md")
+    assert len(chunk_ids) > 0
+    assert store.count() == len(chunk_ids)
+

@@ -10,7 +10,9 @@ COLLECTION_NAME = "bola_docs"
 SHARED_DOCS_DIR = Path(os.environ.get("BOLA_AI_SHARED_DOCS_DIR", "/shared-docs"))
 
 # Ollama
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+if OLLAMA_BASE_URL and not OLLAMA_BASE_URL.startswith("http"):
+    OLLAMA_BASE_URL = f"http://{OLLAMA_BASE_URL}"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
 
 # Embeddings (local, small model for offline use)

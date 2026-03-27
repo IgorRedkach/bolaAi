@@ -329,3 +329,30 @@ Requires the stack running with Ollama and `bola-analyzer` model.
 **Final sign-off:** 12/12 quality checks PASS. 5/5 endpoint coverage. Unit test count: 52/52.
 
 ---
+
+## BUG-001: ChromaDB batch size overflow on large documents (OPEN → FIXED)
+
+**Reported:** User pulled fresh `ghcr.io/igorredkach/bolai:latest` image, ingested a large document via chat, and after ~5 minutes got:
+
+```
+chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than max batch size of 5461
+```
+
+**Root cause:** `DocStore.add_document()` in `src/bola_ai/rag/store.py` calls `self._collection.add()` with ALL chunk embeddings at once. ChromaDB enforces a hard max batch size of 5461. Large documents that produce more chunks crash the ingestion.
+
+**Symptoms:**
+1. Chat shows "Thinking..." spinner for several minutes (embedding runs)
+2. No response returned to UI
+3. Server crashes with `InternalError` after embedding completes
+
+**Fix:** Batch the `_collection.add()` calls in `store.py` to add at most `CHROMA_MAX_BATCH` (5000) items per call.
+
+## BUG-002: OLLAMA_HOST env var conflict in all-in-one image (OPEN → FIXED)
+
+**Reported:** Fresh all-in-one image shows "Starting up" banner; health check may report Ollama as offline.
+
+**Root cause:** `docker/Dockerfile.allinone` sets `OLLAMA_HOST=http://127.0.0.1:11434`. The Ollama binary uses this env var as its **bind address**, but expects the format `host:port` (no scheme). The Python app reads it as a base URL and expects `http://...`. Using a single env var for both purposes can cause the Ollama server to fail to parse the address.
+
+**Fix:** Use separate env vars: `OLLAMA_HOST=127.0.0.1:11434` (for Ollama binary) and `OLLAMA_BASE_URL=http://127.0.0.1:11434` (for the Python app). Update `config.py` to prefer `OLLAMA_BASE_URL` over `OLLAMA_HOST`.
+
+---

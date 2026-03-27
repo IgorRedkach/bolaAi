@@ -24,7 +24,8 @@ COPY docker/entrypoint-allinone.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENV BOLA_AI_DATA=/data
-ENV OLLAMA_HOST=http://127.0.0.1:11434
+ENV OLLAMA_HOST=127.0.0.1:11434
+ENV OLLAMA_BASE_URL=http://127.0.0.1:11434
 ENV OLLAMA_MODEL=bola-analyzer
 ENV PYTHONPATH=/app/src
 ENV BOLA_AI_PRELOAD=1

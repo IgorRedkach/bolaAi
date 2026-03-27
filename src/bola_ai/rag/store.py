@@ -11,6 +11,8 @@ from bola_ai.rag.fake_embedder import FakeEmbedder
 
 logger = get_logger("rag.store")
 
+CHROMA_MAX_BATCH = 5000
+
 # LocalEmbedder imported lazily to avoid loading sentence_transformers in tests
 
 
@@ -63,12 +65,16 @@ class DocStore:
         chunk_ids = [f"{ids[0]}_{i}" for i in range(len(chunks))]
         embeddings = self.embedder.embed_documents(chunks)
         metadatas = [{"source": source, "chunk_index": i} for i in range(len(chunks))]
-        self._collection.add(
-            ids=chunk_ids,
-            embeddings=embeddings,
-            documents=chunks,
-            metadatas=metadatas,
-        )
+        for start in range(0, len(chunks), CHROMA_MAX_BATCH):
+            end = min(start + CHROMA_MAX_BATCH, len(chunks))
+            self._collection.add(
+                ids=chunk_ids[start:end],
+                embeddings=embeddings[start:end],
+                documents=chunks[start:end],
+                metadatas=metadatas[start:end],
+            )
+            if end < len(chunks):
+                logger.info("add_document: batch %d-%d of %d added", start, end, len(chunks))
         return chunk_ids
 
     def add_documents(

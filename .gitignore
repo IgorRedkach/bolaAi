@@ -47,6 +47,9 @@ models/
 .env
 .env.local
 
+# Salesforce DX (auto-generated tooling)
+.sfdx/
+
 # OS
 .DS_Store
 Thumbs.db
