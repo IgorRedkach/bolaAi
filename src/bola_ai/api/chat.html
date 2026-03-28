@@ -434,6 +434,7 @@ async function checkHealth() {
           : `Online · ${j.documents_chunks} chunks · No user docs`;
         setReady(true);
         if (aas === 'done') checkAutoAnalysis();
+      }
     } else {
       healthDot.className = 'dot starting';
       statusText.textContent = 'Ollama: starting...';
