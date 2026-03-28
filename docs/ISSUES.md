@@ -442,3 +442,26 @@ chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than m
 **Status:** FIXED
 
 ---
+
+## BUG-008: Large real-world HAR files produce 15K+ chunks and timeout (FIXED)
+
+**Reported:** User's real HAR file (6.9 MB, real Salesforce browser capture) produced 15,525 raw JSON chunks.
+Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries also timed out.
+
+**Root causes:**
+1. HAR preprocessing didn't filter static assets (JS, CSS, images, fonts) — all entries were processed
+2. No cap on HAR entries — 15K+ chunks overwhelmed embeddings and search
+3. Auto-analysis timeout too short (300s) for CPU inference with rich context
+4. Chat timeout (300s) too short for CPU inference
+5. HAR detection only checked first 200 chars — real HAR files may have `"log"` further in
+
+**Fixes:**
+1. HAR preprocessor filters static assets by extension and MIME type
+2. Only API-like requests kept (POST/PUT/PATCH/DELETE, JSON, GraphQL, Aura, /api/, /services/)
+3. Max 200 HAR entries processed
+4. Auto-analysis timeout: 900s; chat timeout: 600s; analyze client timeout: 660s
+5. HAR detection checks first 1000 chars for `"log"` key
+
+**Status:** FIXED
+
+---

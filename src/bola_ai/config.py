@@ -22,11 +22,11 @@ EMBEDDING_MODEL = os.environ.get("BOLA_AI_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 API_HOST = os.environ.get("BOLA_AI_HOST", "0.0.0.0")
 API_PORT = int(os.environ.get("BOLA_AI_PORT", "8000"))
 
-# --- Inference (LLM "ready to talk"): do NOT raise these to mask slow generation — fix model/prompt/load instead.
-# Ollama chat completion max wait (seconds). Default 300; lowering is OK for fast hardware; raising is discouraged.
-LLM_CHAT_TIMEOUT_SECONDS = float(os.environ.get("BOLA_AI_LLM_CHAT_TIMEOUT", "300"))
+# --- Inference (LLM "ready to talk"): CPU inference with rich context can take 5-10 minutes.
+# Ollama chat completion max wait (seconds). Default 600 for CPU; GPU users can lower.
+LLM_CHAT_TIMEOUT_SECONDS = float(os.environ.get("BOLA_AI_LLM_CHAT_TIMEOUT", "600"))
 # HTTP client timeout for POST /analyze only — must be >= LLM_CHAT_TIMEOUT_SECONDS so the client does not abort first.
-ANALYZE_CLIENT_TIMEOUT = float(os.environ.get("BOLA_AI_ANALYZE_CLIENT_TIMEOUT", "360"))
+ANALYZE_CLIENT_TIMEOUT = float(os.environ.get("BOLA_AI_ANALYZE_CLIENT_TIMEOUT", "660"))
 
 # --- Learning from documents (ingest / embedding / chunking): can be slow on CPU; separate from inference.
 # CLI and scripts use this for POST /ingest (not for /analyze).

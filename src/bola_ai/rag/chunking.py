@@ -1,16 +1,79 @@
 """Chunk documentation for embedding and retrieval."""
 
 import json
+import logging
 import re
 from typing import Iterator
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 # Approximate tokens per chunk (MiniLM uses ~256 subwords for short sentences)
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 64
 
+_STATIC_EXTENSIONS = frozenset((
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot", ".map", ".webp", ".mp4",
+    ".webm", ".ogg", ".mp3", ".wav", ".flac", ".pdf", ".zip",
+))
+
+_STATIC_MIMETYPES = frozenset((
+    "text/css", "text/javascript", "application/javascript",
+    "image/png", "image/jpeg", "image/gif", "image/svg+xml",
+    "image/webp", "font/woff", "font/woff2", "application/font-woff",
+))
+
+MAX_HAR_ENTRIES = 200
+
+
+def _is_api_request(entry: dict) -> bool:
+    """Return True if the HAR entry looks like an API call (not a static asset)."""
+    req = entry.get("request", {})
+    url = req.get("url", "")
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+    except Exception:
+        return True
+
+    ext = "." + path.rsplit(".", 1)[-1] if "." in path.split("/")[-1] else ""
+    if ext in _STATIC_EXTENSIONS:
+        return False
+
+    resp = entry.get("response", {})
+    resp_mime = resp.get("content", {}).get("mimeType", "").split(";")[0].strip().lower()
+    if resp_mime in _STATIC_MIMETYPES:
+        return False
+
+    req_mime = next(
+        (h.get("value", "") for h in req.get("headers", [])
+         if h.get("name", "").lower() == "content-type"),
+        ""
+    ).split(";")[0].strip().lower()
+
+    if any(kw in url.lower() for kw in (
+        "/api/", "/graphql", "/aura", "/services/data/", "/rest/",
+        "/sobjects/", "/query/", "/composite/", "/actions/",
+    )):
+        return True
+    if any(kw in req_mime for kw in ("json", "graphql", "x-www-form-urlencoded")):
+        return True
+    if req.get("postData", {}).get("text", ""):
+        return True
+
+    if req.get("method", "GET") in ("POST", "PUT", "PATCH", "DELETE"):
+        return True
+
+    return resp_mime in ("application/json", "text/json", "")
+
 
 def _preprocess_har(text: str) -> str:
-    """Convert HAR JSON into human-readable API summary for better chunking and embedding."""
+    """Convert HAR JSON into human-readable API summary for better chunking and embedding.
+
+    Filters out static assets (JS, CSS, images, fonts) and keeps only
+    API-like requests. Caps at MAX_HAR_ENTRIES to prevent explosion.
+    """
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError):
@@ -19,8 +82,17 @@ def _preprocess_har(text: str) -> str:
     if not entries:
         return ""
 
-    lines: list[str] = ["# HAR API Capture Analysis\n"]
-    for entry in entries:
+    api_entries = [e for e in entries if _is_api_request(e)]
+    if not api_entries:
+        api_entries = entries[:MAX_HAR_ENTRIES]
+
+    if len(api_entries) > MAX_HAR_ENTRIES:
+        api_entries = api_entries[:MAX_HAR_ENTRIES]
+
+    logger.info("HAR preprocessing: %d/%d entries are API calls", len(api_entries), len(entries))
+
+    lines: list[str] = [f"# HAR API Capture Analysis ({len(api_entries)} API calls from {len(entries)} total entries)\n"]
+    for entry in api_entries:
         req = entry.get("request", {})
         resp = entry.get("response", {})
         method = req.get("method", "?")
@@ -39,14 +111,13 @@ def _preprocess_har(text: str) -> str:
         post_data = req.get("postData", {})
         body_text = post_data.get("text", "")
         if body_text:
-            # For GraphQL, extract the query
             try:
                 body_json = json.loads(body_text)
                 if "query" in body_json:
                     lines.append(f"GraphQL query: {body_json['query'][:500]}")
                 if "variables" in body_json:
                     lines.append(f"Variables: {json.dumps(body_json['variables'])[:300]}")
-                if "action" in str(body_json) or "message" in str(body_json):
+                if "action" in str(body_json)[:1000] or "message" in str(body_json)[:1000]:
                     lines.append(f"Request body: {body_text[:500]}")
             except (json.JSONDecodeError, ValueError):
                 lines.append(f"Request body: {body_text[:500]}")
@@ -80,10 +151,11 @@ def chunk_text(
         return []
     text = text.strip()
 
-    # Detect and preprocess HAR JSON
-    if text.lstrip().startswith("{") and '"log"' in text[:200]:
+    # Detect and preprocess HAR JSON (check first 1000 chars for "log" key)
+    if text.lstrip().startswith("{") and '"log"' in text[:1000]:
         har_text = _preprocess_har(text)
         if har_text:
+            logger.info("HAR detected: %d chars raw -> %d chars preprocessed", len(text), len(har_text))
             text = har_text
     # Prefer splitting on newlines/paragraphs, then on sentence boundaries
     parts = re.split(r"\n\s*\n", text)
