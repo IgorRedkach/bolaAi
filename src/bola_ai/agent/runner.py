@@ -27,6 +27,7 @@ def run_analysis(
     n_context: int = 10,
     model: Optional[str] = None,
     source_filter: Optional[list[str]] = None,
+    timeout: Optional[float] = None,
 ) -> str:
     """
     Retrieve relevant chunks from the store, build prompt, call LLM, return response.
@@ -66,10 +67,10 @@ def run_analysis(
         {"role": "user", "content": user_prompt},
     ]
     logger.info("Calling LLM (model=%s) ...", model or "default")
-    out = chat(messages, model=model)
+    out = chat(messages, model=model, timeout=timeout)
     log_memory(logger, "after LLM chat")
     allowed_paths = _extract_paths_from_context(context)
-    out = _normalize_report(out or "", allowed_paths=allowed_paths, context=context)
+    out = _normalize_report(out or "", allowed_paths=allowed_paths, context=context, source_filter=source_filter)
     logger.info("LLM response length=%s", len(out or ""))
     return out
 
@@ -180,12 +181,32 @@ def _strip_report_leakage(report: str) -> str:
     return report
 
 
+def _is_structured_content(context: str, source_filter: Optional[list[str]] = None) -> bool:
+    """Detect HAR, Salesforce, GraphQL, or JSON-based content that needs relaxed normalization."""
+    if source_filter:
+        for s in source_filter:
+            sl = s.lower()
+            if any(kw in sl for kw in ("har", "json", "salesforce", "aura")):
+                return True
+    if context:
+        c = context.lower()
+        if any(kw in c for kw in (
+            "har api capture", "aura", "lightning.force",
+            "salesforce", "query {", "mutation {", '"method"',
+            "graphql query:", "getrecordwithfields", "updaterecord",
+        )):
+            return True
+    return False
+
+
 def _normalize_report(
-    report: str, *, allowed_paths: Optional[list[str]] = None, context: str = ""
+    report: str, *, allowed_paths: Optional[list[str]] = None, context: str = "",
+    source_filter: Optional[list[str]] = None,
 ) -> str:
     """Normalize LLM output: fix duplicate headings (Issue 4), verification hint (Issue 5), redact hallucinated endpoints."""
     if not report.strip():
         return report
+    structured = _is_structured_content(context, source_filter)
     report = _strip_report_leakage(report)
     if _context_indicates_rest_only_no_graphql(context):
         report = _strip_invented_graphql_blocks(report)
@@ -195,19 +216,20 @@ def _normalize_report(
     report = re.sub(r"\*\*\s*###\s*", "**", report)
     # Fix "**Title**# **Label:**" → "**Title**\n\n**Label:**"  (GraphQL heading bleed-through)
     report = re.sub(r"\*\*\s*#\s*\*\*", "**\n\n**", report)
-    # Redact common hallucinated endpoints not in typical doc: /api/users/, /api/tenants (any path containing these)
-    report = re.sub(
-        r"(GET|POST|PUT|DELETE)?\s*(`?/api/[^`\s]*(?:users|tenants)[^`\s]*`?)",
-        "[use only endpoints from the documentation]",
-        report,
-        flags=re.IGNORECASE,
-    )
-    report = re.sub(
-        r"using the `/api/users` endpoint|obtain a token using the `/api/users` endpoint|`/api/users` endpoint",
-        "using an auth endpoint from the documentation",
-        report,
-        flags=re.IGNORECASE,
-    )
+    if not structured:
+        # Redact common hallucinated endpoints not in typical doc: /api/users/, /api/tenants
+        report = re.sub(
+            r"(GET|POST|PUT|DELETE)?\s*(`?/api/[^`\s]*(?:users|tenants)[^`\s]*`?)",
+            "[use only endpoints from the documentation]",
+            report,
+            flags=re.IGNORECASE,
+        )
+        report = re.sub(
+            r"using the `/api/users` endpoint|obtain a token using the `/api/users` endpoint|`/api/users` endpoint",
+            "using an auth endpoint from the documentation",
+            report,
+            flags=re.IGNORECASE,
+        )
     # Issue 6: BOLA verification requires two authenticated users, not "without a token"
     report = re.sub(
         r"\bwithout a token\b",
@@ -422,13 +444,9 @@ def _normalize_report(
         flags=re.IGNORECASE,
     )
     # Issue 10: Ground endpoint suggestions to ingested context (avoid unrelated endpoint drift).
-    # Only apply strict path grounding when we have a clear set of REST API paths.
     # Skip for HAR/JSON/Salesforce/GraphQL contexts where path extraction is unreliable.
     allowed_paths = allowed_paths or []
-    _context_is_structured = any(
-        kw in context.lower() for kw in ("har", "aura", "lightning", "salesforce", "graphql", "query {", '"method"')
-    )
-    if allowed_paths and not _context_is_structured:
+    if allowed_paths and not structured:
         allowed_regexes = [_path_pattern_to_regex(p) for p in allowed_paths]
 
         def _replace_unknown_path(match: re.Match) -> str:
@@ -457,8 +475,8 @@ def _normalize_report(
             flags=re.IGNORECASE,
         )
     # Redact known hallucinated path prefixes — only for plain REST docs, not HAR/Salesforce.
-    if _context_is_structured:
-        allowed_paths = []  # skip remaining path-based normalization
+    if structured:
+        allowed_paths = []
     hallucinated_prefixes = (
         "/api/v1/patients", "/api/v1/documents", "/api/v1/orders", "/api/v1/prescriptions",
         "/api/internal/cases", "/api/users",
@@ -675,8 +693,9 @@ def analyze_for_bola(
     custom_query: Optional[str] = None,
     n_context: Optional[int] = None,
     source_filter: Optional[list[str]] = None,
+    timeout: Optional[float] = None,
 ) -> str:
     """Convenience: run BOLA-focused analysis with default or custom query."""
     k = cfg.N_CONTEXT if n_context is None else n_context
     query = custom_query or "Identify potential BOLA vulnerabilities and suggest verification steps."
-    return run_analysis(store, query=query, n_context=k, source_filter=source_filter)
+    return run_analysis(store, query=query, n_context=k, source_filter=source_filter, timeout=timeout)

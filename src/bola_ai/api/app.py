@@ -121,7 +121,7 @@ def _auto_ingest_and_analyze():
     logger.info("Auto-analyze: starting BOLA analysis on %d user doc(s)...", len(_user_doc_sources))
     try:
         user_sources = sorted(_user_doc_sources)
-        result = analyze_for_bola(store, source_filter=user_sources)
+        result = analyze_for_bola(store, source_filter=user_sources, timeout=600)
         _auto_analysis_result = result
         _auto_analysis_status = "done"
         logger.info("Auto-analyze: done, report_len=%d", len(result or ""))
