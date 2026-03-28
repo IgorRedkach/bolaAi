@@ -1,9 +1,11 @@
 """Tests for agent prompts and runner (with mocked LLM)."""
+import json
 from unittest.mock import patch
 
 import pytest
 from bola_ai.agent.prompts import build_analysis_prompt, BOLA_SYSTEM_PROMPT
 from bola_ai.agent.runner import run_analysis, _normalize_report, _extract_paths_from_context, _fix_curl_path_mismatch
+from bola_ai.rag.chunking import chunk_text, _preprocess_har
 from bola_ai.rag.store import DocStore
 
 
@@ -481,8 +483,8 @@ def test_normalize_report_strips_grounding_suffix_echo():
     assert "Every REST path must appear verbatim" not in out
     assert "GET /accounts" in out
 
-def test_normalize_report_strips_additional_notes_section():
-    """Trailing 'Additional Notes' about hypothetical GraphQL/SOQL should be stripped."""
+def test_normalize_report_preserves_additional_notes_section():
+    """'Additional Notes' sections are preserved (they contain valuable HAR/Salesforce observations)."""
     raw = (
         "## Potential findings\n\n"
         "### GET /aid/v1/students/{studentId}/package\n"
@@ -492,9 +494,59 @@ def test_normalize_report_strips_additional_notes_section():
         "- **SOQL queries:** If the documentation mentions SOQL...\n"
     )
     out = _normalize_report(raw)
-    assert "Additional Notes" not in out
-    assert "GraphQL operations" not in out
+    assert "Additional Notes" in out
     assert "/aid/v1/students" in out
+
+
+def test_har_preprocessing_extracts_api_summary():
+    """HAR JSON is preprocessed into human-readable API summary before chunking."""
+    har = json.dumps({
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://example.com/services/data/graphql",
+                        "headers": [
+                            {"name": "Authorization", "value": "Bearer eyJ0eXAi..."},
+                            {"name": "Content-Type", "value": "application/json"},
+                        ],
+                        "postData": {
+                            "text": json.dumps({
+                                "query": "query getCaseComments($recordId: ID!) { uiapi { query { CaseComment(where: {ParentId: {eq: $recordId}}) { edges { node { Body { value } } } } } } }",
+                                "variables": {"recordId": "500cT00000BPDwj"}
+                            })
+                        }
+                    },
+                    "response": {"status": 200, "content": {"text": '{"data": {"uiapi": {}}}'}}
+                },
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://example.com/api/v1/accounts/001cT00000DQOoo",
+                        "headers": [{"name": "Authorization", "value": "Bearer eyJ0eXAi..."}],
+                    },
+                    "response": {"status": 200, "content": {"text": '{"accountId": "001cT00000DQOoo"}'}}
+                }
+            ]
+        }
+    })
+    result = _preprocess_har(har)
+    assert "POST https://example.com/services/data/graphql" in result
+    assert "getCaseComments" in result
+    assert "recordId" in result
+    assert "GET https://example.com/api/v1/accounts/001cT00000DQOoo" in result
+
+    # Verify chunking works on HAR input
+    chunks = chunk_text(har)
+    assert len(chunks) > 0
+    assert any("getCaseComments" in c for c in chunks)
+
+
+def test_har_preprocessing_returns_empty_for_non_har():
+    """Non-HAR JSON should not be preprocessed."""
+    assert _preprocess_har("not json") == ""
+    assert _preprocess_har('{"foo": "bar"}') == ""
 
 
 def test_normalize_report_deduplicates_repeated_findings():

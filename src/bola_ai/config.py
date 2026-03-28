@@ -41,8 +41,8 @@ OLLAMA_STARTUP_PROBE_TIMEOUT = float(os.environ.get("BOLA_AI_OLLAMA_STARTUP_PROB
 # Test / low-memory: use fake embedder (no sentence-transformers load)
 USE_FAKE_EMBEDDER = os.environ.get("BOLA_AI_FAKE_EMBEDDER", "").lower() in ("1", "true", "yes")
 
-# RAG: max chunks sent to LLM (lower = less memory)
-N_CONTEXT = int(os.environ.get("BOLA_AI_N_CONTEXT", "10"))
+# RAG: max chunks sent to LLM (higher = richer context for complex docs like HAR files)
+N_CONTEXT = int(os.environ.get("BOLA_AI_N_CONTEXT", "20"))
 # Optional cap on total context string length (chars); 0 = no cap
 MAX_CONTEXT_CHARS = int(os.environ.get("BOLA_AI_MAX_CONTEXT_CHARS", "0"))
 

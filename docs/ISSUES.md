@@ -419,3 +419,26 @@ chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than m
 **Status:** FIXED
 
 ---
+
+## BUG-007: Analysis quality regression — HAR and complex documents produce garbage output (FIXED)
+
+**Reported:** User's HAR file analysis went from excellent Salesforce/GraphQL BOLA findings to generic template output ("REST Path Analysis", "SQL Analysis"). Multiple compound root causes identified.
+
+**Root causes:**
+1. RAG search used user's raw message (e.g. "analize har.txt") as embedding query — found wrong chunks
+2. Only 10 chunks of 512 chars = ~5KB context for 100KB+ HAR files
+3. HAR JSON chunked as raw text — meaningless fragments
+4. Normalization stripped valid "Additional Notes" and GraphQL content
+5. Path grounding too aggressive for HAR/Salesforce contexts
+
+**Fixes:**
+1. BOLA-focused RAG search query + secondary search with user query, merged
+2. Default chunks increased from 10 to 20
+3. HAR JSON preprocessing: detects and converts to readable API summary before chunking
+4. "Additional Notes" preserved
+5. Normalization skipped for HAR/JSON/Salesforce/GraphQL contexts
+6. Fixed GraphQL detection for Salesforce-style contexts
+
+**Status:** FIXED
+
+---

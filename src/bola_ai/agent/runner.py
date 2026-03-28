@@ -14,6 +14,12 @@ from bola_ai.rag.store import DocStore
 logger = get_logger("agent")
 
 
+_BOLA_RAG_QUERY = (
+    "API endpoint authorization access control object ID path resource "
+    "BOLA vulnerability ownership check permission token user"
+)
+
+
 def run_analysis(
     store: DocStore,
     query: str = "Identify potential BOLA vulnerabilities and suggest verification steps.",
@@ -25,14 +31,26 @@ def run_analysis(
     """
     Retrieve relevant chunks from the store, build prompt, call LLM, return response.
 
+    RAG search always uses a BOLA-focused query to find the most relevant
+    chunks regardless of the user's phrasing.  The user's actual query is
+    sent to the LLM as-is.
+
     Args:
         source_filter: if provided, only retrieve chunks from these sources
             (user documents), preventing training data contamination.
     """
     log_memory(logger, "run_analysis start")
-    logger.info("RAG search: n_context=%s query_len=%s source_filter=%s",
-                n_context, len(query or ""), source_filter)
-    context_parts = store.search(query, n_results=n_context, source_filter=source_filter)
+    rag_query = _BOLA_RAG_QUERY
+    logger.info("RAG search: n_context=%s rag_query_len=%s user_query_len=%s source_filter=%s",
+                n_context, len(rag_query), len(query or ""), source_filter)
+    context_parts = store.search(rag_query, n_results=n_context, source_filter=source_filter)
+    if query and query != rag_query:
+        extra = store.search(query, n_results=max(n_context // 2, 5), source_filter=source_filter)
+        seen_content = {p["content"] for p in context_parts if p.get("content")}
+        for p in extra:
+            if p.get("content") and p["content"] not in seen_content:
+                context_parts.append(p)
+                seen_content.add(p["content"])
     context = "\n\n".join(
         p["content"] for p in context_parts if p.get("content")
     ).strip()
@@ -57,16 +75,22 @@ def run_analysis(
 
 
 def _context_indicates_rest_only_no_graphql(context: str) -> bool:
-    """True when doc explicitly excludes GraphQL (REST-only APIs)."""
+    """True when doc explicitly excludes GraphQL (REST-only APIs).
+
+    Returns False (preserve GraphQL) whenever the context itself contains
+    actual GraphQL operations, Salesforce Aura/Lightning, or HAR JSON —
+    these legitimately include GraphQL content.
+    """
     if not context or not context.strip():
         return False
     c = context.lower()
+    # Explicit exclusion checks first
     if "no graphql" in c or "rest only" in c or "rest-only" in c:
         return True
-    if "graphql" in c and "no " in c:
-        # e.g. "There is no GraphQL"
-        if re.search(r"\bno\s+graphql\b", c) or re.search(r"graphql.*\bnot\b", c):
-            return True
+    # If context contains actual GraphQL operations or Salesforce platform markers,
+    # it legitimately includes GraphQL — don't strip it.
+    if any(kw in c for kw in ("query {", "mutation {", "aura", "lightning.force")):
+        return False
     return False
 
 
@@ -142,14 +166,8 @@ def _strip_report_leakage(report: str) -> str:
 
     report = re.sub(r"```[a-zA-Z]*\n[\s\S]*?```", _strip_impl_code_block, report)
 
-    # Strip trailing "Additional Notes" / "Notes" advice sections that contain
-    # hypothetical GraphQL/SOQL/cross-tenant guidance not grounded in the doc.
-    report = re.sub(
-        r"\n#{2,3}\s+Additional Notes\b.*",
-        "\n",
-        report,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    # Note: "Additional Notes" sections are preserved — they often contain
+    # valuable HAR/Salesforce observations the model extracted from the doc.
 
     # WP-014: Plain-text "- Fix steps:" bullet (unbolded) not caught by WP-007 rule.
     report = re.sub(
@@ -404,8 +422,13 @@ def _normalize_report(
         flags=re.IGNORECASE,
     )
     # Issue 10: Ground endpoint suggestions to ingested context (avoid unrelated endpoint drift).
+    # Only apply strict path grounding when we have a clear set of REST API paths.
+    # Skip for HAR/JSON/Salesforce/GraphQL contexts where path extraction is unreliable.
     allowed_paths = allowed_paths or []
-    if allowed_paths:
+    _context_is_structured = any(
+        kw in context.lower() for kw in ("har", "aura", "lightning", "salesforce", "graphql", "query {", '"method"')
+    )
+    if allowed_paths and not _context_is_structured:
         allowed_regexes = [_path_pattern_to_regex(p) for p in allowed_paths]
 
         def _replace_unknown_path(match: re.Match) -> str:
@@ -433,7 +456,9 @@ def _normalize_report(
             report,
             flags=re.IGNORECASE,
         )
-    # Redact known hallucinated path prefixes when they are not in the doc (e.g. model reuses training examples). Run even when allowed_paths is empty (e.g. extraction failed).
+    # Redact known hallucinated path prefixes — only for plain REST docs, not HAR/Salesforce.
+    if _context_is_structured:
+        allowed_paths = []  # skip remaining path-based normalization
     hallucinated_prefixes = (
         "/api/v1/patients", "/api/v1/documents", "/api/v1/orders", "/api/v1/prescriptions",
         "/api/internal/cases", "/api/users",
