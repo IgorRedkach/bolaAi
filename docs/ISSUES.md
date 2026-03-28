@@ -407,3 +407,15 @@ chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than m
 **Status:** FIXED
 
 ---
+
+## BUG-006: Race condition in get_store() — auto-ingest and health endpoint initialize store simultaneously (FIXED)
+
+**Reported:** Fresh all-in-one image with file in shared_docs/. Logs show two concurrent `Initializing RAG store at /data/chroma` messages 0.1s apart, then `Auto-ingest: failed to initialize store: '/data/chroma'`. The auto-ingest thread and the first health check both call `get_store()` at the same time, both see `_store is None`, and both try to create a DocStore. ChromaDB's SQLite backend rejects the second concurrent connection.
+
+**Root cause:** `get_store()` was not thread-safe. No lock protected the singleton initialization. With FastAPI's lifespan spawning a background thread (auto-ingest) while the web server starts accepting health checks, two threads race to initialize the store.
+
+**Fix:** Add `_store_lock = threading.Lock()` and use double-checked locking in `get_store()`: check `_store is not None` before acquiring lock, then check again inside the lock to prevent duplicate initialization.
+
+**Status:** FIXED
+
+---

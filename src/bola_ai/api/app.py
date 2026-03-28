@@ -21,14 +21,19 @@ from bola_ai.logging_config import setup_logging
 from bola_ai.memory import log_memory
 from bola_ai.rag.store import DocStore
 
-# Lazy singleton store
+# Lazy singleton store (thread-safe)
 _store: Optional[DocStore] = None
+_store_lock = threading.Lock()
 _user_doc_sources: set[str] = set()
 
 
 def get_store() -> DocStore:
     global _store
-    if _store is None:
+    if _store is not None:
+        return _store
+    with _store_lock:
+        if _store is not None:
+            return _store
         logger.info("Initializing RAG store at %s", app_config.CHROMA_PATH)
         from bola_ai.rag.fake_embedder import FakeEmbedder
         kwargs = {
@@ -43,7 +48,7 @@ def get_store() -> DocStore:
         _store = DocStore(**kwargs)
         logger.info("RAG store ready; chunks=%s", _store.count())
         log_memory(logger, "after get_store init")
-    return _store
+        return _store
 
 
 def has_user_docs() -> bool:
