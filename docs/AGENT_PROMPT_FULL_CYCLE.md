@@ -275,6 +275,30 @@ If **anything** above is unfinished—including **not yet running E2E for this c
 - If Docker/model operations fail, fix and continue autonomously.
 - **Timeouts (Issue 17):** You **may** increase **`BOLA_AI_INGEST_TIMEOUT`**, **`BOLA_AI_STACK_WAIT_SECONDS`**, Docker healthcheck **start_period**, and **`health --wait`** for ingest/training/startup. You **must not** raise **`BOLA_AI_LLM_CHAT_TIMEOUT`** or **`BOLA_AI_ANALYZE_CLIENT_TIMEOUT`** to make slow LLM answers “pass”—fix inference quality or capacity instead.
 
+### H) Fresh-image hands-free E2E (mandatory when startup/ingest/analysis changes)
+
+When the current cycle includes changes to startup behavior, auto-ingest, auto-analysis, Ollama context, or the all-in-one image:
+
+1. **Push changes** and wait for the GitHub Actions image build to complete (~10 minutes).
+2. **Remove all BOLA containers and images** locally:
+   ```
+   docker rm -f $(docker ps -aq --filter "ancestor=ghcr.io/igorredkach/bolai:latest") 2>/dev/null
+   docker rmi ghcr.io/igorredkach/bolai:latest 2>/dev/null
+   ```
+3. **Delete all files** from `~/Downloads/shared` (or the host shared folder) and **generate brand-new test data** there (new API doc with unique endpoints and inserted BOLA risks).
+4. **Run the image from scratch:**
+   ```
+   docker run -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
+   ```
+5. **Wait 15 minutes** (model load + auto-ingest + auto-analysis).
+6. **Open `http://localhost:8000/chat`** — the auto-analysis result should already be displayed without the user typing anything. Verify:
+   - Analysis is present and grounded (only endpoints from your generated test data)
+   - No hallucinated endpoints
+   - Health dot is green, status shows doc count
+   - Chat history persists across reload
+7. **Talk to the agent** — send follow-up questions via the chat UI. Verify responses are ONLY related to the test data you generated (no generic training data leaking).
+8. **If all good:** Section H passes. If issues found: create OPEN issues/weak-places and immediately start a new loop.
+
 ## Output format I want from you at the end
 
 1. What gaps were found vs goals.

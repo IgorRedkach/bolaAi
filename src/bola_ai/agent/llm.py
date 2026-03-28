@@ -32,7 +32,7 @@ def chat(
         "messages": messages,
         "stream": False,
         "options": {
-            # Allow up to 2048 output tokens so multi-finding reports are not truncated.
+            "num_ctx": 8192,
             "num_predict": 2048,
         },
     }

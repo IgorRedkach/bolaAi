@@ -102,6 +102,8 @@ def chat_client(tmp_path):
     from bola_ai import config as cfg
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._auto_analysis_result = None
+    app_mod._auto_analysis_status = "idle"
     empty_shared = tmp_path / "empty_shared"
     empty_shared.mkdir()
     with patch.object(cfg, "USE_FAKE_EMBEDDER", True), \
@@ -112,6 +114,8 @@ def chat_client(tmp_path):
         yield TestClient(a)
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._auto_analysis_result = None
+    app_mod._auto_analysis_status = "idle"
 
 
 def test_chat_help_returns_usage_guide(chat_client):
@@ -298,6 +302,8 @@ def test_auto_ingest_on_startup(tmp_path):
 
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._auto_analysis_result = None
+    app_mod._auto_analysis_status = "idle"
 
     shared = tmp_path / "shared_auto"
     shared.mkdir()
@@ -325,9 +331,16 @@ def test_auto_ingest_on_startup(tmp_path):
             r = client.get("/health")
             assert r.json()["user_documents"] == 2
             assert r.json()["auto_ingest_status"] == "done"
+            assert "auto_analysis_status" in r.json()
+
+            r = client.get("/api/auto_analysis")
+            assert r.status_code == 200
+            assert "status" in r.json()
 
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._auto_analysis_result = None
+    app_mod._auto_analysis_status = "idle"
 
 
 # --- Broader ingest phrases ---

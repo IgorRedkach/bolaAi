@@ -417,10 +417,15 @@ async function checkHealth() {
     const j = await r.json();
     if (j.ollama) {
       const ais = j.auto_ingest_status || 'done';
+      const aas = j.auto_analysis_status || 'idle';
       const ud = j.user_documents || 0;
       if (ais !== 'idle' && ais !== 'done') {
         healthDot.className = 'dot starting';
         statusText.textContent = `Online · Auto-ingesting docs...`;
+        setReady(true);
+      } else if (aas === 'analyzing' || aas === 'waiting_for_ollama') {
+        healthDot.className = 'dot starting';
+        statusText.textContent = `Online · ${ud} doc(s) · Auto-analyzing...`;
         setReady(true);
       } else {
         healthDot.className = 'dot';
@@ -428,7 +433,7 @@ async function checkHealth() {
           ? `Online · ${j.documents_chunks} chunks · ${ud} doc(s) ingested`
           : `Online · ${j.documents_chunks} chunks · No user docs`;
         setReady(true);
-      }
+        if (aas === 'done') checkAutoAnalysis();
     } else {
       healthDot.className = 'dot starting';
       statusText.textContent = 'Ollama: starting...';
@@ -441,10 +446,29 @@ async function checkHealth() {
   }
 }
 
+let autoAnalysisFetched = false;
+
+async function checkAutoAnalysis() {
+  if (autoAnalysisFetched) return;
+  try {
+    const r = await fetch('/api/auto_analysis');
+    const j = await r.json();
+    if (j.status === 'done' && j.report) {
+      autoAnalysisFetched = true;
+      const already = chatHistory.some(m => m.type === 'auto_analysis');
+      if (!already) {
+        const docs = (j.user_doc_sources || []).join(', ');
+        addMsg('bot', `**Auto-analysis complete** (documents: ${docs}):\n\n${j.report}`, 'auto_analysis');
+      }
+    }
+  } catch {}
+}
+
 checkHealth();
 let healthInterval = setInterval(async () => {
   await checkHealth();
   if (systemReady) {
+    await checkAutoAnalysis();
     clearInterval(healthInterval);
     healthInterval = setInterval(checkHealth, 30000);
   }

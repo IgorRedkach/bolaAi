@@ -395,3 +395,15 @@ chromadb.errors.InternalError: ValueError: Batch size of 15525 is greater than m
 **Process improvement:** Add goal requiring that any feature touching startup must be tested against the actual all-in-one image flow, not just the dev stack.
 
 ---
+
+## BUG-005: Ollama context window truncation — prompts silently clipped at 4096 tokens (FIXED)
+
+**Reported:** User ran `analyze har.txt` on fresh image. Ollama logs show `truncating input prompt limit=4096 prompt=4882 keep=4 new=4096`. The system prompt + RAG context (10 chunks) + user query exceeded the default 4096 token KV cache, causing silent truncation and degraded analysis quality.
+
+**Root cause:** Neither the Modelfile nor the `llm.py` API client set `num_ctx`. Ollama defaults to `n_ctx=4096`. With 10 RAG chunks (~5000 chars = ~1200 tokens) + system prompt (~600 tokens) + user query, the total frequently exceeds 4096.
+
+**Fix:** Add `"num_ctx": 8192` to the `options` dict in `llm.py` `chat()`. The Qwen 2.5 Coder 1.5B model supports up to 32768 tokens; 8192 is sufficient and memory-efficient (~224 MB KV cache vs ~112 MB at 4096).
+
+**Status:** FIXED
+
+---

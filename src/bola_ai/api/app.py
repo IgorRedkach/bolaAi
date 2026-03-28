@@ -55,11 +55,13 @@ def _track_user_doc(source: str) -> None:
 
 
 _auto_ingest_status: str = "idle"
+_auto_analysis_status: str = "idle"
+_auto_analysis_result: Optional[str] = None
 
 
-def _auto_ingest_shared_docs():
-    """Auto-ingest files from shared docs folder (runs in background thread)."""
-    global _auto_ingest_status
+def _auto_ingest_and_analyze():
+    """Auto-ingest files from shared docs, then auto-analyze (runs in background thread)."""
+    global _auto_ingest_status, _auto_analysis_status, _auto_analysis_result
     shared_root = app_config.SHARED_DOCS_DIR.resolve()
     if not shared_root.exists():
         logger.info("Auto-ingest: shared docs dir not found (%s)", shared_root)
@@ -92,12 +94,42 @@ def _auto_ingest_shared_docs():
     logger.info("Auto-ingest: done. User docs: %s, total chunks: %d",
                  list(_user_doc_sources), store.count())
 
+    if not has_user_docs():
+        logger.info("Auto-analyze: no user docs ingested, skipping")
+        return
+
+    # Wait for Ollama to be ready before analyzing
+    from bola_ai.agent.llm import is_available
+    import time
+    _auto_analysis_status = "waiting_for_ollama"
+    logger.info("Auto-analyze: waiting for Ollama...")
+    for _ in range(120):
+        if is_available():
+            break
+        time.sleep(2)
+    else:
+        logger.error("Auto-analyze: Ollama not available after 240s, skipping analysis")
+        _auto_analysis_status = "error: ollama_unavailable"
+        return
+
+    _auto_analysis_status = "analyzing"
+    logger.info("Auto-analyze: starting BOLA analysis on %d user doc(s)...", len(_user_doc_sources))
+    try:
+        user_sources = sorted(_user_doc_sources)
+        result = analyze_for_bola(store, source_filter=user_sources)
+        _auto_analysis_result = result
+        _auto_analysis_status = "done"
+        logger.info("Auto-analyze: done, report_len=%d", len(result or ""))
+    except Exception as e:
+        logger.exception("Auto-analyze: failed: %s", e)
+        _auto_analysis_status = f"error: {e}"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _auto_ingest_status
     _auto_ingest_status = "starting"
-    t = threading.Thread(target=_auto_ingest_shared_docs, daemon=True)
+    t = threading.Thread(target=_auto_ingest_and_analyze, daemon=True)
     t.start()
     yield
 
@@ -131,14 +163,27 @@ def create_app() -> FastAPI:
             "user_documents": len(_user_doc_sources),
             "user_doc_sources": sorted(_user_doc_sources),
             "auto_ingest_status": _auto_ingest_status,
+            "auto_analysis_status": _auto_analysis_status,
+        }
+
+    @app.get("/api/auto_analysis")
+    def auto_analysis():
+        """Return the auto-analysis result if available."""
+        return {
+            "status": _auto_analysis_status,
+            "report": _auto_analysis_result,
+            "user_doc_sources": sorted(_user_doc_sources),
         }
 
     @app.post("/reset")
     def reset_store():
         """Clear the document store (for testing: ensures each test case runs with only the ingested doc)."""
+        global _auto_analysis_result, _auto_analysis_status
         store = get_store()
         store.reset()
         _user_doc_sources.clear()
+        _auto_analysis_result = None
+        _auto_analysis_status = "idle"
         return {"status": "ok", "message": "Store reset", "chunks": store.count()}
 
     @app.post("/ingest")

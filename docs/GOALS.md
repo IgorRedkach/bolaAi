@@ -150,3 +150,10 @@ All agents and LLMs used in the project should align with these goals: no intern
 
 - [x] **Non-blocking auto-ingest:** Auto-ingest runs in a background thread so the server starts accepting connections immediately. Health endpoint reports `auto_ingest_status` for UI progress display.
 - [ ] **All-in-one image smoke test in E2E:** Any feature that touches startup behavior, embedding, or store initialization MUST be validated against the actual all-in-one image (cold start, real embedder), not just the dev stack or unit tests with FakeEmbedder. Prevents "works in dev, breaks in prod" regressions.
+
+---
+
+## Hands-free Analysis (run, wait, read)
+
+- [x] **Auto-analyze on startup:** When the container starts with files in shared_docs/, after auto-ingest completes and Ollama is ready, automatically run BOLA analysis and store the result. The chat UI fetches and displays it on load. Users can: `docker run -p 8000:8000 -v ~/shared:/shared-docs ghcr.io/igorredkach/bolai:latest`, wait ~15 minutes, open `/chat`, and see the full analysis without typing anything.
+- [x] **Ollama context window fix:** Set `num_ctx: 8192` in Ollama API options to prevent prompt truncation when RAG context + system prompt exceeds the default 4096 token limit.
