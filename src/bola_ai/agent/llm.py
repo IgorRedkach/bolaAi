@@ -33,7 +33,7 @@ def chat(
     t = LLM_CHAT_TIMEOUT_SECONDS if timeout is None else float(timeout)
     url = f"{base_url or OLLAMA_BASE_URL}/api/chat"
     options: dict = {
-        "num_ctx": 16384,
+        "num_ctx": 32768,
         "num_predict": 4096,
     }
     if _NUM_THREAD > 0:

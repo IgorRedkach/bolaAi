@@ -3,6 +3,8 @@ set -e
 
 echo "=========================================="
 echo "  BOLA AI — Starting (all-in-one)"
+echo "  Model: qwen2.5-coder:7b (pre-baked)"
+echo "  Knowledge: 215 BOLA examples (pre-loaded)"
 echo "=========================================="
 
 # --- 1. Start Ollama in the background ---
@@ -26,7 +28,7 @@ done
 
 # --- 2. Verify model is present (baked into image during build) ---
 if ollama list 2>/dev/null | grep -q bola-analyzer; then
-  echo "[bola-ai] Model bola-analyzer found (pre-baked)."
+  echo "[bola-ai] Model bola-analyzer found (pre-baked with 15 few-shot examples)."
 else
   echo "[bola-ai] WARNING: bola-analyzer not found — creating from Modelfile..."
   echo "[bola-ai] Pulling qwen2.5-coder:7b (~4.7 GB, first run only)..."
@@ -35,16 +37,16 @@ else
   echo "[bola-ai] Model ready."
 fi
 
-# --- 3. Preload RAG knowledge (first run only) ---
+# --- 3. Preload RAG knowledge (skip if already baked into image) ---
 if [ "$BOLA_AI_PRELOAD" != "0" ] && { [ ! -d /data/chroma ] || [ -z "$(ls -A /data/chroma 2>/dev/null)" ]; }; then
-  echo "[bola-ai] Preloading RAG knowledge base..."
+  echo "[bola-ai] Preloading RAG knowledge base (215 BOLA examples)..."
   if PYTHONPATH=/app/src python /app/src/training/load_knowledge.py; then
     echo "[bola-ai] RAG preload done."
   else
     echo "[bola-ai] RAG preload failed (continuing anyway)."
   fi
 else
-  echo "[bola-ai] RAG already loaded."
+  echo "[bola-ai] RAG knowledge already loaded (pre-baked)."
 fi
 
 # --- 4. Start the web app ---

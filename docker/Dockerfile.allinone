@@ -1,5 +1,6 @@
-# BOLA AI — All-in-one image: Ollama + pre-baked 7B model + app.
-# The model is downloaded and created DURING BUILD so the image is self-contained.
+# BOLA AI — All-in-one image: Ollama + pre-baked 7B model + taught RAG knowledge + app.
+# The model is downloaded, taught with few-shot examples, and RAG knowledge is pre-loaded
+# ALL during BUILD so the image is 100% self-contained. No internet needed at runtime.
 # Users run: docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
 FROM python:3.11-slim AS base
 
@@ -17,11 +18,11 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 COPY data/ /app/data/
 
-# Bake Modelfile into image
+# Bake Modelfile into image (includes 15 few-shot teaching examples)
 COPY docker/Modelfile /app/Modelfile
 
-# --- Pre-bake the LLM model during build (no download at runtime) ---
-# Start Ollama, pull the 7B model, create bola-analyzer, stop Ollama.
+# --- Stage 1: Pre-bake the LLM model during build ---
+# Start Ollama, pull the 7B model, create bola-analyzer with few-shot examples, stop Ollama.
 # Model weights (~4.7 GB) are stored in /root/.ollama/models/ inside the image.
 RUN ollama serve & \
     OLLAMA_PID=$! && \
@@ -29,10 +30,18 @@ RUN ollama serve & \
     for i in $(seq 1 30); do ollama list >/dev/null 2>&1 && break || sleep 1; done && \
     echo "[build] Pulling qwen2.5-coder:7b (~4.7 GB)..." && \
     ollama pull qwen2.5-coder:7b && \
-    echo "[build] Creating bola-analyzer model..." && \
+    echo "[build] Creating bola-analyzer model (with 15 few-shot examples)..." && \
     ollama create bola-analyzer -f /app/Modelfile && \
     echo "[build] Model baked successfully." && \
     kill $OLLAMA_PID && sleep 2 || true
+
+# --- Stage 2: Pre-load RAG knowledge base during build ---
+# Loads all 215 BOLA training examples + knowledge patterns into ChromaDB.
+# Also downloads and caches the sentence-transformers embedding model (~90 MB).
+# Result: /data/chroma/ contains the fully indexed knowledge base.
+RUN PYTHONPATH=/app/src BOLA_AI_DATA=/data \
+    python /app/src/training/load_knowledge.py && \
+    echo "[build] RAG knowledge base pre-loaded into /data/chroma."
 
 # Entrypoint
 COPY docker/entrypoint-allinone.sh /entrypoint.sh
