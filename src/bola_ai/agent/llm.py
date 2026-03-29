@@ -1,6 +1,7 @@
 """Ollama LLM client for local inference."""
 
 import logging
+import os
 from typing import Optional
 
 import httpx
@@ -9,6 +10,10 @@ from bola_ai.config import LLM_CHAT_TIMEOUT_SECONDS, OLLAMA_BASE_URL, OLLAMA_MOD
 from bola_ai.logging_config import get_logger
 
 logger = get_logger("llm")
+
+# 7B model benefits from more CPU threads than Ollama's default auto-detection.
+# Override with BOLA_AI_NUM_THREAD env var (0 = let Ollama decide).
+_NUM_THREAD = int(os.environ.get("BOLA_AI_NUM_THREAD", "0"))
 
 
 def chat(
@@ -27,16 +32,20 @@ def chat(
     """
     t = LLM_CHAT_TIMEOUT_SECONDS if timeout is None else float(timeout)
     url = f"{base_url or OLLAMA_BASE_URL}/api/chat"
+    options: dict = {
+        "num_ctx": 16384,
+        "num_predict": 4096,
+    }
+    if _NUM_THREAD > 0:
+        options["num_thread"] = _NUM_THREAD
     payload = {
         "model": model or OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
-        "options": {
-            "num_ctx": 8192,
-            "num_predict": 2048,
-        },
+        "options": options,
     }
-    logger.debug("POST %s model=%s", url, payload.get("model"))
+    logger.debug("POST %s model=%s num_ctx=%s num_thread=%s",
+                 url, payload.get("model"), options.get("num_ctx"), options.get("num_thread"))
     with httpx.Client(timeout=t) as client:
         resp = client.post(url, json=payload)
         resp.raise_for_status()

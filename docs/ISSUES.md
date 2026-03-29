@@ -465,3 +465,26 @@ Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries als
 **Status:** FIXED
 
 ---
+
+## BUG-009: Docker image uses clean untrained 1.5B model — analysis quality far below expectations (FIXING)
+
+**Reported:** User compared output from the Docker image ("REST Path Analysis", "GraphQL Operation Analysis", generic templated garbage) against previous detailed analysis (Salesforce OWD/FLS reasoning, attack chains, PII identification, specific record IDs). The Docker image was downloading a clean `qwen2.5-coder:1.5b` model at runtime and only adding a system prompt — no fine-tuning, no embedded knowledge beyond RAG.
+
+**Root causes:**
+1. `qwen2.5-coder:1.5b` (1.5 billion parameters) simply cannot reason about complex security concepts like Salesforce OWD, FLS, attack chains, PII exposure, or construct nuanced BOLA findings
+2. Model was downloaded fresh at runtime — not pre-baked, adding startup delay and requiring internet
+3. Only 2 CPU threads detected by Ollama — slow inference compounded with low quality
+4. Context window (8192) and output limit (2048 tokens) too small for detailed 7B analysis
+5. No "teaching" beyond a system prompt — the model starts from zero every time
+
+**Fixes:**
+1. Switched from `qwen2.5-coder:1.5b` to `qwen2.5-coder:7b` — 4.7x more parameters, dramatically better reasoning
+2. Model pre-baked into Docker image during build — no runtime download, no internet needed, truly offline
+3. Added configurable `num_thread` override (`BOLA_AI_NUM_THREAD`) for faster CPU inference
+4. Increased context window to 16384 tokens and output limit to 4096 tokens for richer analysis
+5. Increased all timeouts: LLM chat 1200s, analyze client 1260s, auto-analysis 1800s (30 min)
+6. Docker image is now self-contained — model weights (~4.7 GB) included in the image layer
+
+**Status:** FIXING — code changes done, awaiting build and E2E verification
+
+---

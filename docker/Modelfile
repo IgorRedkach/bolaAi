@@ -1,5 +1,7 @@
-# BOLA-ready Ollama model: base Qwen 2.5 Coder + BOLA system prompt
-FROM qwen2.5-coder:1.5b
+# BOLA-ready Ollama model: base Qwen 2.5 Coder 7B + BOLA system prompt
+# 7B model produces dramatically better security analysis than 1.5B:
+# understands Salesforce OWD/FLS, constructs attack chains, identifies PII exposure
+FROM qwen2.5-coder:7b
 
 SYSTEM """You are a security analyst specializing in Broken Object-Level Authorization (BOLA) and API access control.
 

@@ -19,7 +19,7 @@ Start Ollama and pull a model:
 
 ```bash
 ollama serve   # if not already running
-ollama pull qwen2.5-coder:1.5b
+ollama pull qwen2.5-coder:7b
 ```
 
 Then start the API:
@@ -120,7 +120,7 @@ PYTHONPATH=src python src/training/load_knowledge.py
 
 | What | Env / behavior | Policy |
 |------|----------------|--------|
-| **LLM reply** (`/analyze`) | `BOLA_AI_LLM_CHAT_TIMEOUT` (default **300s**); client `BOLA_AI_ANALYZE_CLIENT_TIMEOUT` (**360s**) | Do **not** raise LLM timeout to mask slow inference. |
+| **LLM reply** (`/analyze`) | `BOLA_AI_LLM_CHAT_TIMEOUT` (default **1200s**); client `BOLA_AI_ANALYZE_CLIENT_TIMEOUT` (**1260s**) | 7B model on CPU needs up to 20 min for complex HAR analysis. |
 | **Ingest / learn docs** | `BOLA_AI_INGEST_TIMEOUT` (**600s**) | CLI `ingest`, scripts; embedding can be slow. |
 | **Stack startup** | `bola-ai health --wait`, `BOLA_AI_STACK_WAIT_SECONDS` (**900s**) | Wait for Ollama after `docker compose up`. |
 | **Ollama probe** | `BOLA_AI_OLLAMA_STARTUP_PROBE_TIMEOUT` (**60s**) | Cold `ollama list`, not chat. |

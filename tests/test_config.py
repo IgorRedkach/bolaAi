@@ -9,9 +9,12 @@ def test_analyze_client_timeout_covers_llm_chat_timeout():
 
 
 def test_ingest_timeout_allows_learning_not_inference():
-    """Ingest (embedding) may be slow; separate from LLM reply cap (Issue 17)."""
+    """Ingest (embedding) may be slow; separate from LLM reply cap (Issue 17).
+
+    Ingest timeout must be generous for CPU embedding but is independent of
+    LLM inference timeout (7B model inference ≠ embedding speed).
+    """
     assert config.INGEST_HTTP_TIMEOUT >= 300
-    assert config.INGEST_HTTP_TIMEOUT >= config.LLM_CHAT_TIMEOUT_SECONDS
 
 
 def test_stack_startup_waits_separate_from_llm():

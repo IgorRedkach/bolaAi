@@ -1,4 +1,5 @@
-# BOLA AI — All-in-one image: Ollama + model + app.
+# BOLA AI — All-in-one image: Ollama + pre-baked 7B model + app.
+# The model is downloaded and created DURING BUILD so the image is self-contained.
 # Users run: docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
 FROM python:3.11-slim AS base
 
@@ -18,6 +19,20 @@ COPY data/ /app/data/
 
 # Bake Modelfile into image
 COPY docker/Modelfile /app/Modelfile
+
+# --- Pre-bake the LLM model during build (no download at runtime) ---
+# Start Ollama, pull the 7B model, create bola-analyzer, stop Ollama.
+# Model weights (~4.7 GB) are stored in /root/.ollama/models/ inside the image.
+RUN ollama serve & \
+    OLLAMA_PID=$! && \
+    sleep 5 && \
+    for i in $(seq 1 30); do ollama list >/dev/null 2>&1 && break || sleep 1; done && \
+    echo "[build] Pulling qwen2.5-coder:7b (~4.7 GB)..." && \
+    ollama pull qwen2.5-coder:7b && \
+    echo "[build] Creating bola-analyzer model..." && \
+    ollama create bola-analyzer -f /app/Modelfile && \
+    echo "[build] Model baked successfully." && \
+    kill $OLLAMA_PID && sleep 2 || true
 
 # Entrypoint
 COPY docker/entrypoint-allinone.sh /entrypoint.sh

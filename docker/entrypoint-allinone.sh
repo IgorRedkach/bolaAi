@@ -24,14 +24,15 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# --- 2. Create model if not present ---
-if ! ollama list 2>/dev/null | grep -q bola-analyzer; then
-  echo "[bola-ai] Creating bola-analyzer model (first run — downloading ~1 GB)..."
-  ollama pull qwen2.5-coder:1.5b
+# --- 2. Verify model is present (baked into image during build) ---
+if ollama list 2>/dev/null | grep -q bola-analyzer; then
+  echo "[bola-ai] Model bola-analyzer found (pre-baked)."
+else
+  echo "[bola-ai] WARNING: bola-analyzer not found — creating from Modelfile..."
+  echo "[bola-ai] Pulling qwen2.5-coder:7b (~4.7 GB, first run only)..."
+  ollama pull qwen2.5-coder:7b
   ollama create bola-analyzer -f /app/Modelfile
   echo "[bola-ai] Model ready."
-else
-  echo "[bola-ai] Model bola-analyzer already exists."
 fi
 
 # --- 3. Preload RAG knowledge (first run only) ---
