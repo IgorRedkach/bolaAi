@@ -154,12 +154,14 @@ def _auto_ingest_and_analyze():
     logger.info("Auto-analyze: starting BOLA analysis on %d user doc(s)...", len(_user_doc_sources))
     try:
         user_sources = sorted(_user_doc_sources)
-        result = _run_serialized_analysis(
+        # Do not use foreground analysis lock here: startup analysis should not block
+        # interactive /api/chat and /analyze requests for minutes.
+        result = analyze_for_bola(
             store,
-            query=_AUTO_ANALYZE_QUERY,
+            custom_query=_AUTO_ANALYZE_QUERY,
+            n_context=app_config.AUTO_ANALYZE_N_CONTEXT,
             source_filter=user_sources,
-            timeout=300,
-            caller="auto_startup",
+            timeout=app_config.AUTO_ANALYZE_TIMEOUT_SECONDS,
         )
         _auto_analysis_result = result
         _auto_analysis_status = "done"

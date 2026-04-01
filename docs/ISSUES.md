@@ -642,3 +642,26 @@ Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries als
 **Autotest when passed:** `tests/test_agent.py::test_normalize_report_recovers_from_dangling_fence_near_empty_output`, validated with `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
 
 ---
+
+## BUG-012: Startup auto-analysis lock contention can block `/api/chat` and end in timeout
+
+**Status:** PASSED
+
+**Reported:** Pulled latest image timed out on a small doc; logs show startup auto-analysis failing with `ReadTimeout` and chat request taking 5m before 500.
+
+**Root cause:**
+1. Startup auto-analysis used the same serialized foreground analysis lock as interactive `/api/chat` and `/analyze`.
+2. If auto-analysis stalled/timed out, foreground chat waited behind it and inherited poor UX/failures.
+3. Startup auto-analysis context/timeout were not explicitly tuned for "fast-first-result" behavior.
+
+**Fixes:**
+1. Startup auto-analysis no longer uses foreground serialized analysis lock; foreground requests are no longer blocked behind background startup analysis.
+2. Added dedicated startup tuning config: `BOLA_AI_AUTO_ANALYZE_TIMEOUT`, `BOLA_AI_AUTO_ANALYZE_N_CONTEXT`.
+3. Kept foreground lock for user requests to avoid interactive request pileups, but decoupled background startup work from it.
+4. Added regression test ensuring startup path does not call serialized foreground helper.
+
+**Acceptance:** Pull/run image with shared docs should keep `/api/chat` responsive even if startup auto-analysis is slow/fails; no 5-minute lock-wait blockage behind startup analysis.
+
+**Autotests when passed:** `tests/test_api.py::test_auto_ingest_and_analyze_does_not_use_foreground_analysis_lock`, `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
+
+---

@@ -279,7 +279,7 @@ If **anything** above is unfinished—including **not yet running E2E for this c
 
 ### H) Fresh-image hands-free E2E (mandatory when startup/ingest/analysis changes)
 
-When the current cycle includes changes to startup behavior, auto-ingest, auto-analysis, Ollama context, or the all-in-one image:
+When the current cycle includes changes to startup behavior, auto-ingest, auto-analysis, inference timeouts/locking, Ollama context, or the all-in-one image:
 
 1. **Push changes** and wait for the GitHub Actions image build to complete (~10 minutes).
 2. **Remove all BOLA containers and images** locally:
@@ -300,6 +300,8 @@ When the current cycle includes changes to startup behavior, auto-ingest, auto-a
    - Chat history persists across reload
 7. **Talk to the agent** — send follow-up questions via the chat UI. Verify responses are ONLY related to the test data you generated (no generic training data leaking).
 8. **If all good:** Section H passes. If issues found: create OPEN issues/weak-places and immediately start a new loop.
+
+**Priority rule:** If a runtime timeout/deploy issue is detected in any loop, file the issue immediately and treat Section H as mandatory in the next loop before claiming completion.
 
 ## Output format I want from you at the end
 

@@ -346,6 +346,35 @@ def test_auto_ingest_on_startup(tmp_path):
     app_mod._auto_analysis_status = "idle"
 
 
+def test_auto_ingest_and_analyze_does_not_use_foreground_analysis_lock(tmp_path):
+    """Startup auto-analysis should not call foreground serialized analysis helper."""
+    from unittest.mock import patch
+    from bola_ai.api import app as app_mod
+    from bola_ai import config as cfg
+
+    app_mod._store = None
+    app_mod._user_doc_sources.clear()
+    app_mod._auto_analysis_result = None
+    app_mod._auto_analysis_status = "idle"
+
+    shared = tmp_path / "shared_auto_nonblocking"
+    shared.mkdir()
+    (shared / "doc.md").write_text("GET /api/v1/orders/{id}\nNo ownership check.", encoding="utf-8")
+
+    with patch.object(cfg, "USE_FAKE_EMBEDDER", True), \
+         patch.object(cfg, "SHARED_DOCS_DIR", shared), \
+         patch.object(cfg, "AUTO_ANALYZE_ON_STARTUP", True), \
+         patch.object(cfg, "AUTO_ANALYZE_TIMEOUT_SECONDS", 5.0), \
+         patch.object(cfg, "AUTO_ANALYZE_N_CONTEXT", 4), \
+         patch("bola_ai.agent.llm.is_available", return_value=True), \
+         patch("bola_ai.api.app.analyze_for_bola", return_value="## Potential findings\n\n### Test finding"), \
+         patch("bola_ai.api.app._run_serialized_analysis", side_effect=AssertionError("must not be called")):
+        app_mod._auto_ingest_and_analyze()
+
+    assert app_mod._auto_ingest_status == "done"
+    assert app_mod._auto_analysis_status == "done"
+    assert "Test finding" in (app_mod._auto_analysis_result or "")
+
 # --- Broader ingest phrases ---
 
 @pytest.mark.parametrize("phrase", [

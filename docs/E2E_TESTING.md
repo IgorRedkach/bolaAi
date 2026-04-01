@@ -165,3 +165,17 @@ After API-level E2E completes, verify the **interactive web chat** works:
 **Pass criteria:** All 7 steps succeed. The chat UI renders markdown correctly, auto-scrolls, and the loading spinner appears during analysis.
 
 If any step fails, file an **OPEN** issue in `docs/ISSUES.md` and fix before claiming E2E completion.
+
+---
+
+## Mandatory publish/pull verification (runtime issues)
+
+When a loop fixes runtime problems (timeouts, startup contention, deployment regressions), this is mandatory before closure:
+
+1. Push changes so CI publishes a new image.
+2. Delete local BOLA containers and images.
+3. Pull the newly published image.
+4. Run from scratch with shared docs volume.
+5. Verify `/health`, `/chat`, and one interactive analysis request.
+
+This prevents "works in source tree but not in pulled image" regressions.

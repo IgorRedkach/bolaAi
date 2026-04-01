@@ -53,3 +53,6 @@ LOG_LEVEL = os.environ.get("BOLA_AI_LOG_LEVEL", "INFO")
 
 # Startup automation
 AUTO_ANALYZE_ON_STARTUP = os.environ.get("BOLA_AI_AUTO_ANALYZE_ON_STARTUP", "1").lower() in ("1", "true", "yes")
+# Startup auto-analysis tuning: keep it quick and non-blocking for interactive users.
+AUTO_ANALYZE_TIMEOUT_SECONDS = float(os.environ.get("BOLA_AI_AUTO_ANALYZE_TIMEOUT", "420"))
+AUTO_ANALYZE_N_CONTEXT = int(os.environ.get("BOLA_AI_AUTO_ANALYZE_N_CONTEXT", "8"))
