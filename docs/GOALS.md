@@ -123,6 +123,11 @@ All agents and LLMs used in the project should align with these goals: no intern
 - [x] **Weak-place registry:** Gaps are tracked in **`docs/AGENT_WEAK_PLACES.md`**; **OPEN** rows block “done”; agents **chain fix → re-verify loops** in-session per **`docs/AGENT_PROMPT_FULL_CYCLE.md`** and **`docs/ANALYSIS_AGENT_LOOP_STOP_GAP.md`**.
 - [x] **Goal immutability by default:** Agents must not delete user-defined goals from `docs/GOALS.md` unless the user explicitly requests deletion; goals are edited/superseded with traceability.
 - [x] **Shared Docker volume ingestion workflow:** Users can provide docs by copying files into shared docs volume/path (`shared_docs` ↔ `/shared-docs`), then ingest via API/CLI (`POST /ingest_shared`, `bola-ai ingest-shared`). Agent E2E uses this path by default.
+- [x] **AI-assisted teaching pipeline scaffolding:** Prompt templates + task-pack generator exist to create high-quality synthetic docs/schemas/network logs and grounded expected responses for continuous model teaching (`src/training/ai_teacher_prompts.py`, `scripts/generate_ai_training_tasks.py`, `docs/AI_MODEL_TEACHING_PLAN.md`).
+- [ ] **AI-agent teaching at scale:** Run recurring multi-agent generation/review cycles, accept only gate-passing examples, and feed accepted data into training/RAG updates with tracked quality gains against benchmark fixtures.
+- [ ] **Diverse test-data generation is mandatory:** Agent E2E data generation must cover different document types and systems across loops (not Salesforce-only, not HAR-only): include mixed REST docs, GraphQL/SOQL-aware docs when applicable, and network-log/HAR-style inputs from different domains.
+- [ ] **Assume documentation is incomplete by default:** Full/complete architecture documentation is rare in practice. The tool and E2E process must be robust to partial docs, explicitly mark uncertainty, and avoid overclaiming when ownership controls are undocumented.
+- [x] **Trained model must be baked into shipped image:** Production image must include the prepared model (not a fresh runtime pull). Startup should fail fast when the baked model is missing unless explicit fallback is opted in.
 
 ---
 

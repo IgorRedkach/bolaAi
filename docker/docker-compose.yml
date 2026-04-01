@@ -46,6 +46,12 @@ services:
       BOLA_AI_DATA: /data
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: bola-analyzer
+      BOLA_AI_NUM_THREAD: "${BOLA_AI_NUM_THREAD:-8}"
+      BOLA_AI_OLLAMA_NUM_CTX: "${BOLA_AI_OLLAMA_NUM_CTX:-8192}"
+      BOLA_AI_OLLAMA_NUM_PREDICT: "${BOLA_AI_OLLAMA_NUM_PREDICT:-768}"
+      BOLA_AI_N_CONTEXT: "${BOLA_AI_N_CONTEXT:-12}"
+      BOLA_AI_MAX_CONTEXT_CHARS: "${BOLA_AI_MAX_CONTEXT_CHARS:-12000}"
+      BOLA_AI_AUTO_ANALYZE_ON_STARTUP: "${BOLA_AI_AUTO_ANALYZE_ON_STARTUP:-1}"
       # Set to "0" to skip RAG preload on first start (if low RAM)
       BOLA_AI_PRELOAD: "1"
       # DEBUG for more logs

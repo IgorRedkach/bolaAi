@@ -24,6 +24,7 @@ from bola_ai.rag.store import DocStore
 # Lazy singleton store (thread-safe)
 _store: Optional[DocStore] = None
 _store_lock = threading.Lock()
+_analysis_lock = threading.Lock()
 _user_doc_sources: set[str] = set()
 
 
@@ -59,9 +60,37 @@ def _track_user_doc(source: str) -> None:
     _user_doc_sources.add(source)
 
 
+def _run_serialized_analysis(
+    store: DocStore,
+    *,
+    query: Optional[str],
+    source_filter: Optional[list[str]],
+    timeout: Optional[float] = None,
+    caller: str = "api",
+) -> str:
+    """Serialize LLM analyze calls to avoid contention timeouts.
+
+    Running multiple heavy 7B requests concurrently can severely degrade
+    throughput and cause avoidable timeouts. We run one analyze at a time.
+    """
+    logger.info("Analyze lock: waiting (caller=%s)", caller)
+    with _analysis_lock:
+        logger.info("Analyze lock: acquired (caller=%s)", caller)
+        return analyze_for_bola(
+            store,
+            custom_query=query,
+            source_filter=source_filter,
+            timeout=timeout,
+        )
+
+
 _auto_ingest_status: str = "idle"
 _auto_analysis_status: str = "idle"
 _auto_analysis_result: Optional[str] = None
+_AUTO_ANALYZE_QUERY = (
+    "Analyze only uploaded user documents for likely BOLA risks. "
+    "Return up to 3 highest-confidence, source-grounded findings with exact endpoints and short two-user verification steps."
+)
 
 
 def _auto_ingest_and_analyze():
@@ -102,6 +131,10 @@ def _auto_ingest_and_analyze():
     if not has_user_docs():
         logger.info("Auto-analyze: no user docs ingested, skipping")
         return
+    if not app_config.AUTO_ANALYZE_ON_STARTUP:
+        logger.info("Auto-analyze: disabled by config")
+        _auto_analysis_status = "disabled"
+        return
 
     # Wait for Ollama to be ready before analyzing
     from bola_ai.agent.llm import is_available
@@ -121,7 +154,13 @@ def _auto_ingest_and_analyze():
     logger.info("Auto-analyze: starting BOLA analysis on %d user doc(s)...", len(_user_doc_sources))
     try:
         user_sources = sorted(_user_doc_sources)
-        result = analyze_for_bola(store, source_filter=user_sources, timeout=1800)
+        result = _run_serialized_analysis(
+            store,
+            query=_AUTO_ANALYZE_QUERY,
+            source_filter=user_sources,
+            timeout=300,
+            caller="auto_startup",
+        )
         _auto_analysis_result = result
         _auto_analysis_status = "done"
         logger.info("Auto-analyze: done, report_len=%d", len(result or ""))
@@ -271,7 +310,12 @@ def create_app() -> FastAPI:
         logger.info("Analyze: query=%s chunks_available=%s", query or "(default)", store.count())
         try:
             user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
-            result = analyze_for_bola(store, custom_query=query, source_filter=user_sources)
+            result = _run_serialized_analysis(
+                store,
+                query=query,
+                source_filter=user_sources,
+                caller="api_analyze",
+            )
             logger.info("Analyze: completed report_len=%s", len(result or ""))
             log_memory(logger, "after analyze")
             return {"status": "ok", "report": result}
@@ -527,7 +571,12 @@ Bot: ## Verification steps ...
             }
         try:
             user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
-            result = analyze_for_bola(store, custom_query=msg, source_filter=user_sources)
+            result = _run_serialized_analysis(
+                store,
+                query=msg,
+                source_filter=user_sources,
+                caller="chat",
+            )
             return {"role": "assistant", "content": result, "type": "analysis"}
         except _httpx.TimeoutException:
             return {

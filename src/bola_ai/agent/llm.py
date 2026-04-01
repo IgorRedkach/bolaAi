@@ -6,14 +6,31 @@ from typing import Optional
 
 import httpx
 
-from bola_ai.config import LLM_CHAT_TIMEOUT_SECONDS, OLLAMA_BASE_URL, OLLAMA_MODEL
+from bola_ai.config import (
+    LLM_CHAT_TIMEOUT_SECONDS,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OLLAMA_NUM_CTX,
+    OLLAMA_NUM_PREDICT,
+)
 from bola_ai.logging_config import get_logger
 
 logger = get_logger("llm")
 
-# 7B model benefits from more CPU threads than Ollama's default auto-detection.
-# Override with BOLA_AI_NUM_THREAD env var (0 = let Ollama decide).
-_NUM_THREAD = int(os.environ.get("BOLA_AI_NUM_THREAD", "0"))
+def _default_num_thread() -> int:
+    """Pick a sane default CPU thread count for local 7B inference.
+
+    Ollama auto-detection may choose very low values in constrained/containerized
+    environments, which makes inference unreasonably slow.
+    """
+    override = os.environ.get("BOLA_AI_NUM_THREAD")
+    if override is not None:
+        return int(override)
+    cpus = os.cpu_count() or 2
+    return max(2, min(8, cpus))
+
+
+_NUM_THREAD = _default_num_thread()
 
 
 def chat(
@@ -33,8 +50,8 @@ def chat(
     t = LLM_CHAT_TIMEOUT_SECONDS if timeout is None else float(timeout)
     url = f"{base_url or OLLAMA_BASE_URL}/api/chat"
     options: dict = {
-        "num_ctx": 32768,
-        "num_predict": 4096,
+        "num_ctx": OLLAMA_NUM_CTX,
+        "num_predict": OLLAMA_NUM_PREDICT,
     }
     if _NUM_THREAD > 0:
         options["num_thread"] = _NUM_THREAD

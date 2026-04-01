@@ -14,6 +14,8 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HO
 if OLLAMA_BASE_URL and not OLLAMA_BASE_URL.startswith("http"):
     OLLAMA_BASE_URL = f"http://{OLLAMA_BASE_URL}"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "bola-analyzer")
+OLLAMA_NUM_CTX = int(os.environ.get("BOLA_AI_OLLAMA_NUM_CTX", "8192"))
+OLLAMA_NUM_PREDICT = int(os.environ.get("BOLA_AI_OLLAMA_NUM_PREDICT", "768"))
 
 # Embeddings (local, small model for offline use)
 EMBEDDING_MODEL = os.environ.get("BOLA_AI_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -42,9 +44,12 @@ OLLAMA_STARTUP_PROBE_TIMEOUT = float(os.environ.get("BOLA_AI_OLLAMA_STARTUP_PROB
 USE_FAKE_EMBEDDER = os.environ.get("BOLA_AI_FAKE_EMBEDDER", "").lower() in ("1", "true", "yes")
 
 # RAG: max chunks sent to LLM (higher = richer context for complex docs like HAR files)
-N_CONTEXT = int(os.environ.get("BOLA_AI_N_CONTEXT", "20"))
+N_CONTEXT = int(os.environ.get("BOLA_AI_N_CONTEXT", "12"))
 # Optional cap on total context string length (chars); 0 = no cap
-MAX_CONTEXT_CHARS = int(os.environ.get("BOLA_AI_MAX_CONTEXT_CHARS", "0"))
+MAX_CONTEXT_CHARS = int(os.environ.get("BOLA_AI_MAX_CONTEXT_CHARS", "12000"))
 
 # Logging
 LOG_LEVEL = os.environ.get("BOLA_AI_LOG_LEVEL", "INFO")
+
+# Startup automation
+AUTO_ANALYZE_ON_STARTUP = os.environ.get("BOLA_AI_AUTO_ANALYZE_ON_STARTUP", "1").lower() in ("1", "true", "yes")

@@ -26,6 +26,7 @@ You are a coding agent working in my local repo. Your job is to run a full quali
 - **Runtime must not require open internet.**
 - **Stack:** FastAPI + Chroma RAG + Ollama model in Docker.
 - **Behavior quality, not only passing tests.** **No quality shortcuts:** do not shorten queries, cut content, or relax criteria to make steps “pass”. If something fails or is unacceptable, **analyze the root cause**, **document it as a problem**, and **fix it** in the next loop.
+- **Documentation realism:** Treat source docs as potentially incomplete by default (fully complete docs are rare). Keep findings grounded and explicitly call out uncertainty when ownership logic is undocumented.
 
 ## Hard requirements
 
@@ -113,6 +114,7 @@ You must run the tool for real and communicate with it. Do not stop and propose 
    - **Every** time you run section E in a loop, you must **create new documentation** for that iteration. **Do not** reuse the same fixture file or the same doc text as the previous loop’s primary E2E (e.g. do not run E2E only on `doc_onetime_loan_portal.md` every time). Each loop: a **new fake project/API** (new paths, new resource names, new scenario).
    - **Before writing:** List 3–5+ **inserted high-risk BOLA possibilities** for **this** doc. **Write “expected risks” for this run only** — they define what the system must surface for **this** data.
    - **Then write** the doc so those risks are present; vary REST / GraphQL / SOQL / legacy / cross-tenant as appropriate.
+   - **Diversity is mandatory across loops:** do not keep running Salesforce-only or HAR-only docs; rotate systems and document types.
    - Save as a **new** file (e.g. `tests/fixtures/doc_onetime_<shortname>_<loop>.md` or a dated name) or one-time payload; tag which loop it belongs to in your notes.
 
 3. **Communicate with the tool via the API as a person would — new questions every loop.**

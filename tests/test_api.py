@@ -74,14 +74,17 @@ def test_analyze_after_ingest_mocked(mock_chat, api_client: TestClient):
     mock_chat.assert_called_once()
 
 
-def test_analyze_after_ingest(api_client: TestClient):
-    """Ingest then analyze; if Ollama is available we get 200 and report, else 500."""
+@patch("bola_ai.agent.runner.chat")
+def test_analyze_after_ingest_uses_default_query_when_empty(mock_chat, api_client: TestClient):
+    """Analyze endpoint should work with empty JSON by using its default query."""
+    mock_chat.return_value = "## Potential BOLA\n- Default analyze query still returns a report."
     api_client.post("/ingest", data={"content": "API: GET /api/orders/{id}. No permission check.", "source": "test"})
     r = api_client.post("/analyze", json={})
-    assert r.status_code in (200, 500)
-    if r.status_code == 200:
-        j = r.json()
-        assert "report" in j and j.get("status") == "ok"
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get("status") == "ok"
+    assert "report" in j and len(j["report"]) > 10
+    mock_chat.assert_called_once()
 
 
 def test_index_html(api_client: TestClient):

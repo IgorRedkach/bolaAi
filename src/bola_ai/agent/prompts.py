@@ -17,7 +17,13 @@ Also consider (only when the **documentation excerpt** mentions them): related t
 
 **SOQL / Salesforce — only if the documentation excerpt mentions SOQL, Salesforce, or Apex:** Then discuss record-level BOLA for that context. **If the excerpt has no SOQL/Salesforce, do not mention SOQL, Salesforce, WITH SECURITY_ENFORCED, or example SOQL queries.**
 
-Respond in clear markdown. Use "## Potential findings" then for each finding exactly one "### " heading for the title, then "**Rationale**", "**Verification steps**", and optionally "**Example**"."""
+Respond in clear markdown. Use "## Potential findings" then for each finding exactly one "### " heading for the title, then "**Rationale**", "**Verification steps**", and optionally "**Example**".
+Keep answers concise and complete:
+- Default to top 3 findings unless user explicitly asks for more.
+- Avoid duplicate summary sections or repeated endpoint blocks.
+- Prefer compact verification/runbook steps that fit in a single complete response (no cut-off endings).
+
+Do not output generic technology buckets like "REST analysis", "SQL analysis", or "GraphQL analysis" unless those specific technologies are explicitly present in the provided documentation/HAR excerpt and tied to concrete operations in that excerpt."""
 
 GROUNDING_USER_SUFFIX = """
 

@@ -127,6 +127,17 @@ def test_normalize_report_redacts_paths_not_in_allowed_context():
     assert "[use only endpoints from the documentation]" in out
 
 
+def test_normalize_report_keeps_allowed_users_path():
+    raw = (
+        "## Potential findings\n\n"
+        "### User endpoint\n"
+        "**Verification steps:** Call GET /api/users/123 with token A and B."
+    )
+    out = _normalize_report(raw, allowed_paths=["/api/users/{id}"])
+    assert "/api/users/123" in out
+    assert "[use only endpoints from the documentation]" not in out
+
+
 def test_normalize_report_rewrites_invalid_401_bola_confirmation():
     raw = (
         "## Potential findings\n\n"
@@ -200,6 +211,17 @@ def test_normalize_report_keeps_graphql_fence_when_doc_includes_graphql():
     assert "```graphql" in out.lower() or "query {" in out
 
 
+def test_normalize_report_keeps_graphql_when_context_says_not_rest_only():
+    ctx = (
+        "POST /services/data/v60.0/graphql operation getCaseComments. "
+        "Constraint: this is not a generic SQL/REST-only system."
+    )
+    raw = "## Potential findings\n```graphql\nquery { getCaseComments(recordId: \"500\") { edges { node { Body__c } } } }\n```"
+    out = _normalize_report(raw, context=ctx)
+    assert "```graphql" in out.lower() or "getCaseComments" in out
+    assert "does not define GraphQL" not in out
+
+
 def test_normalize_report_grounds_claims_only_doc():
     """When doc has only claims paths, report must not show Patient/Document API (Issue 15)."""
     allowed = ["/api/v2/claims/{claimId}", "/api/v2/policies/{policyId}/claims"]
@@ -260,12 +282,87 @@ def test_normalize_report_replaces_broken_redacted_url_with_grounded_placeholder
     assert "https://api.example.com/permits/v2/applications/{applicationId}" in out
 
 
+def test_normalize_report_repairs_redacted_path_field_with_fallback():
+    raw = "Path: [use only endpoints from the documentation]\n"
+    out = _normalize_report(raw, allowed_paths=["/api/v1/vendors/{vendorId}/bids/{bidId}"])
+    assert "Path: [use only endpoints from the documentation]" not in out
+    assert "Path: /api/v1/vendors/{vendorId}/bids/{bidId}" in out
+
+
+def test_normalize_report_strips_placeholder_only_no_lines_in_path_audit():
+    raw = (
+        "## HTTP Paths Verified\n\n"
+        "- **NO** [use only endpoints from the documentation]\n"
+        "- **NO** GET [use only endpoints from the documentation]\n"
+        "- **NO** POST https://api.example.com/graphql\n"
+    )
+    out = _normalize_report(raw)
+    assert "- **NO** [use only endpoints from the documentation]" not in out
+    assert "- **NO** GET [use only endpoints from the documentation]" not in out
+    assert "- **NO** POST https://api.example.com/graphql" in out
+
+
+def test_normalize_report_recovers_from_dangling_fence_near_empty_output():
+    raw = "## Potential findings\n\n```"
+    out = _normalize_report(raw)
+    assert "```" not in out
+    assert len(out.strip()) > 60
+    assert "two different user tokens" in out.lower()
+
+
 def test_normalize_report_rewrites_invalid_user_a_denied_confirmation():
     raw = "If Alice does not receive data, BOLA is confirmed."
     out = _normalize_report(raw)
     low = out.lower()
     assert "bola is confirmed" not in low
     assert "does not confirm bola" in low
+
+
+def test_normalize_report_rewrites_token_a_200_token_b_403_interpretation():
+    raw = (
+        "If Token A's call returns 200 and Token B's call returns 403 (Forbidden), "
+        "it suggests an ownership check exists but is not functioning as expected."
+    )
+    out = _normalize_report(raw)
+    low = out.lower()
+    assert "access control appears to be enforced" in low
+    assert "does not confirm bola" in low
+
+
+def test_normalize_report_removes_dangling_trailing_heading_before_reminder():
+    raw = (
+        "## Potential findings\n\n"
+        "### GET /api/v2/cards/{cardId}/balance\n"
+        "**Rationale:** Missing owner check.\n\n"
+        "### GET /api\n"
+    )
+    out = _normalize_report(raw)
+    assert "### GET /api\n" not in out
+    assert "### GET /api/v2/cards/{cardId}/balance" in out
+
+
+def test_normalize_report_relabels_403_as_secure_outcome():
+    raw = (
+        "## Secure vs vulnerable outcomes\n\n"
+        "**Vulnerable Outcome (403 Forbidden):**\n"
+        "- HTTP Status: 403 Forbidden\n"
+    )
+    out = _normalize_report(raw)
+    assert "Vulnerable Outcome (403 Forbidden)" not in out
+    assert "Secure Outcome (403 Forbidden)" in out
+
+
+def test_normalize_report_strips_generic_meta_headings():
+    raw = (
+        "### Potential BOLA findings with rationale and verification steps\n"
+        "#### Federal Procurement Collaboration API (One-time E2E Fixture)\n"
+        "### GET /api/v1/vendors/{vendorId}/bids/{bidId}\n"
+        "**Rationale:** Missing ownership checks.\n"
+    )
+    out = _normalize_report(raw)
+    assert "Potential BOLA findings with rationale and verification steps" not in out
+    assert "One-time E2E Fixture" not in out
+    assert "### GET /api/v1/vendors/{vendorId}/bids/{bidId}" in out
 
 
 def test_normalize_report_strips_bola_remediation_cheat_sheet(
@@ -303,8 +400,8 @@ def test_normalize_report_strips_raw_notes_section():
     assert "PATCH /accounts" in out
 
 
-def test_normalize_report_strips_fix_steps_sections():
-    """WP-007: 'Fix steps' sections generated by model are off-spec and inflate output — must be stripped."""
+def test_normalize_report_keeps_fix_steps_sections():
+    """Fix steps are actionable and should remain in output."""
     raw = (
         "### PATCH /accounts/{accountId}/contact\n"
         "**Rationale:** No ownership check.\n"
@@ -314,13 +411,13 @@ def test_normalize_report_strips_fix_steps_sections():
         "**Rationale:** Billing data exposed.\n"
     )
     out = _normalize_report(raw)
-    assert "Fix steps" not in out
+    assert "Fix steps" in out
     assert "PATCH /accounts" in out
     assert "GET /properties" in out
 
 
-def test_normalize_report_strips_plain_fix_steps_bullet():
-    """WP-014: Plain-text '- Fix steps:' bullet (unbolded) must also be stripped."""
+def test_normalize_report_keeps_plain_fix_steps_bullet():
+    """Plain '- Fix steps:' bullet should be preserved for auditor actionability."""
     raw = (
         "### GET /accounts/{accountId}/usage\n"
         "**Rationale:** No ownership check.\n"
@@ -330,9 +427,26 @@ def test_normalize_report_strips_plain_fix_steps_bullet():
         "**Rationale:** No check on contact update.\n"
     )
     out = _normalize_report(raw)
-    assert "Fix steps" not in out
+    assert "Fix steps" in out
     assert "GET /accounts" in out
     assert "PATCH /accounts" in out
+
+
+def test_normalize_report_structured_context_does_not_redact_real_api_paths():
+    """HAR/Salesforce contexts should not trigger aggressive prefix redaction."""
+    raw = (
+        "## Potential findings\n\n"
+        "### GET /api/v1/invoices/{invoiceId}\n"
+        "**Verification steps:** Call GET /api/v1/invoices/123 with token A and token B.\n"
+    )
+    out = _normalize_report(
+        raw,
+        allowed_paths=["/services/data/v60.0/sobjects/Case/{recordId}"],
+        context="HAR API Capture Analysis with aura and graphql operations",
+        source_filter=["har.txt"],
+    )
+    assert "/api/v1/invoices/123" in out
+    assert "[use only endpoints from the documentation]" not in out
 
 
 def test_normalize_report_strips_python_code_block():

@@ -488,3 +488,157 @@ Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries als
 **Status:** FIXING — code changes done, awaiting build and E2E verification
 
 ---
+
+## BUG-010: Structured HAR/Salesforce outputs became over-normalized and unusable (FIXED)
+
+**Reported:** Fresh Docker image produced low-value templated output with odd placeholders/redactions (for example broken path placeholders in curl and generic cross-technology sections) even when HAR content contained concrete Salesforce/GraphQL evidence.
+
+**Root causes:**
+1. `_normalize_report()` applied hallucinated REST prefix redaction to structured HAR/Salesforce contexts, which could hide valid paths and degrade examples.
+2. Startup auto-analysis used a generic query that encouraged broad template output instead of source-specific findings.
+3. Entrypoint could silently fall back to runtime model pull/create when expected pre-baked model was missing, making behavior inconsistent with offline/quality expectations.
+
+**Fixes:**
+1. Skip aggressive hallucinated-prefix/title redaction for structured contexts (`HAR`, `Salesforce`, `GraphQL`, `Aura`) in `src/bola_ai/agent/runner.py`.
+2. Keep actionable `Fix steps` sections in normalized reports (do not strip useful remediation content).
+3. Use a stricter, source-grounded startup auto-analysis query in `src/bola_ai/api/app.py`.
+4. Harden all-in-one entrypoint: fail fast if baked model is missing unless explicit opt-in fallback (`BOLA_AI_ALLOW_MODEL_PULL=1`).
+
+**Autotests:**  
+`tests/test_agent.py::test_normalize_report_structured_context_does_not_redact_real_api_paths`  
+`tests/test_agent.py::test_normalize_report_keeps_fix_steps_sections`  
+`tests/test_agent.py::test_normalize_report_keeps_plain_fix_steps_bullet`  
+`tests/test_api.py::test_auto_ingest_on_startup`
+
+**Status:** FIXED
+
+---
+
+## BUG-011: Live 7B inference timeouts in full regression runs (FIXED)
+
+**Status:** FIXED
+
+**Reported:** During full-cycle validation on 7B, long live tests (`test_api_live.py`, `test_issues_resolved.py`) can hit client read timeouts before completion, especially after repeated analyze calls in one run.
+
+**Observed symptoms:**
+1. `POST /analyze` occasionally exceeds 420-660s in live regression tests.
+2. Full `pytest tests/` becomes unstable due long inference windows.
+3. Adaptive/manual E2E can stall if query scope is broad.
+
+**Fixes applied:**
+1. Runtime tuning defaults: explicit thread/cap settings (`BOLA_AI_NUM_THREAD`, `BOLA_AI_OLLAMA_NUM_CTX`, `BOLA_AI_OLLAMA_NUM_PREDICT`, `BOLA_AI_N_CONTEXT`, `BOLA_AI_MAX_CONTEXT_CHARS`).
+2. Startup auto-analysis preserved (enabled by default) and contention controlled by serializing analyze calls with an API-level analysis lock; live tests now wait for startup auto-analysis to settle before issuing benchmark analyze calls.
+3. Auto-analysis query/timeout reduced in API code for safer behavior when enabled (`_AUTO_ANALYZE_QUERY` simplified; timeout lowered to 300s).
+4. Live tests hardened to use configured client timeout and concise retry behavior.
+
+**Acceptance (to close):**
+1. `PYTHONPATH=src pytest tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze -q` passes (64s).
+2. `PYTHONPATH=src pytest tests/test_issues_resolved.py -q` passes (10 tests).
+3. Adaptive E2E completed 4 interactive turns on `doc_onetime_transit_cards_20260331.md` without forced termination; responses grounded to fixture endpoints.
+
+**Autotest when passed:**
+- `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
+- `tests/test_issues_resolved.py` (full file)
+
+---
+
+## Issue 26: [E2E-LOOP] Trailing truncated heading appears before verification reminder
+
+**Status:** PASSED
+
+**Description:** In adaptive follow-up responses, model output could end with a dangling partial finding heading (for example `### GET /api`) just before the appended verification reminder. This creates malformed/truncated output for auditors.
+
+**Acceptance:** Normalization removes trailing dangling `###` finding headings when they are incomplete and appear immediately before the verification reminder block.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_removes_dangling_trailing_heading_before_reminder`
+
+---
+
+## Issue 27: [E2E-LOOP] Outcome interpretation inversion labels 403 as vulnerable
+
+**Status:** PASSED
+
+**Description:** In adaptive runbook-style answers, model could output `Vulnerable Outcome (403 Forbidden)`, which inverts authorization semantics. For unauthorized user tests, `403` indicates enforcement and should not be labeled as vulnerability.
+
+**Acceptance:** Normalization rewrites `Vulnerable Outcome (403 Forbidden)` to `Secure Outcome (403 Forbidden)` in generated report text.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_relabels_403_as_secure_outcome`
+
+---
+
+## Issue 28: [E2E-LOOP] Generic meta headings leak into findings section
+
+**Status:** PASSED
+
+**Description:** Adaptive outputs can include generic meta headings (for example `### Potential BOLA findings with rationale and verification steps`) and fixture title lines, which are not endpoint findings and reduce auditor clarity.
+
+**Acceptance:** Normalization strips these generic meta headings while preserving real endpoint findings.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_strips_generic_meta_headings`
+
+---
+
+## Issue 29: [E2E-LOOP] Adaptive runbook replies can truncate near end of response
+
+**Status:** PASSED
+
+**Description:** Live adaptive runbook prompts may get truncated when compose runtime sets `BOLA_AI_OLLAMA_NUM_PREDICT=512`, producing cut example blocks and incomplete final sections.
+
+**Acceptance:** Compose defaults align with application baseline (`768`) to reduce truncation risk while preserving stable runtime.
+
+**Validation when passed:** Updated defaults in `docker/docker-compose.yml` and root `docker-compose.yml` to `BOLA_AI_OLLAMA_NUM_PREDICT=768`; rechecked live adaptive response quality.
+
+---
+
+## Issue 30: [E2E-LOOP] Placeholder path leaks as `Path: [use only endpoints from the documentation]`
+
+**Status:** PASSED
+
+**Description:** Tool output can contain a literal placeholder line `Path: [use only endpoints from the documentation]`, which is not actionable for auditors.
+
+**Analysis (test data vs tool logic):**
+- **Primary cause is tool logic**, not fixture content.
+- Existing normalization already repaired malformed placeholder **URLs** (Issue 20), but did not repair standalone `Path:` fields.
+- When unknown paths are redacted, `Path:` lines could remain as raw placeholders.
+
+**Acceptance:** If a `Path:` field is placeholder-only, normalization replaces it with a grounded fallback path from allowed documentation paths.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_repairs_redacted_path_field_with_fallback`
+
+---
+
+## Issue 31: [E2E-LOOP] Path-audit output includes placeholder-only NO lines
+
+**Status:** PASSED
+
+**Description:** In q6 self-path-validation style responses, output could include non-actionable lines like `- **NO** [use only endpoints from the documentation]` or `- **NO** GET [use only endpoints from the documentation]`.
+
+**Acceptance:** Normalization removes placeholder-only `NO` path-audit lines while preserving meaningful entries.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_strips_placeholder_only_no_lines_in_path_audit`
+
+---
+
+## Issue 32: Live analyze can collapse to near-empty report when allowed `/api/users/{id}` is over-redacted
+
+**Status:** PASSED
+
+**Description:** A live test query with ingested path `/api/users/{id}` could produce a near-empty normalized report (`## Potential findings` + dangling code fence). Root cause was unconditional normalization redaction of `/api/...users|tenants...` paths before allowed-path grounding.
+
+**Acceptance:** Allowed user paths from ingested docs are preserved; unknown paths are still handled by normal allowed-path grounding logic.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_keeps_allowed_users_path`, plus `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
+
+---
+
+## Issue 33: Intermittent near-empty report with dangling code fence in live analyze
+
+**Status:** PASSED
+
+**Description:** Live smoke analyze could occasionally return a near-empty normalized report (`## Potential findings` + dangling ```) which fails quality expectations and breaks live smoke assertions.
+
+**Acceptance:** Normalization strips dangling trailing code fences and emits a minimal actionable fallback body when output is too short.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_recovers_from_dangling_fence_near_empty_output`, validated with `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
+
+---

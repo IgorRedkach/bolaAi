@@ -23,14 +23,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from bola_ai import config  # noqa: E402
 
 SHARED_DOCS = ROOT / "shared_docs"
-FIXTURE = Path(
-    os.environ.get(
-        "BOLA_AI_E2E_FIXTURE",
-        str(ROOT / "tests/fixtures/doc_onetime_energy_billing_api_20250318.md"),
-    )
-)
-if not FIXTURE.is_absolute():
-    FIXTURE = ROOT / FIXTURE
+FIXTURE_ENV = os.environ.get("BOLA_AI_E2E_FIXTURE", "").strip()
+FIXTURE_STATE_FILE = ROOT / "docs/e2e_fixture_rotation_state.json"
 OUT = ROOT / "docs/e2e_loop_last_run.json"
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000"
 BASE = BASE.rstrip("/")
@@ -64,6 +58,123 @@ FOLLOWUPS: list[tuple[str, str]] = [
         "For each path, state YES if it appears in the ingested documentation text or NO if hallucinated.",
     ),
 ]
+
+
+def _fixture_system_tag(path: Path) -> str:
+    name = path.name.lower()
+    for token in (
+        "salesforce",
+        "energy",
+        "fleet",
+        "banking",
+        "healthcare",
+        "claims",
+        "permits",
+        "hr",
+        "wms",
+        "procurement",
+        "insurance",
+        "edu",
+        "gov",
+        "retail",
+        "iot",
+    ):
+        if token in name:
+            return token
+    return "general"
+
+
+def _fixture_doc_type(path: Path, text: str) -> str:
+    name = path.name.lower()
+    low = text.lower()
+    if "har" in name or '"log"' in low[:2000]:
+        return "har_like"
+    if "graphql" in low:
+        return "graphql"
+    if any(x in low for x in ("salesforce", "soql", "aura", "lightning")):
+        return "salesforce_soql"
+    return "rest_doc"
+
+
+def _load_fixture_state() -> dict:
+    if not FIXTURE_STATE_FILE.exists():
+        return {"history": []}
+    try:
+        data = json.loads(FIXTURE_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"history": []}
+    if not isinstance(data, dict):
+        return {"history": []}
+    history = data.get("history")
+    if not isinstance(history, list):
+        data["history"] = []
+    return data
+
+
+def _save_fixture_state(state: dict) -> None:
+    FIXTURE_STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _pick_diverse_fixture() -> tuple[Path, dict]:
+    if FIXTURE_ENV:
+        fixture = Path(FIXTURE_ENV)
+        if not fixture.is_absolute():
+            fixture = ROOT / fixture
+        text = fixture.read_text(encoding="utf-8")
+        return fixture, {
+            "selection_mode": "explicit_env",
+            "doc_type": _fixture_doc_type(fixture, text),
+            "system": _fixture_system_tag(fixture),
+        }
+
+    fixtures = sorted((ROOT / "tests/fixtures").glob("*.md"))
+    fixtures = [p for p in fixtures if p.name != "expected_outcomes.md"]
+    if not fixtures:
+        raise FileNotFoundError("No fixtures found under tests/fixtures")
+
+    state = _load_fixture_state()
+    history: list[dict] = [h for h in state.get("history", []) if isinstance(h, dict)]
+    recent = history[-6:]
+    last = history[-1] if history else {}
+    last_type = str(last.get("doc_type", ""))
+    last_system = str(last.get("system", ""))
+    recent_types = {str(h.get("doc_type", "")) for h in recent}
+    expected_types = {"rest_doc", "graphql", "salesforce_soql", "har_like"}
+    missing_types = expected_types - recent_types
+
+    best: tuple[int, Path, dict] | None = None
+    for fixture in fixtures:
+        text = fixture.read_text(encoding="utf-8")
+        doc_type = _fixture_doc_type(fixture, text)
+        system = _fixture_system_tag(fixture)
+        score = 0
+        if doc_type != last_type:
+            score += 4
+        if system != last_system:
+            score += 3
+        if doc_type in missing_types:
+            score += 5
+        if "salesforce" not in system and doc_type != "har_like":
+            score += 1  # bias away from Salesforce/HAR dominance
+        meta = {"doc_type": doc_type, "system": system}
+        if best is None or score > best[0]:
+            best = (score, fixture, meta)
+
+    assert best is not None
+    selected = best[1]
+    selected_meta = best[2]
+    history.append(
+        {
+            "fixture": str(selected.relative_to(ROOT)),
+            "doc_type": selected_meta["doc_type"],
+            "system": selected_meta["system"],
+        }
+    )
+    state["history"] = history[-30:]
+    _save_fixture_state(state)
+    selected_meta["selection_mode"] = "auto_diverse_rotation"
+    selected_meta["missing_types_before_pick"] = sorted(missing_types)
+    return selected, selected_meta
 
 
 def _initial_queries(name: str) -> list[tuple[str, str]]:
@@ -155,13 +266,15 @@ def _validate_q5_against_doc(doc: str, q5_report: str) -> dict:
 
 
 def main() -> int:
-    if not FIXTURE.is_file():
-        print(f"Fixture not found: {FIXTURE}", file=sys.stderr)
+    fixture, fixture_meta = _pick_diverse_fixture()
+    if not fixture.is_file():
+        print(f"Fixture not found: {fixture}", file=sys.stderr)
         return 1
-    doc = FIXTURE.read_text(encoding="utf-8")
+    doc = fixture.read_text(encoding="utf-8")
     er = os.environ.get("BOLA_AI_E2E_EXPECTED_JSON")
     log: dict = {
-        "fixture": str(FIXTURE),
+        "fixture": str(fixture),
+        "fixture_selection": fixture_meta,
         "person_e2e_minimum": {
             "initial_person_questions": 3,
             "followup_detail_200_403": True,
@@ -183,12 +296,12 @@ def main() -> int:
         use_shared = os.environ.get("BOLA_AI_E2E_USE_SHARED_VOLUME", "1").lower() in ("1", "true", "yes")
         if use_shared:
             SHARED_DOCS.mkdir(parents=True, exist_ok=True)
-            shared_name = os.environ.get("BOLA_AI_E2E_SHARED_FILENAME", FIXTURE.name)
+            shared_name = os.environ.get("BOLA_AI_E2E_SHARED_FILENAME", fixture.name)
             shared_path = SHARED_DOCS / shared_name
             shared_path.write_text(doc, encoding="utf-8")
             r = c.post(
                 f"{BASE}/ingest_shared",
-                data={"relative_path": shared_name, "source": FIXTURE.stem},
+                data={"relative_path": shared_name, "source": fixture.stem},
             )
             log["steps"].append(
                 {
@@ -199,11 +312,11 @@ def main() -> int:
                 }
             )
         else:
-            r = c.post(f"{BASE}/ingest", data={"content": doc, "source": FIXTURE.stem})
+            r = c.post(f"{BASE}/ingest", data={"content": doc, "source": fixture.stem})
             log["steps"].append({"name": "ingest", "status": r.status_code, "chunks": (r.json() or {}).get("chunks")})
         r.raise_for_status()
 
-    queries = _initial_queries(FIXTURE.name) + FOLLOWUPS
+    queries = _initial_queries(fixture.name) + FOLLOWUPS
     with httpx.Client(timeout=TIMEOUT_ANALYZE) as c:
         for key, q in queries:
             r = c.post(f"{BASE}/analyze", json={"query": q})

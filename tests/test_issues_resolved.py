@@ -6,13 +6,14 @@ Stack must be up (conftest fails collection otherwise). Optional: BOLA_AI_LIVE_U
 """
 import os
 import re
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 
 BASE_URL = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000").rstrip("/")
-TIMEOUT = 360.0  # LLM analyze (Issue 16)
+TIMEOUT = float(os.environ.get("BOLA_AI_ANALYZE_CLIENT_TIMEOUT", "1260"))  # LLM analyze (Issue 16)
 INGEST_TIMEOUT = float(os.environ.get("BOLA_AI_INGEST_TIMEOUT", "600"))
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_DOC_PATH = FIXTURE_DIR / "sample_project_documentation.md"
@@ -36,16 +37,29 @@ def _ingest_and_analyze(client: httpx.Client, query: str) -> str:
         data={"content": doc, "source": "issues_test"},
         timeout=INGEST_TIMEOUT,
     )
+    return _analyze_with_retry(client, query)
+
+
+def _analyze_with_retry(client: httpx.Client, query: str) -> str:
+    concise_query = (
+        f"{query}\n\n"
+        "Keep the answer concise (<=250 words), BOLA-only, and grounded to provided documentation."
+    )
     for attempt in range(3):
-        r = client.post(f"{BASE_URL}/analyze", json={"query": query}, timeout=TIMEOUT)
+        try:
+            r = client.post(f"{BASE_URL}/analyze", json={"query": concise_query}, timeout=TIMEOUT)
+        except httpx.ReadTimeout:
+            if attempt < 2:
+                time.sleep(5)
+                continue
+            raise AssertionError(f"analyze timed out after {TIMEOUT}s for query: {query[:120]}")
         if r.status_code == 200:
-            break
+            return (r.json() or {}).get("report", "")
         if attempt < 2 and r.status_code >= 500:
-            import time
-            time.sleep(5)  # retry on server/LLM error or timeout
+            time.sleep(5)
             continue
-        assert r.status_code == 200, f"analyze returned {r.status_code}: {r.text[:500]}"
-    return (r.json() or {}).get("report", "")
+        raise AssertionError(f"analyze returned {r.status_code}: {r.text[:500]}")
+    raise AssertionError("analyze retry loop exhausted without a response")
 
 
 class TestIssuesResolved:
@@ -139,17 +153,7 @@ class TestIssuesResolved:
             client.post(f"{BASE_URL}/reset")
             doc = (FIXTURE_DIR / "doc_file_storage.md").read_text(encoding="utf-8")
             client.post(f"{BASE_URL}/ingest", data={"content": doc, "source": "issue6_test"})
-            report = ""
-            for attempt in range(3):
-                r = client.post(f"{BASE_URL}/analyze", json={"query": "Identify BOLA risks and give verification steps."}, timeout=TIMEOUT)
-                if r.status_code == 200:
-                    report = (r.json() or {}).get("report", "")
-                    break
-                if attempt < 2 and r.status_code >= 500:
-                    import time
-                    time.sleep(5)
-                    continue
-                assert r.status_code == 200, f"analyze {r.status_code}: {r.text[:300]}"
+            report = _analyze_with_retry(client, "Identify BOLA risks and give verification steps.")
         report_lower = report.lower()
         assert "without a token" not in report_lower, (
             "Verification must not suggest testing without a token (BOLA requires two user tokens). See docs/ISSUES.md Issue 6."
@@ -164,17 +168,7 @@ class TestIssuesResolved:
             client.post(f"{BASE_URL}/reset")
             doc = (FIXTURE_DIR / "doc_hr_system.md").read_text(encoding="utf-8")
             client.post(f"{BASE_URL}/ingest", data={"content": doc, "source": "issue8_test"})
-            report = ""
-            for attempt in range(3):
-                r = client.post(f"{BASE_URL}/analyze", json={"query": "Identify BOLA risks and give verification steps."}, timeout=TIMEOUT)
-                if r.status_code == 200:
-                    report = (r.json() or {}).get("report", "")
-                    break
-                if attempt < 2 and r.status_code >= 500:
-                    import time
-                    time.sleep(5)
-                    continue
-                assert r.status_code == 200, f"analyze {r.status_code}: {r.text[:300]}"
+            report = _analyze_with_retry(client, "Identify BOLA risks and give verification steps.")
         assert "**###" not in report and "** ###" not in report, (
             "Report contains bold-wrapped heading (e.g. **### Title). See docs/ISSUES.md Issue 8."
         )
@@ -185,21 +179,10 @@ class TestIssuesResolved:
             client.post(f"{BASE_URL}/reset")
             doc = (FIXTURE_DIR / "doc_adversarial_graphql.md").read_text(encoding="utf-8")
             client.post(f"{BASE_URL}/ingest", data={"content": doc, "source": "issue12_test"})
-            report = ""
-            for attempt in range(3):
-                r = client.post(
-                    f"{BASE_URL}/analyze",
-                    json={"query": "Identify BOLA risks in GraphQL operations and give verification steps using GraphQL syntax."},
-                    timeout=TIMEOUT,
-                )
-                if r.status_code == 200:
-                    report = (r.json() or {}).get("report", "")
-                    break
-                if attempt < 2 and r.status_code >= 500:
-                    import time
-                    time.sleep(5)
-                    continue
-                assert r.status_code == 200, f"analyze {r.status_code}: {r.text[:300]}"
+            report = _analyze_with_retry(
+                client,
+                "Identify BOLA risks in GraphQL operations and give verification steps using GraphQL syntax.",
+            )
         report_lower = report.lower()
         # Must produce a non-empty substantive report
         assert len(report) >= 200, f"Report too short for GraphQL doc (len={len(report)}). Issue 12."
@@ -224,21 +207,7 @@ class TestIssuesResolved:
             client.post(f"{BASE_URL}/reset")
             doc = (FIXTURE_DIR / "doc_adversarial_graphql.md").read_text(encoding="utf-8")
             client.post(f"{BASE_URL}/ingest", data={"content": doc, "source": "issue12_13_test"})
-            report = ""
-            for attempt in range(3):
-                r = client.post(
-                    f"{BASE_URL}/analyze",
-                    json={"query": "Give BOLA verification steps for each GraphQL operation."},
-                    timeout=TIMEOUT,
-                )
-                if r.status_code == 200:
-                    report = (r.json() or {}).get("report", "")
-                    break
-                if attempt < 2 and r.status_code >= 500:
-                    import time
-                    time.sleep(5)
-                    continue
-                assert r.status_code == 200, f"analyze {r.status_code}: {r.text[:300]}"
+            report = _analyze_with_retry(client, "Give BOLA verification steps for each GraphQL operation.")
         report_lower = report.lower()
         two_token_phrases = [
             "two different user tokens", "two different users", "token a", "token b",
@@ -255,21 +224,10 @@ class TestIssuesResolved:
             client.post(f"{BASE_URL}/reset")
             doc = (FIXTURE_DIR / "doc_adversarial_salesforce.md").read_text(encoding="utf-8")
             client.post(f"{BASE_URL}/ingest", data={"content": doc, "source": "issue14_test"})
-            report = ""
-            for attempt in range(3):
-                r = client.post(
-                    f"{BASE_URL}/analyze",
-                    json={"query": "Identify BOLA risks including SOQL record-level access and Salesforce sharing."},
-                    timeout=TIMEOUT,
-                )
-                if r.status_code == 200:
-                    report = (r.json() or {}).get("report", "")
-                    break
-                if attempt < 2 and r.status_code >= 500:
-                    import time
-                    time.sleep(5)
-                    continue
-                assert r.status_code == 200, f"analyze {r.status_code}: {r.text[:300]}"
+            report = _analyze_with_retry(
+                client,
+                "Identify BOLA risks including SOQL record-level access and Salesforce sharing.",
+            )
         report_lower = report.lower()
         assert len(report) >= 100, f"Report too short for Salesforce doc. Issue 14."
         # Must mention Salesforce/SOQL concepts or record-level access

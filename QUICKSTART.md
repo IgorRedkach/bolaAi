@@ -5,8 +5,8 @@ Local, offline AI tool for finding Broken Object-Level Authorization (BOLA) vuln
 ## Prerequisites
 
 - **Docker** installed
-- ~6 GB free disk space
-- Internet for the first run only (pulls image + model)
+- ~12 GB free disk space
+- Internet only to pull the image from registry
 
 ## Run it (one command)
 
@@ -16,7 +16,8 @@ docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:late
 
 Replace `~/my-docs` with the path to a folder where you'll put your API documentation.
 
-**First run takes 3-10 minutes** (downloads the LLM model). After that, it starts in under a minute.
+**Model is baked into the image** (`bola-analyzer`). No runtime model download is required.
+Startup can still take a few minutes on cold CPU systems while Ollama and embeddings initialize.
 
 ## Use it
 
@@ -62,7 +63,7 @@ docker stop bola-ai
 
 ## Persistent data (optional)
 
-To keep the model cached between runs (skip the first-run download next time):
+To persist ingested docs/chroma state between runs:
 
 ```bash
 docker run -p 8000:8000 \
@@ -76,6 +77,6 @@ docker run -p 8000:8000 \
 
 | Problem | Fix |
 |---|---|
-| First run is slow | Normal — downloading ~1 GB model. Wait 3-10 min. |
+| First run is slow | Normal on CPU — model is already in image, but startup + embedding init can still take several minutes. |
 | Analysis takes long | LLM runs on CPU. 1-4 minutes per question is normal. |
 | Port 8000 in use | Use `-p 9000:8000` and open `http://localhost:9000/chat` |

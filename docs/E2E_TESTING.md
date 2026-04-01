@@ -67,6 +67,8 @@ ls shared_docs/   # should show only .gitkeep
 ### 2. Generate fresh test data
 Either pick an existing fixture from `tests/fixtures/` or generate a new one. The test document must contain specific, unique API endpoints so you can verify the tool references **your** document and not generic training data.
 
+**Diversity rule (mandatory):** Across loops, rotate test data types and domains. Do not run Salesforce-only or HAR-only cycles repeatedly. Include mixed systems/doc styles (REST docs, GraphQL/SOQL-aware docs when applicable, and HAR/network-log style inputs) from different domains.
+
 ### 3. Copy to shared_docs/ and start (or restart) the stack
 ```bash
 cp tests/fixtures/doc_banking_api.md shared_docs/
@@ -134,6 +136,8 @@ Before ingesting (or after reset), any analysis question should return a `type: 
 ## NO Scripted minimum (smoke should be created but not as a substitute for the e2e test described before)
 
 `scripts/run_agent_e2e_loop_once.py` enforces **6** separate analysis calls. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
+
+When `BOLA_AI_E2E_FIXTURE` is **not** set, the script auto-selects fixtures using diversity rotation and records the selection metadata in `docs/e2e_loop_last_run.json`.
 
 The script now:
 1. Cleans `shared_docs/` before starting

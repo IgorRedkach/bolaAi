@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 BASE_URL = os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000").rstrip("/")
-TIMEOUT_ANALYZE = 360.0  # match LLM + client policy (Issue 16)
+TIMEOUT_ANALYZE = float(os.environ.get("BOLA_AI_ANALYZE_CLIENT_TIMEOUT", "1260"))  # match LLM + client policy (Issue 16)
 
 # Path to sample project doc (used so LLM has concrete endpoints to analyze)
 FIXTURE_DIR = Path(__file__).parent / "fixtures"

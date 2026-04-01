@@ -85,13 +85,17 @@ def _context_indicates_rest_only_no_graphql(context: str) -> bool:
     if not context or not context.strip():
         return False
     c = context.lower()
-    # Explicit exclusion checks first
-    if "no graphql" in c or "rest only" in c or "rest-only" in c:
-        return True
     # If context contains actual GraphQL operations or Salesforce platform markers,
     # it legitimately includes GraphQL — don't strip it.
-    if any(kw in c for kw in ("query {", "mutation {", "aura", "lightning.force")):
+    if any(kw in c for kw in ("query {", "mutation {", "graphql", "aura", "lightning.force")):
+        # Still honor explicit "no graphql" phrasing when present.
+        if "no graphql" in c:
+            return True
         return False
+
+    # Explicit exclusion checks for truly REST-only excerpts.
+    if "no graphql" in c or "rest only" in c or "rest-only" in c:
+        return True
     return False
 
 
@@ -123,20 +127,6 @@ def _strip_report_leakage(report: str) -> str:
         if idx >= 0:
             report = report[:idx].rstrip()
 
-    # WP-007: Model generates "**Fix steps:**" / "**Fix:**" / "#### Fix" sections not in the spec.
-    # Covers: "**Fix steps:**", "- **Fix steps:**", "  - **Fix steps:**", "#### Fix steps", etc.
-    report = re.sub(
-        r"\n[ \t\-]*\*\*Fix(?:ing)?(?:\s+steps)?:?\*\*.*?(?=\n[ \t\-]*\*\*(?:Rationale|Verification|Example)|###|\Z)",
-        "\n",
-        report,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    report = re.sub(
-        r"\n#{3,5}\s*Fix(?: steps)?[^\n]*\n(?:(?!#{1,5}\s).*\n)*",
-        "\n",
-        report,
-        flags=re.IGNORECASE,
-    )
 
     # WP-008 / WP-013: Raw "## Notes" / "### Notes" / "### N. Notes" fixture sections
     # leak mid-report as spurious findings. Strip from heading to next equal/higher heading.
@@ -169,14 +159,6 @@ def _strip_report_leakage(report: str) -> str:
 
     # Note: "Additional Notes" sections are preserved — they often contain
     # valuable HAR/Salesforce observations the model extracted from the doc.
-
-    # WP-014: Plain-text "- Fix steps:" bullet (unbolded) not caught by WP-007 rule.
-    report = re.sub(
-        r"\n[ \t]*[-*]\s+Fix\s+steps?:.*?(?=\n[ \t]*[-*]\s+[A-Z]|\n#{1,4}\s|\Z)",
-        "\n",
-        report,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
 
     return report
 
@@ -217,13 +199,29 @@ def _normalize_report(
     # Fix "**Title**# **Label:**" → "**Title**\n\n**Label:**"  (GraphQL heading bleed-through)
     report = re.sub(r"\*\*\s*#\s*\*\*", "**\n\n**", report)
     if not structured:
-        # Redact common hallucinated endpoints not in typical doc: /api/users/, /api/tenants
-        report = re.sub(
-            r"(GET|POST|PUT|DELETE)?\s*(`?/api/[^`\s]*(?:users|tenants)[^`\s]*`?)",
-            "[use only endpoints from the documentation]",
-            report,
-            flags=re.IGNORECASE,
-        )
+        # Redact users/tenants endpoints only when they are not in allowed documented paths.
+        if allowed_paths:
+            users_tenants_regexes = [_path_pattern_to_regex(p) for p in allowed_paths]
+
+            def _replace_unknown_users_tenants(match: re.Match) -> str:
+                token = (match.group(2) or "").strip("`")
+                if any(rx.fullmatch(token) for rx in users_tenants_regexes):
+                    return match.group(0)
+                return "[use only endpoints from the documentation]"
+
+            report = re.sub(
+                r"(GET|POST|PUT|DELETE)?\s*(`?/api/[^`\s]*(?:users|tenants)[^`\s]*`?)",
+                _replace_unknown_users_tenants,
+                report,
+                flags=re.IGNORECASE,
+            )
+        else:
+            report = re.sub(
+                r"(GET|POST|PUT|DELETE)?\s*(`?/api/[^`\s]*(?:users|tenants)[^`\s]*`?)",
+                "[use only endpoints from the documentation]",
+                report,
+                flags=re.IGNORECASE,
+            )
         report = re.sub(
             r"using the `/api/users` endpoint|obtain a token using the `/api/users` endpoint|`/api/users` endpoint",
             "using an auth endpoint from the documentation",
@@ -376,6 +374,20 @@ def _normalize_report(
         report,
         flags=re.IGNORECASE,
     )
+    # Clarify secure interpretation: A=200 and B=403 suggests proper ownership enforcement.
+    report = re.sub(
+        r"if token a'?s call returns 200 and token b'?s call returns 403[^.]*\.",
+        "if token A returns 200 and token B returns 403 for the same object ID, access control appears to be enforced (this outcome does not confirm BOLA).",
+        report,
+        flags=re.IGNORECASE,
+    )
+    # 403 for unauthorized user is generally secure enforcement, not a vulnerability outcome.
+    report = re.sub(
+        r"Vulnerable Outcome\s*\(\s*403\s+Forbidden\s*\)",
+        "Secure Outcome (403 Forbidden)",
+        report,
+        flags=re.IGNORECASE,
+    )
     # Invalid confirmation from user A denied/missing data is not BOLA proof.
     report = re.sub(
         r"if (?:alice|user a)[^.]*does not receive data[^.]*bola is confirmed",
@@ -436,13 +448,6 @@ def _normalize_report(
         report,
         flags=re.IGNORECASE,
     )
-    # Redact paths containing users/tenants (e.g. /api/v1/tenants/123/users) not typically in doc
-    report = re.sub(
-        r"/api/[^\s`]*(?:users|tenants)[^\s`]*",
-        "[use only endpoints from the documentation]",
-        report,
-        flags=re.IGNORECASE,
-    )
     # Issue 10: Ground endpoint suggestions to ingested context (avoid unrelated endpoint drift).
     # Skip for HAR/JSON/Salesforce/GraphQL contexts where path extraction is unreliable.
     allowed_paths = allowed_paths or []
@@ -474,9 +479,14 @@ def _normalize_report(
             report,
             flags=re.IGNORECASE,
         )
-    # Redact known hallucinated path prefixes — only for plain REST docs, not HAR/Salesforce.
-    if structured:
-        allowed_paths = []
+        # Repair placeholder-only path fields so runbooks remain actionable.
+        report = re.sub(
+            r"(?im)^(\s*[-*]?\s*Path:\s*)\[use only endpoints from the documentation\]\s*$",
+            rf"\1{fallback_path}",
+            report,
+        )
+    # Redact known hallucinated path prefixes — only for plain REST docs.
+    # For HAR/Salesforce/GraphQL contexts this is too aggressive and can hide real paths.
     hallucinated_prefixes = (
         "/api/v1/patients", "/api/v1/documents", "/api/v1/orders", "/api/v1/prescriptions",
         "/api/internal/cases", "/api/users",
@@ -487,32 +497,33 @@ def _normalize_report(
         "/api/v2/applications", "/api/v2/funds", "/api/v2/transactions",
         "/api/loans",
     )
-    for prefix in hallucinated_prefixes:
-        if not any(p.lower().startswith(prefix.lower()) for p in allowed_paths):
-            report = re.sub(
-                re.escape(prefix) + r"[^\s\]`]*",
-                "[use only endpoints from the documentation]",
-                report,
-                flags=re.IGNORECASE,
-            )
-    # Replace hallucinated finding titles when those resources are not in the doc
-    doc_resources_lower = " ".join(p.lower() for p in allowed_paths)
-    if "patient" not in doc_resources_lower and "patients" not in doc_resources_lower:
-        report = re.sub(r"\bPatient API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if "document" not in doc_resources_lower and "documents" not in doc_resources_lower:
-        report = re.sub(r"\bDocument API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if not any(p.lower().startswith("/api/users") for p in allowed_paths):
-        report = re.sub(r"\bUser API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if "order" not in doc_resources_lower and "orders" not in doc_resources_lower:
-        report = re.sub(r"\bOrder API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if "adjustment" not in doc_resources_lower and "adjustments" not in doc_resources_lower:
-        report = re.sub(r"\bAdjustment API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if "payment" not in doc_resources_lower and "payments" not in doc_resources_lower:
-        report = re.sub(r"\bPayment API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if "billing" not in doc_resources_lower:
-        report = re.sub(r"\bBilling API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
-    if "audit" not in doc_resources_lower and "auditlog" not in doc_resources_lower:
-        report = re.sub(r"\bAudit Log API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+    if not structured:
+        for prefix in hallucinated_prefixes:
+            if not any(p.lower().startswith(prefix.lower()) for p in allowed_paths):
+                report = re.sub(
+                    re.escape(prefix) + r"[^\s\]`]*",
+                    "[use only endpoints from the documentation]",
+                    report,
+                    flags=re.IGNORECASE,
+                )
+        # Replace hallucinated finding titles when those resources are not in the doc
+        doc_resources_lower = " ".join(p.lower() for p in allowed_paths)
+        if "patient" not in doc_resources_lower and "patients" not in doc_resources_lower:
+            report = re.sub(r"\bPatient API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if "document" not in doc_resources_lower and "documents" not in doc_resources_lower:
+            report = re.sub(r"\bDocument API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if not any(p.lower().startswith("/api/users") for p in allowed_paths):
+            report = re.sub(r"\bUser API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if "order" not in doc_resources_lower and "orders" not in doc_resources_lower:
+            report = re.sub(r"\bOrder API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if "adjustment" not in doc_resources_lower and "adjustments" not in doc_resources_lower:
+            report = re.sub(r"\bAdjustment API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if "payment" not in doc_resources_lower and "payments" not in doc_resources_lower:
+            report = re.sub(r"\bPayment API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if "billing" not in doc_resources_lower:
+            report = re.sub(r"\bBilling API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
+        if "audit" not in doc_resources_lower and "auditlog" not in doc_resources_lower:
+            report = re.sub(r"\bAudit Log API\b", "Endpoint from documentation", report, flags=re.IGNORECASE)
     # Fix malformed heading when path in ### title was redacted (e.g. "### 4.[use only endpoints...]")
     report = re.sub(r"(###\s*\d*\.)\s*\[use only endpoints from the documentation\]", r"\1 Endpoint from documentation", report)
     # WP-017: Strip entire finding sections whose heading itself was redacted.
@@ -526,6 +537,12 @@ def _normalize_report(
     )
     report = _redacted_heading_block.sub("", report)
     report = _redacted_heading_block.sub("", report)  # second pass for consecutive blocks
+    # In path-audit style responses, drop placeholder-only NO lines.
+    report = re.sub(
+        r"(?im)^\s*-\s*\*\*NO\*\*\s*(?:[A-Z]+\s+)?\[use only endpoints from the documentation\]\s*$\n?",
+        "",
+        report,
+    )
     # WP-010 partial mitigation: fix curl blocks that use the wrong documented path.
     report = _fix_curl_path_mismatch(report, allowed_paths or [])
     # Issue 5: Ensure verification unambiguously mentions two different user tokens (append if missing or vague)
@@ -538,6 +555,36 @@ def _normalize_report(
     has_unambiguous_two = any(p in report_lower for p in two_token_phrases)
     if "potential findings" in report_lower and ("verification" in report_lower or "### " in report_lower) and not has_unambiguous_two:
         report = report.rstrip() + "\n\n**Verification reminder:** To confirm BOLA, call the same endpoint with two different user tokens (e.g. user A and user B); if both receive data for the same object ID, object-level authorization may be missing.\n"
+    # Remove dangling trailing finding headings before reminder blocks (e.g. "### GET /api").
+    report = re.sub(
+        r"\n###\s+[^\n]+(?:\n\s*){1,3}(?=\*\*Verification reminder:\*\*)",
+        "\n",
+        report,
+        flags=re.IGNORECASE,
+    )
+    # Strip generic meta headings that are not real endpoint findings.
+    report = re.sub(
+        r"^\s*###\s+Potential BOLA findings with rationale and verification steps\s*$\n?",
+        "",
+        report,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    report = re.sub(
+        r"^\s*####\s+.*one-time e2e fixture.*$\n?",
+        "",
+        report,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    # Remove dangling trailing code fence when generation was cut mid-block.
+    if report.count("```") % 2 == 1:
+        report = re.sub(r"\n?```[\t ]*$", "", report.rstrip(), flags=re.MULTILINE)
+    # Guarantee a minimal actionable body instead of near-empty "Potential findings" shells.
+    if len(report.strip()) < 60 and "potential findings" in report.lower():
+        report = (
+            report.rstrip()
+            + "\n\nNo grounded finding could be reliably extracted from this response. "
+            "Re-run analysis with a narrower endpoint-focused query and verify with two different user tokens.\n"
+        )
     return report
 
 

@@ -3,7 +3,7 @@ set -e
 
 echo "=========================================="
 echo "  BOLA AI — Starting (all-in-one)"
-echo "  Model: qwen2.5-coder:7b (pre-baked)"
+echo "  Model: ${OLLAMA_MODEL:-bola-analyzer} (pre-baked)"
 echo "  Knowledge: 215 BOLA examples (pre-loaded)"
 echo "=========================================="
 
@@ -27,14 +27,23 @@ for i in $(seq 1 60); do
 done
 
 # --- 2. Verify model is present (baked into image during build) ---
-if ollama list 2>/dev/null | grep -q bola-analyzer; then
-  echo "[bola-ai] Model bola-analyzer found (pre-baked with 15 few-shot examples)."
+MODEL_NAME="${OLLAMA_MODEL:-bola-analyzer}"
+ALLOW_MODEL_PULL="${BOLA_AI_ALLOW_MODEL_PULL:-0}"
+if ollama list 2>/dev/null | grep -q "${MODEL_NAME}"; then
+  echo "[bola-ai] Model ${MODEL_NAME} found (pre-baked)."
 else
-  echo "[bola-ai] WARNING: bola-analyzer not found — creating from Modelfile..."
-  echo "[bola-ai] Pulling qwen2.5-coder:7b (~4.7 GB, first run only)..."
-  ollama pull qwen2.5-coder:7b
-  ollama create bola-analyzer -f /app/Modelfile
-  echo "[bola-ai] Model ready."
+  if [ "$ALLOW_MODEL_PULL" = "1" ]; then
+    echo "[bola-ai] WARNING: ${MODEL_NAME} not found — creating from Modelfile..."
+    echo "[bola-ai] Pulling qwen2.5-coder:7b (~4.7 GB, this requires internet)..."
+    ollama pull qwen2.5-coder:7b
+    ollama create "${MODEL_NAME}" -f /app/Modelfile
+    echo "[bola-ai] Model ready."
+  else
+    echo "[bola-ai] ERROR: required model '${MODEL_NAME}' is missing in the image."
+    echo "[bola-ai] Refusing runtime model pull to preserve offline/quality guarantees."
+    echo "[bola-ai] Rebuild image or run with BOLA_AI_ALLOW_MODEL_PULL=1 to allow fallback."
+    exit 1
+  fi
 fi
 
 # --- 3. Preload RAG knowledge (skip if already baked into image) ---
