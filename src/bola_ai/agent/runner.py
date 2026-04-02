@@ -543,6 +543,11 @@ def _normalize_report(
         "",
         report,
     )
+    report = re.sub(
+        r"(?im)^\s*(?:[-*]|\d+\.)\s*\[use only endpoints from the documentation\][^\n]*\n?",
+        "",
+        report,
+    )
     # WP-010 partial mitigation: fix curl blocks that use the wrong documented path.
     report = _fix_curl_path_mismatch(report, allowed_paths or [])
     # Issue 5: Ensure verification unambiguously mentions two different user tokens (append if missing or vague)

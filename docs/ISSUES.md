@@ -643,6 +643,18 @@ Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries als
 
 ---
 
+## Issue 34: [E2E-LOOP] q6 path-audit can still emit numbered placeholder lines
+
+**Status:** PASSED
+
+**Description:** In some self-path-validation outputs, placeholders were emitted as numbered lines (for example `1. [use only endpoints from the documentation] — **NO**`) and bypassed prior bullet-only cleanup logic.
+
+**Acceptance:** Normalization strips placeholder path-audit lines in both bullet and numbered formats.
+
+**Autotest when passed:** `tests/test_agent.py::test_normalize_report_strips_numbered_placeholder_path_audit_lines`
+
+---
+
 ## BUG-012: Startup auto-analysis lock contention can block `/api/chat` and end in timeout
 
 **Status:** PASSED
@@ -657,11 +669,13 @@ Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries als
 **Fixes:**
 1. Startup auto-analysis no longer uses foreground serialized analysis lock; foreground requests are no longer blocked behind background startup analysis.
 2. Added dedicated startup tuning config: `BOLA_AI_AUTO_ANALYZE_TIMEOUT`, `BOLA_AI_AUTO_ANALYZE_N_CONTEXT`.
-3. Kept foreground lock for user requests to avoid interactive request pileups, but decoupled background startup work from it.
-4. Added regression test ensuring startup path does not call serialized foreground helper.
+3. Added startup source limiting (`BOLA_AI_AUTO_ANALYZE_MAX_SOURCES`) so startup analysis runs on a bounded subset for responsiveness when many docs are mounted.
+4. Chat/analyze now return immediate informational/busy responses while startup auto-analysis is running instead of waiting into timeout paths.
+5. Kept foreground lock for user requests to avoid interactive request pileups, but decoupled background startup work from it.
+6. Added regression tests for non-locking startup path and source-limit behavior.
 
 **Acceptance:** Pull/run image with shared docs should keep `/api/chat` responsive even if startup auto-analysis is slow/fails; no 5-minute lock-wait blockage behind startup analysis.
 
-**Autotests when passed:** `tests/test_api.py::test_auto_ingest_and_analyze_does_not_use_foreground_analysis_lock`, `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
+**Autotests when passed:** `tests/test_api.py::test_auto_ingest_and_analyze_does_not_use_foreground_analysis_lock`, `tests/test_api.py::test_auto_ingest_and_analyze_limits_sources_for_startup_pass`, `tests/test_api.py::test_chat_returns_info_when_startup_auto_analysis_running`, `tests/test_api_live.py::TestLiveAPI::test_live_ingest_then_analyze`
 
 ---

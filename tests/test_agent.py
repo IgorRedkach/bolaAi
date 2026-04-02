@@ -302,6 +302,17 @@ def test_normalize_report_strips_placeholder_only_no_lines_in_path_audit():
     assert "- **NO** POST https://api.example.com/graphql" in out
 
 
+def test_normalize_report_strips_numbered_placeholder_path_audit_lines():
+    raw = (
+        "## HTTP Paths in Documentation\n\n"
+        "1. [use only endpoints from the documentation] — **NO**\n"
+        "2. /graphql — **YES**\n"
+    )
+    out = _normalize_report(raw)
+    assert "[use only endpoints from the documentation]" not in out
+    assert "2. /graphql — **YES**" in out
+
+
 def test_normalize_report_recovers_from_dangling_fence_near_empty_output():
     raw = "## Potential findings\n\n```"
     out = _normalize_report(raw)

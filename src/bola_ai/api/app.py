@@ -26,6 +26,7 @@ _store: Optional[DocStore] = None
 _store_lock = threading.Lock()
 _analysis_lock = threading.Lock()
 _user_doc_sources: set[str] = set()
+_user_doc_ingest_order: list[str] = []
 
 
 def get_store() -> DocStore:
@@ -58,6 +59,8 @@ def has_user_docs() -> bool:
 
 def _track_user_doc(source: str) -> None:
     _user_doc_sources.add(source)
+    if source not in _user_doc_ingest_order:
+        _user_doc_ingest_order.append(source)
 
 
 def _run_serialized_analysis(
@@ -153,14 +156,21 @@ def _auto_ingest_and_analyze():
     _auto_analysis_status = "analyzing"
     logger.info("Auto-analyze: starting BOLA analysis on %d user doc(s)...", len(_user_doc_sources))
     try:
-        user_sources = sorted(_user_doc_sources)
+        user_sources = list(_user_doc_ingest_order) if _user_doc_ingest_order else sorted(_user_doc_sources)
+        max_sources = max(1, int(app_config.AUTO_ANALYZE_MAX_SOURCES))
+        selected_sources = user_sources[-max_sources:] if len(user_sources) > max_sources else user_sources
+        if len(user_sources) > max_sources:
+            logger.info(
+                "Auto-analyze: limiting sources for startup pass (%d/%d): %s",
+                len(selected_sources), len(user_sources), selected_sources,
+            )
         # Do not use foreground analysis lock here: startup analysis should not block
         # interactive /api/chat and /analyze requests for minutes.
         result = analyze_for_bola(
             store,
             custom_query=_AUTO_ANALYZE_QUERY,
             n_context=app_config.AUTO_ANALYZE_N_CONTEXT,
-            source_filter=user_sources,
+            source_filter=selected_sources,
             timeout=app_config.AUTO_ANALYZE_TIMEOUT_SECONDS,
         )
         _auto_analysis_result = result
@@ -219,6 +229,7 @@ def create_app() -> FastAPI:
             "status": _auto_analysis_status,
             "report": _auto_analysis_result,
             "user_doc_sources": sorted(_user_doc_sources),
+            "auto_analyze_max_sources": app_config.AUTO_ANALYZE_MAX_SOURCES,
         }
 
     @app.post("/reset")
@@ -228,6 +239,7 @@ def create_app() -> FastAPI:
         store = get_store()
         store.reset()
         _user_doc_sources.clear()
+        _user_doc_ingest_order.clear()
         _auto_analysis_result = None
         _auto_analysis_status = "idle"
         return {"status": "ok", "message": "Store reset", "chunks": store.count()}
@@ -310,6 +322,12 @@ def create_app() -> FastAPI:
         store = get_store()
         query = body.query if body and body.query else None
         logger.info("Analyze: query=%s chunks_available=%s", query or "(default)", store.count())
+        if _auto_analysis_status == "analyzing":
+            raise HTTPException(
+                429,
+                "Startup auto-analysis is currently running. Wait for it to finish "
+                "or check GET /api/auto_analysis, then retry your query.",
+            )
         try:
             user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
             result = _run_serialized_analysis(
@@ -426,6 +444,7 @@ Bot: ## Verification steps ...
             store = get_store()
             store.reset()
             _user_doc_sources.clear()
+            _user_doc_ingest_order.clear()
             return {"role": "assistant", "content": "Document store cleared. You can now ingest new documents.", "type": "info"}
 
         # List files
@@ -572,6 +591,16 @@ Bot: ## Verification steps ...
                 "type": "info",
             }
         try:
+            if _auto_analysis_status == "analyzing":
+                return {
+                    "role": "assistant",
+                    "content": (
+                        "Startup auto-analysis is currently running on ingested files. "
+                        "To avoid a long queue wait, please retry in a moment or check "
+                        "`GET /api/auto_analysis` for readiness."
+                    ),
+                    "type": "info",
+                }
             user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
             result = _run_serialized_analysis(
                 store,

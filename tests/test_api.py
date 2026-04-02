@@ -105,6 +105,7 @@ def chat_client(tmp_path):
     from bola_ai import config as cfg
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._user_doc_ingest_order.clear()
     app_mod._auto_analysis_result = None
     app_mod._auto_analysis_status = "idle"
     empty_shared = tmp_path / "empty_shared"
@@ -117,6 +118,7 @@ def chat_client(tmp_path):
         yield TestClient(a)
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._user_doc_ingest_order.clear()
     app_mod._auto_analysis_result = None
     app_mod._auto_analysis_status = "idle"
 
@@ -272,6 +274,20 @@ def test_chat_analysis_allowed_after_ingest(chat_client, tmp_path):
     assert r.json()["type"] == "analysis"
 
 
+def test_chat_returns_info_when_startup_auto_analysis_running(chat_client):
+    """If startup auto-analysis is running, chat returns quick info instead of long timeout."""
+    from bola_ai.api import app as app_mod
+
+    app_mod._auto_analysis_status = "analyzing"
+    app_mod._user_doc_sources.add("doc.md")
+    app_mod._user_doc_ingest_order.append("doc.md")
+    r = chat_client.post("/api/chat", json={"message": "What BOLA risks exist?"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "info"
+    assert "startup auto-analysis is currently running" in data["content"].lower()
+
+
 def test_chat_reset_clears_user_docs(chat_client, tmp_path):
     """After reset, user doc tracking is cleared and analysis is blocked again."""
     from unittest.mock import patch
@@ -305,6 +321,7 @@ def test_auto_ingest_on_startup(tmp_path):
 
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._user_doc_ingest_order.clear()
     app_mod._auto_analysis_result = None
     app_mod._auto_analysis_status = "idle"
 
@@ -342,6 +359,7 @@ def test_auto_ingest_on_startup(tmp_path):
 
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._user_doc_ingest_order.clear()
     app_mod._auto_analysis_result = None
     app_mod._auto_analysis_status = "idle"
 
@@ -354,6 +372,7 @@ def test_auto_ingest_and_analyze_does_not_use_foreground_analysis_lock(tmp_path)
 
     app_mod._store = None
     app_mod._user_doc_sources.clear()
+    app_mod._user_doc_ingest_order.clear()
     app_mod._auto_analysis_result = None
     app_mod._auto_analysis_status = "idle"
 
@@ -374,6 +393,44 @@ def test_auto_ingest_and_analyze_does_not_use_foreground_analysis_lock(tmp_path)
     assert app_mod._auto_ingest_status == "done"
     assert app_mod._auto_analysis_status == "done"
     assert "Test finding" in (app_mod._auto_analysis_result or "")
+
+
+def test_auto_ingest_and_analyze_limits_sources_for_startup_pass(tmp_path):
+    """Startup auto-analysis should limit number of sources for responsiveness."""
+    from unittest.mock import patch
+    from bola_ai.api import app as app_mod
+    from bola_ai import config as cfg
+
+    app_mod._store = None
+    app_mod._user_doc_sources.clear()
+    app_mod._user_doc_ingest_order.clear()
+    app_mod._auto_analysis_result = None
+    app_mod._auto_analysis_status = "idle"
+
+    shared = tmp_path / "shared_auto_limit"
+    shared.mkdir()
+    (shared / "a.md").write_text("GET /a/{id}\nNo ownership check.", encoding="utf-8")
+    (shared / "b.md").write_text("GET /b/{id}\nNo ownership check.", encoding="utf-8")
+    (shared / "c.md").write_text("GET /c/{id}\nNo ownership check.", encoding="utf-8")
+
+    seen_filter = {}
+
+    def _capture(*args, **kwargs):
+        seen_filter["value"] = kwargs.get("source_filter") or []
+        return "## Potential findings\n\n### Test"
+
+    with patch.object(cfg, "USE_FAKE_EMBEDDER", True), \
+         patch.object(cfg, "SHARED_DOCS_DIR", shared), \
+         patch.object(cfg, "AUTO_ANALYZE_ON_STARTUP", True), \
+         patch.object(cfg, "AUTO_ANALYZE_TIMEOUT_SECONDS", 5.0), \
+         patch.object(cfg, "AUTO_ANALYZE_N_CONTEXT", 4), \
+         patch.object(cfg, "AUTO_ANALYZE_MAX_SOURCES", 2), \
+         patch("bola_ai.agent.llm.is_available", return_value=True), \
+         patch("bola_ai.api.app.analyze_for_bola", side_effect=_capture):
+        app_mod._auto_ingest_and_analyze()
+
+    assert len(seen_filter["value"]) == 2
+    assert seen_filter["value"] == ["b.md", "c.md"]
 
 # --- Broader ingest phrases ---
 
