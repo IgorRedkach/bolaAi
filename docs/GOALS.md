@@ -156,8 +156,8 @@ All agents and LLMs used in the project should align with these goals: no intern
 ## Startup Reliability & Testing Process
 
 - [x] **Non-blocking auto-ingest:** Auto-ingest runs in a background thread so the server starts accepting connections immediately. Health endpoint reports `auto_ingest_status` for UI progress display.
-- [ ] **All-in-one image smoke test in E2E:** Any feature that touches startup behavior, embedding, store initialization, or inference timeouts MUST be validated against the actual all-in-one image (cold start, real embedder), not just the dev stack or unit tests with FakeEmbedder. Prevents "works in dev, breaks in prod" regressions.
-- [ ] **Release verification cycle is mandatory after runtime bugs:** For full-cycle sign-off after timeout/runtime/deploy issues, do a full publish/pull/verify process: delete local BOLA containers+images, pull freshly published image, run from scratch with shared docs, and verify health + chat/analyze behavior.
+- [x] **All-in-one image smoke test in E2E:** Cold-start image smoke verified on freshly pulled `ghcr.io/igorredkach/bolai:latest` with a new shared-doc fixture and manual `/chat` command checks (`help`, `list files`, `ingest <file>`, analysis question, `status`) after startup wait.
+- [x] **Release verification cycle is mandatory after runtime bugs:** Completed full publish/pull/verify cycle in-session: pushed code to `main`, removed local BOLA containers/images, pulled newer `latest` digest, ran from scratch with new shared docs, waited startup window, and revalidated health/chat/analyze behavior.
 
 ---
 
