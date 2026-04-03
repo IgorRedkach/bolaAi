@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,7 @@ from bola_ai.rag.store import DocStore
 # Lazy singleton store (thread-safe)
 _store: Optional[DocStore] = None
 _store_lock = threading.Lock()
+_store_ops_lock = threading.Lock()
 _analysis_lock = threading.Lock()
 _user_doc_sources: set[str] = set()
 _user_doc_ingest_order: list[str] = []
@@ -63,6 +65,42 @@ def _track_user_doc(source: str) -> None:
         _user_doc_ingest_order.append(source)
 
 
+def _safe_add_document(store: DocStore, text: str, *, source: str, attempts: int = 3) -> None:
+    """Add a document with short retries for transient Chroma/SQLite contention."""
+    last_err: Exception | None = None
+    for i in range(1, attempts + 1):
+        try:
+            with _store_ops_lock:
+                store.add_document(text, source=source)
+            return
+        except Exception as exc:
+            last_err = exc
+            msg = str(exc).lower()
+            retryable = (
+                ("database is locked" in msg)
+                or ("sqlite" in msg)
+                or ("timeout" in msg)
+                or ("does not exist" in msg and "collection" in msg)
+            )
+            if i < attempts and retryable:
+                wait_s = 0.2 * i
+                logger.warning(
+                    "Ingest retry (%s/%s) for source=%s due to transient store error: %s",
+                    i, attempts, source, exc,
+                )
+                if "does not exist" in msg and "collection" in msg:
+                    with _store_ops_lock:
+                        try:
+                            store.reset()
+                        except Exception as reset_exc:
+                            logger.warning("Store reset during retry failed: %s", reset_exc)
+                time.sleep(wait_s)
+                continue
+            raise
+    if last_err:
+        raise last_err
+
+
 def _run_serialized_analysis(
     store: DocStore,
     *,
@@ -73,7 +111,7 @@ def _run_serialized_analysis(
 ) -> str:
     """Serialize LLM analyze calls to avoid contention timeouts.
 
-    Running multiple heavy 7B requests concurrently can severely degrade
+    Running multiple heavy analysis requests concurrently can severely degrade
     throughput and cause avoidable timeouts. We run one analyze at a time.
     """
     logger.info("Analyze lock: waiting (caller=%s)", caller)
@@ -120,7 +158,7 @@ def _auto_ingest_and_analyze():
     for f in files:
         try:
             text = f.read_text(encoding="utf-8")
-            store.add_document(text, source=f.name)
+            _safe_add_document(store, text, source=f.name)
             _track_user_doc(f.name)
             logger.info("Auto-ingest: %s (%d chars)", f.name, len(text))
         except UnicodeDecodeError:
@@ -237,9 +275,10 @@ def create_app() -> FastAPI:
         """Clear the document store (for testing: ensures each test case runs with only the ingested doc)."""
         global _auto_analysis_result, _auto_analysis_status
         store = get_store()
-        store.reset()
-        _user_doc_sources.clear()
-        _user_doc_ingest_order.clear()
+        with _store_ops_lock:
+            store.reset()
+            _user_doc_sources.clear()
+            _user_doc_ingest_order.clear()
         _auto_analysis_result = None
         _auto_analysis_status = "idle"
         return {"status": "ok", "message": "Store reset", "chunks": store.count()}
@@ -254,7 +293,7 @@ def create_app() -> FastAPI:
         store = get_store()
         if content:
             logger.info("Ingest: content length=%s source=%s", len(content or ""), source)
-            store.add_document(content, source=source)
+            _safe_add_document(store, content, source=source)
             _track_user_doc(source)
             n = store.count()
             logger.info("Ingest done: total chunks=%s", n)
@@ -269,7 +308,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "File must be UTF-8 text.")
             logger.info("Ingest: file=%s size=%s", file.filename, len(text))
             src_name = file.filename or "upload"
-            store.add_document(text, source=src_name)
+            _safe_add_document(store, text, source=src_name)
             _track_user_doc(src_name)
             n = store.count()
             logger.info("Ingest done: total chunks=%s", n)
@@ -301,7 +340,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "Shared file must be UTF-8 text.")
         logger.info("Ingest shared: path=%s size=%s", target, len(text))
         src_name = source or target.name
-        store.add_document(text, source=src_name)
+        _safe_add_document(store, text, source=src_name)
         _track_user_doc(src_name)
         n = store.count()
         logger.info("Ingest shared done: total chunks=%s", n)
@@ -442,9 +481,10 @@ Bot: ## Verification steps ...
         # Reset
         if msg_lower in ("reset", "clear", "start over"):
             store = get_store()
-            store.reset()
-            _user_doc_sources.clear()
-            _user_doc_ingest_order.clear()
+            with _store_ops_lock:
+                store.reset()
+                _user_doc_sources.clear()
+                _user_doc_ingest_order.clear()
             return {"role": "assistant", "content": "Document store cleared. You can now ingest new documents.", "type": "info"}
 
         # List files
@@ -524,7 +564,7 @@ Bot: ## Verification steps ...
             except UnicodeDecodeError:
                 return {"role": "assistant", "content": f"File `{filename}` is not valid UTF-8 text.", "type": "error"}
             store = get_store()
-            store.add_document(text, source=filename)
+            _safe_add_document(store, text, source=filename)
             _track_user_doc(filename)
             n = store.count()
             return {
@@ -546,7 +586,7 @@ Bot: ## Verification steps ...
             for f in files:
                 try:
                     text = f.read_text(encoding="utf-8")
-                    store.add_document(text, source=f.name)
+                    _safe_add_document(store, text, source=f.name)
                     _track_user_doc(f.name)
                     ingested.append(f"- **{f.name}** ({len(text):,} chars)")
                 except UnicodeDecodeError:

@@ -22,6 +22,7 @@ Keep answers concise and complete:
 - Default to top 3 findings unless user explicitly asks for more.
 - Avoid duplicate summary sections or repeated endpoint blocks.
 - Prefer compact verification/runbook steps that fit in a single complete response (no cut-off endings).
+- Assume documentation is incomplete unless ownership controls are explicitly stated; when uncertain, include one explicit uncertainty note rather than overclaiming.
 
 Do not output generic technology buckets like "REST analysis", "SQL analysis", or "GraphQL analysis" unless those specific technologies are explicitly present in the provided documentation/HAR excerpt and tied to concrete operations in that excerpt."""
 

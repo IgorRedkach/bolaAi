@@ -12,7 +12,7 @@ def test_ingest_timeout_allows_learning_not_inference():
     """Ingest (embedding) may be slow; separate from LLM reply cap (Issue 17).
 
     Ingest timeout must be generous for CPU embedding but is independent of
-    LLM inference timeout (7B model inference ≠ embedding speed).
+    LLM inference timeout (analysis inference ≠ embedding speed).
     """
     assert config.INGEST_HTTP_TIMEOUT >= 300
 

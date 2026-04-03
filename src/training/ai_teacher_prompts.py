@@ -88,6 +88,40 @@ Then return:
 - A list of fix actions to improve future data generation prompts
 """
 
+PHASE1_SMALL_MODEL_INSTRUCTIONS = """Phase 1 objective: improve a smaller local model (3B/3.5B-class)
+for reliable BOLA analysis without relying on larger-model capacity.
+
+Extra constraints for generated gold responses:
+- Each finding must include one exact endpoint/object and one concrete verification step.
+- Prefer explicit, short runbooks over broad narrative.
+- Add a final "Uncertainty" bullet when ownership controls are undocumented.
+"""
+
+PHASE1_EXPECTED_RESPONSE_PROMPT = """You are producing a gold-standard expected analysis response
+for a smaller BOLA detection assistant model. Use ONLY the provided artifacts.
+
+Return strict markdown sections:
+## Findings
+- each containing:
+  - exact endpoint/object (verbatim from artifact)
+  - BOLA rationale (ownership/object-level access gap)
+
+## Verification Runbook
+- 3-6 concise steps.
+- Include expected outcomes for secure vs vulnerable behavior.
+
+## Grounding Self-check
+- Bullet list of endpoints/objects used in this answer.
+
+## Uncertainty
+- One bullet that states what cannot be concluded from the artifact.
+
+Quality constraints:
+- No invented endpoint/path/object names.
+- No "test without token" logic for BOLA confirmation.
+- No patch code; auditor procedure only.
+"""
+
 
 @dataclass(frozen=True)
 class TrainingTask:

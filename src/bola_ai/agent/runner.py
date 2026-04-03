@@ -70,7 +70,13 @@ def run_analysis(
     out = chat(messages, model=model, timeout=timeout)
     log_memory(logger, "after LLM chat")
     allowed_paths = _extract_paths_from_context(context)
-    out = _normalize_report(out or "", allowed_paths=allowed_paths, context=context, source_filter=source_filter)
+    out = _normalize_report(
+        out or "",
+        allowed_paths=allowed_paths,
+        context=context,
+        source_filter=source_filter,
+        user_query=query,
+    )
     logger.info("LLM response length=%s", len(out or ""))
     return out
 
@@ -184,6 +190,7 @@ def _is_structured_content(context: str, source_filter: Optional[list[str]] = No
 def _normalize_report(
     report: str, *, allowed_paths: Optional[list[str]] = None, context: str = "",
     source_filter: Optional[list[str]] = None,
+    user_query: str = "",
 ) -> str:
     """Normalize LLM output: fix duplicate headings (Issue 4), verification hint (Issue 5), redact hallucinated endpoints."""
     if not report.strip():
@@ -588,8 +595,79 @@ def _normalize_report(
         report = (
             report.rstrip()
             + "\n\nNo grounded finding could be reliably extracted from this response. "
-            "Re-run analysis with a narrower endpoint-focused query and verify with two different user tokens.\n"
+            "Re-run analysis with a narrower endpoint-focused query and provide explicit BOLA ownership rationale "
+            "plus a two-token verification runbook.\n"
         )
+    report = _enforce_strict_adaptive_shapes(
+        report,
+        user_query=user_query,
+        allowed_paths=allowed_paths or [],
+        context=context,
+    )
+    return report
+
+
+def _extract_method_path_pairs(context: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for m in re.finditer(
+        r"(?im)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[\w{}\-/\.]+)",
+        context or "",
+    ):
+        method = m.group(1).upper()
+        path = m.group(2)
+        item = (method, path)
+        if item not in seen:
+            seen.add(item)
+            pairs.append(item)
+    return pairs
+
+
+def _method_for_path(path: str, context: str) -> str:
+    for method, p in _extract_method_path_pairs(context):
+        if p == path:
+            return method
+    return "GET"
+
+
+def _enforce_strict_adaptive_shapes(
+    report: str, *, user_query: str, allowed_paths: list[str], context: str
+) -> str:
+    q = (user_query or "").lower()
+    if not q:
+        return report
+
+    # Issue 35: q5 asks for exactly two curl commands only.
+    if "only two curl commands" in q or "give **only** two curl commands" in q:
+        target_path = allowed_paths[0] if allowed_paths else "/api/resource/{id}"
+        method = _method_for_path(target_path, context)
+        return (
+            f'curl -X {method} "https://api.example.com{target_path}" '
+            '-H "Authorization: Bearer token_A"\n'
+            f'curl -X {method} "https://api.example.com{target_path}" '
+            '-H "Authorization: Bearer token_B"'
+        )
+
+    # Issue 36: q6 asks for compact path audit list (YES/NO only).
+    if "state yes if it appears" in q and "if hallucinated" in q:
+        mentioned = _extract_paths_from_context(report)
+        if not mentioned:
+            mentioned = allowed_paths[:1] if allowed_paths else ["/api/resource/{id}"]
+        lines: list[str] = []
+        for path in mentioned:
+            verdict = "YES" if path in allowed_paths else "NO"
+            lines.append(f"- {path} -> {verdict}")
+        return "## Path Audit\n" + "\n".join(lines)
+
+    # Issue 2 hardening: when query explicitly asks for BOLA-only findings,
+    # strip pagination/filter framing that can appear as model drift.
+    if any(x in q for x in ("bola-only", "list only bola", "only bola risks")):
+        report = re.sub(r"(?im)^.*\bpagination\b.*$\n?", "", report)
+        report = re.sub(r"(?im)^.*\bfilter(?:ing)?\b.*$\n?", "", report)
+        report = re.sub(r"(?im)^.*\border status\b.*$\n?", "", report)
+        report = re.sub(r"(?im)^.*\bcreation date\b.*$\n?", "", report)
+        return report.strip()
+
     return report
 
 

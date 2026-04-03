@@ -14,7 +14,7 @@ services:
           sleep 5
           if ! ollama list 2>/dev/null | grep -q bola-analyzer; then
             echo "Creating bola-analyzer (uses internet, one-time)..."
-            ollama pull qwen2.5-coder:7b && ollama create bola-analyzer -f /Modelfile
+            ollama pull qwen2.5-coder:3b && ollama create bola-analyzer -f /Modelfile
           fi
           wait
         else

@@ -34,8 +34,8 @@ if ollama list 2>/dev/null | grep -q "${MODEL_NAME}"; then
 else
   if [ "$ALLOW_MODEL_PULL" = "1" ]; then
     echo "[bola-ai] WARNING: ${MODEL_NAME} not found — creating from Modelfile..."
-    echo "[bola-ai] Pulling qwen2.5-coder:7b (~4.7 GB, this requires internet)..."
-    ollama pull qwen2.5-coder:7b
+    echo "[bola-ai] Pulling qwen2.5-coder:3b (this requires internet)..."
+    ollama pull qwen2.5-coder:3b
     ollama create "${MODEL_NAME}" -f /app/Modelfile
     echo "[bola-ai] Model ready."
   else

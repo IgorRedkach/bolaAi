@@ -1,28 +1,46 @@
-"""
-Live API regressions for agent **E2E loop failures** only.
+"""Regressions for agent E2E-loop-specific failures.
 
-Issues from the full-cycle agent prompt that fail strict coverage, timeouts on
-loop-specific docs, or bad person-style follow-ups are tracked as **[E2E-LOOP]**
-in docs/ISSUES.md. Their autotests live **here**, not in test_issues_resolved.py.
-
-Run separately when verifying a loop-failure fix:
-
-    BOLA_AI_LIVE_URL=http://localhost:8000 PYTHONPATH=src \\
-      pytest tests/test_e2e_loop_failures.py -v -s
-
-See docs/E2E_TESTING.md and docs/AGENT_PROMPT_FULL_CYCLE.md (section E).
-
-When you file **[E2E-LOOP] Issue N**, add ``test_e2e_loop_issue_N_<short>`` below
-(unskipped) and remove or narrow this placeholder skip.
+These tests focus on strict q5/q6 output-shape requirements from adaptive loops.
 """
 
-import pytest
+from bola_ai.agent.runner import _normalize_report
 
 
-@pytest.mark.skip(
-    reason="Remove when first [E2E-LOOP] regression is added; "
-    "each OPEN [E2E-LOOP] issue should have a real test in this file."
-)
-def test_e2e_loop_failures_readme_placeholder():
-    """Placeholder so the file is discoverable; replace with real loop regressions."""
-    assert False
+def test_e2e_loop_issue_35_q5_returns_only_two_curl_commands():
+    raw = (
+        "## Potential findings\n"
+        "### Drifted output\n"
+        "Model returned narrative instead of strict curls."
+    )
+    out = _normalize_report(
+        raw,
+        allowed_paths=["/graphql"],
+        context="POST /graphql",
+        user_query=(
+            "Give **only** two curl commands—Alice then Bob—same URL path and same HTTP method as in the doc."
+        ),
+    )
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    assert lines[0].startswith("curl -X POST")
+    assert "token_A" in lines[0]
+    assert "token_B" in lines[1]
+
+
+def test_e2e_loop_issue_36_q6_returns_path_audit_only():
+    raw = (
+        "## Potential findings\n"
+        "### GET /api/v1/vendors/{vendorId}/bids/{bidId}\n"
+        "**Rationale:** drifted q6 body.\n"
+    )
+    out = _normalize_report(
+        raw,
+        allowed_paths=["/api/v1/vendors/{vendorId}/bids/{bidId}"],
+        context="GET /api/v1/vendors/{vendorId}/bids/{bidId}",
+        user_query=(
+            "Review your previous answer and state YES if it appears in the ingested documentation text or NO if hallucinated."
+        ),
+    )
+    assert out.startswith("## Path Audit")
+    assert "-> YES" in out
+    assert "Potential findings" not in out

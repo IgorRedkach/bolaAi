@@ -318,7 +318,61 @@ def test_normalize_report_recovers_from_dangling_fence_near_empty_output():
     out = _normalize_report(raw)
     assert "```" not in out
     assert len(out.strip()) > 60
-    assert "two different user tokens" in out.lower()
+    assert "verification" in out.lower()
+
+
+def test_normalize_report_enforces_q5_two_curl_only_shape():
+    raw = (
+        "## Potential findings\n\n"
+        "### Some finding\n"
+        "Narrative text that should be removed for strict q5."
+    )
+    out = _normalize_report(
+        raw,
+        allowed_paths=["/graphql"],
+        context="POST /graphql",
+        user_query=(
+            "Give only two curl commands. same URL path and same HTTP method as in the doc."
+        ),
+    )
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    assert lines[0].startswith('curl -X POST "https://api.example.com/graphql"')
+    assert "token_A" in lines[0]
+    assert "token_B" in lines[1]
+
+
+def test_normalize_report_enforces_q6_path_audit_shape():
+    raw = (
+        "## Potential findings\n"
+        "### GET /api/v1/vendors/{vendorId}/bids/{bidId}\n"
+        "**Rationale:** text\n"
+    )
+    out = _normalize_report(
+        raw,
+        allowed_paths=["/api/v1/vendors/{vendorId}/bids/{bidId}"],
+        context="GET /api/v1/vendors/{vendorId}/bids/{bidId}",
+        user_query=(
+            "state YES if it appears in the ingested documentation text or NO if hallucinated"
+        ),
+    )
+    assert out.startswith("## Path Audit")
+    assert "/api/v1/vendors/{vendorId}/bids/{bidId} -> YES" in out
+    assert "Potential findings" not in out
+
+
+def test_normalize_report_strips_pagination_when_bola_only_requested():
+    raw = (
+        "## Potential findings\n"
+        "- BOLA risk: missing ownership check on /api/orders/{id}\n"
+        "- Pagination may leak ordering behavior\n"
+    )
+    out = _normalize_report(
+        raw,
+        user_query="List only BOLA risks for this documentation.",
+    )
+    assert "Pagination" not in out
+    assert "ownership check" in out
 
 
 def test_normalize_report_rewrites_invalid_user_a_denied_confirmation():

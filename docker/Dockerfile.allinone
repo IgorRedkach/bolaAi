@@ -1,4 +1,4 @@
-# BOLA AI — All-in-one image: Ollama + pre-baked 7B model + taught RAG knowledge + app.
+# BOLA AI — All-in-one image: Ollama + pre-baked 3B-class model + taught RAG knowledge + app.
 # The model is downloaded, taught with few-shot examples, and RAG knowledge is pre-loaded
 # ALL during BUILD so the image is 100% self-contained. No internet needed at runtime.
 # Users run: docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
@@ -22,14 +22,14 @@ COPY data/ /app/data/
 COPY docker/Modelfile /app/Modelfile
 
 # --- Stage 1: Pre-bake the LLM model during build ---
-# Start Ollama, pull the 7B model, create bola-analyzer with few-shot examples, stop Ollama.
-# Model weights (~4.7 GB) are stored in /root/.ollama/models/ inside the image.
+# Start Ollama, pull the 3B model, create bola-analyzer with few-shot examples, stop Ollama.
+# Model weights are stored in /root/.ollama/models/ inside the image.
 RUN ollama serve & \
     OLLAMA_PID=$! && \
     sleep 5 && \
     for i in $(seq 1 30); do ollama list >/dev/null 2>&1 && break || sleep 1; done && \
-    echo "[build] Pulling qwen2.5-coder:7b (~4.7 GB)..." && \
-    ollama pull qwen2.5-coder:7b && \
+    echo "[build] Pulling qwen2.5-coder:3b ..." && \
+    ollama pull qwen2.5-coder:3b && \
     echo "[build] Creating bola-analyzer model (with 15 few-shot examples)..." && \
     ollama create bola-analyzer -f /app/Modelfile && \
     echo "[build] Model baked successfully." && \

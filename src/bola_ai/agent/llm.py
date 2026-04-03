@@ -18,7 +18,7 @@ from bola_ai.logging_config import get_logger
 logger = get_logger("llm")
 
 def _default_num_thread() -> int:
-    """Pick a sane default CPU thread count for local 7B inference.
+    """Pick a sane default CPU thread count for local inference.
 
     Ollama auto-detection may choose very low values in constrained/containerized
     environments, which makes inference unreasonably slow.

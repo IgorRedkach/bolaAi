@@ -1,4 +1,4 @@
-# AI-Assisted Teaching Plan (7B-first, national-grade)
+# AI-Assisted Teaching Plan (small-model-first, national-grade)
 
 ## Goal
 
@@ -88,10 +88,11 @@ Reject and regenerate on any gate failure.
 
 ## Model policy
 
-- Keep `7b` as quality default for production-grade security analysis.
-- Use this teaching loop to continuously improve both:
-  - 7b behavior (prompt + curated data)
-  - future small-model candidates (distillation/fine-tuning track)
+- Keep a smaller local model (3B/3.5B-class) as the quality default for production use in this project line.
+- Do not depend on larger-model capacity to pass quality gates.
+- Use this teaching loop to continuously improve:
+  - small-model behavior (prompt + curated data + strict output contract)
+  - downstream distilled/fine-tuned variants derived from the same evaluation gates
 
 ## National-interest reliability policy
 

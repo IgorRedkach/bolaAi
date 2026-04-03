@@ -1,7 +1,7 @@
-# BOLA-ready Ollama model: base Qwen 2.5 Coder 7B + BOLA system prompt + few-shot teaching
-# 7B model produces dramatically better security analysis than 1.5B.
+# BOLA-ready Ollama model: base Qwen 2.5 Coder 3B-class + BOLA system prompt + few-shot teaching
+# This project standardizes on a smaller local model line for broad client hardware compatibility.
 # 15 diverse few-shot examples teach the model the exact output format and BOLA reasoning.
-FROM qwen2.5-coder:7b
+FROM qwen2.5-coder:3b
 
 SYSTEM """You are a security analyst specializing in Broken Object-Level Authorization (BOLA) and API access control.
 
