@@ -2,87 +2,164 @@
 
 ## Mission
 
-Build a **world-class, portable, local-only AI security tool** for government and regulated organizations (e.g., healthcare, finance, government agencies) in the United States. The tool helps keep **critical systems safe** (national interests) by reducing security and compliance risk: it analyzes documentation, schemas, and APIs to predict **Broken Object-Level Authorization (BOLA)** and related issues, then either tests automatically or gives auditors clear, actionable verification steps. **Quality is non-negotiable:** no shortcuts, no cutting content or relaxing criteria to make steps “pass”; problems (timeouts, failures, poor output) must be **analyzed and fixed at the root**, not worked around.
+Build a **world-class, portable AI agent** that finds system vulnerabilities by investigating documentation and/or log traces. The tool serves government and regulated organizations (healthcare, finance, defense, critical infrastructure) in keeping **critical systems safe**. It runs **entirely offline**, produces **auditor-actionable findings** grounded in provided artifacts, and treats **quality as non-negotiable**: problems are analyzed and fixed at the root, never worked around.
 
-## Primary Risk Focus: BOLA (Broken Object-Level Authorization)
+Mission interpretation guardrails:
+- The vulnerability taxonomy is **non-exhaustive** and continuously extensible.
+- Quality is measured by **evidence, correctness, and actionability**, not by forcing a fixed number of findings.
+- Goals should avoid overfitting to one fixture family, one platform, or one phrasing style.
 
-**BOLA** is #1 in the OWASP API Security Top 10. It occurs when APIs do not verify that the authenticated user is allowed to access or modify the specific object (by ID, key, or path). Attackers exploit this by changing IDs, query parameters, or resource paths to access data or actions they should not have.
+## Vulnerability Taxonomy
 
-This tool prioritizes BOLA because:
+The agent investigates a broad and evolving set of vulnerability classes. BOLA is the historical namesake and remains a primary focus, but the tool is not limited to a single weakness family. It detects and explains any vulnerability class that can be evidenced from documentation, schemas, API specs, HAR captures, or log/network traces.
+
+### 2.1 Broken Object-Level Authorization (BOLA)
+
+The Logic: failure in the **ownership invariant**. The system validates identity (authentication) but fails to verify the relationship between that identity and the requested resource instance.
+
+- **Instance-to-user scoping failure:** object fetched by primary key but query omits caller user/tenant constraint.
+- **Hierarchical/nested dependency gap:** parent access is checked, child-to-parent ownership is not re-verified for the current user.
+- **Predictable traversal opportunity:** enumerable/patterned identifiers (sequential integers, timestamps, known carrier formats) enable object address guessing without discovery.
+- **Cross-service identity propagation drift:** the caller's identity or tenant context is lost or weakened as a request crosses internal service boundaries.
+- **Cache-key authorization mismatch:** cached responses keyed by object ID alone (no user/tenant dimension) serve data across users.
+- **Mass assignment via object fields:** write endpoints accept fields that override ownership, role, or status attributes the caller should not control.
+
+### 2.2 Broken Access Control (BAC)
+
+The Logic: failure in the **enforcement boundary**. Users are not restricted to their functional mandate or administrative silo.
+
+- **Functional pivot (vertical/horizontal):** access to endpoints or metadata outside the assigned role boundary (user calling /admin/ or /internal/ paths).
+- **Metadata/attribute side-channel:** restricted object existence leaked via search, typeahead, recent-items, or analytics APIs.
+- **State/session permeability:** external/portal sessions reach internal/standard views or setup menus.
+- **Privilege escalation via parameter tampering:** role, group, or permission identifiers accepted from client input without server-side re-validation.
+
+### 2.3 Insecure Design
+
+The Logic: **systemic architectural flaw** where security is bypassed by the nature of the application's design.
+
+- **Client-assumed authority:** backend trusts client-supplied security-sensitive state (price, role, status, discount) instead of re-calculating server-side.
+- **Workflow decoupling:** multi-step flows (verification → processing → finalization) where the final state can be reached out-of-order without prerequisite re-checks.
+- **Semantic ambiguity:** over-broad endpoints (upsert-style) blur distinct authorization checks for create vs update vs delete.
+- **Implicit trust in third-party callbacks:** accepting state-changing webhooks or callbacks without cryptographic signature validation.
+
+### 2.4 Software or Data Integrity Failures
+
+The Logic: failure in **delegated trust**. A trusted process is manipulated into unauthorized actions.
+
+- **Confused deputy/brokerage failures:** privileged internal services (PDF generators, email notifiers, cloud exporters) abused as proxies using internal system credentials to access private data.
+- **Persistence poisoning via lifecycle actions:** clone/restore/sync/merge creates new objects inheriting data or permissions from a source the user was never authorized to see.
+- **Integrity downgrade via versioning:** legacy API versions or protocols (v1.0, SOAP) bypass modern security filters while still touching production data.
+- **Supply-chain injection:** untrusted dependencies, plugins, or serialized payloads injecting code or data into the trusted execution context.
+
+### 2.5 Injection (Logic and Protocol)
+
+The Logic: failure to **distinguish instruction from data**.
+
+- **Authorization-bypass injection:** injected operators (OR 1=1, Lucene wildcards) nullify owner/tenant constraints in search filters or queries.
+- **Resolver/graph traversal injection:** exploiting GraphQL, SOQL, or similar query languages to navigate from an authorized public node to an unauthorized private node via nested fields or aliases.
+- **Server-Side Request Forgery (SSRF) via user-controlled URLs:** endpoints accepting URLs or file paths that the backend fetches, enabling access to internal resources.
+- **Template/expression injection:** user input interpreted as template syntax (SSTI, EL injection) granting access to internal state or objects.
+
+### 2.6 Security Misconfiguration
+
+The Logic: **hardening failure** where code may be sound but environment settings expose the system.
+
+- **Schema/relationship over-exposure:** introspection, WSDLs, Swagger/OpenAPI docs, or tooling APIs left enabled, revealing internal data model and field relationships.
+- **Verbose error feedback:** detailed 500/403 responses leaking resource owner names, internal database keys, stack traces, or confirmation of high-value target existence.
+- **Default credentials and unnecessary services:** shipped default accounts, debug endpoints, or unnecessary protocols still active in production.
+- **Permissive CORS/CSP policies:** allowing unauthorized origins to make authenticated cross-origin requests or load untrusted scripts.
+
+### 2.7 Security Logging and Alerting Failures
+
+The Logic: **visibility failure**. Malicious object-boundary movement is not observable or investigable.
+
+- **Operational PII/PHI leakage:** sensitive payloads (tokens, IDs, PII) over-logged into broadly accessible plaintext logs.
+- **Anti-forensic capabilities:** actors can alter or delete audit trails tracking their own resource access.
+- **Insufficient logging of authorization decisions:** object-level access grants/denials not logged, making breach reconstruction impossible.
+- **Alert suppression via volume:** high-rate normal activity masking low-rate malicious access in alerting systems.
+
+### 2.8 Mishandling of Exceptional Conditions
+
+The Logic: **resilience failure**. Error conditions fail open (granting access) instead of fail closed.
+
+- **Concurrency/race condition gaps:** temporary ownership-state windows during high-latency syncs where the owner association has not yet been committed.
+- **Fail-open on timeout/exception:** authorization middleware that grants access when the authorization service is unavailable or returns an error.
+- **Partial rollback exposure:** multi-step transactions where a failure rollback leaves intermediate state (files, records, permissions) accessible.
+- **Resource exhaustion leading to bypass:** denial-of-service conditions that degrade authorization checks before availability checks.
+
+### 2.9 Broken Authentication Boundaries
+
+The Logic: **identity boundary failure** where authentication mechanisms can be subverted to assume another identity context.
+
+- **Token scope leakage:** tokens issued for one service or audience accepted by a different service without audience validation.
+- **Session fixation/confusion:** ability to force or predict session identifiers, binding a victim's authentication to an attacker-controlled session.
+- **OAuth/OIDC misconfiguration:** redirect URI validation gaps, implicit flow token leakage, or insecure token storage patterns.
+
+### 2.10 Cryptographic Failures Affecting Authorization
+
+The Logic: **cryptographic weakness** enabling unauthorized data access or identity impersonation.
+
+- **Weak or missing encryption of sensitive data at rest:** object-level data (PII, PHI, credentials) stored unencrypted or with weak algorithms.
+- **Signature bypass on tokens or assertions:** JWTs with `alg:none`, SAML response manipulation, or HMAC/RSA confusion attacks.
+- **Insufficient transport security:** internal service-to-service communication lacking TLS, enabling credential or token interception.
+
+### Additional Related Classes (non-exhaustive)
+
+This taxonomy is deliberately not closed. Any vulnerability class evidenced in provided artifacts is in scope, including but not limited to: object state machine abuse, webhook callback trust failures, API gateway routing bypasses, GraphQL depth/complexity attacks, deserialization vulnerabilities, business logic bypasses, and time-of-check-to-time-of-use (TOCTOU) flaws.
+
+## Why BOLA is Prioritized
+
+BOLA remains the primary investigation focus because:
 
 - It is **easy to miss** in reviews and generic test plans.
 - It is **high impact**: one flaw can expose large volumes of sensitive data.
 - It is **common** in real systems (linked tables, shared IDs, missing checks).
-- Regulated sectors (healthcare, finance, government) hold data where BOLA leads to compliance breaches (HIPAA, PCI-DSS, FedRAMP, etc.).
+- Regulated sectors hold data where BOLA leads to compliance breaches (HIPAA, PCI-DSS, FedRAMP).
+- The other vulnerability classes in the taxonomy frequently **compound with BOLA** — BAC enables the pivot, insecure design enables the workflow skip, injection enables the constraint bypass.
 
 ## Design Principles
 
-1. **Autonomous, no internet at runtime** — The tool must run **without any requests to the open internet**. No outbound calls to external APIs, model registries, or update servers. Suitable for air-gapped and restricted environments. All required assets (model, RAG data) are either baked into the image or supplied via a pre-loaded volume.
-2. **Local only** — No data leaves the machine; no network required when running the tool.
-3. **Disposable** — Run in a container with ephemeral storage; when analysis is done, wipe the volume and delete the container so no sensitive artifacts remain.
-4. **Free and open** — No usage fees or vendor lock-in; usable by any team with basic infrastructure.
+1. **Autonomous, no internet at runtime** — No outbound calls to external APIs, model registries, or update servers. Suitable for air-gapped and restricted environments. All required assets (model, RAG data) are baked into the image.
+2. **Local only** — No data leaves the machine; no network required when running.
+3. **Disposable** — Run in a container with ephemeral storage; wipe volume and delete container when done.
+4. **Free and open** — No usage fees or vendor lock-in.
 5. **Auditor-friendly** — Outputs concrete steps, example queries, and test cases so humans can verify findings.
-6. **Documentation-first** — Works from existing docs: system info, schemas, API specs, and runbooks rather than requiring live access.
-7. **Offline deployable** — The built image (and optional model volume) can be **downloaded or transferred by chunks** (e.g. split archives) to a target machine and run locally without internet.
+6. **Artifact-driven** — Works from existing documentation, schemas, API specs, HAR captures, and log/network traces rather than requiring live system access.
+7. **Offline deployable** — The built image can be downloaded or transferred by chunks to a target machine and run locally.
 
 ## Target Users
 
-- **Internal security and compliance teams** in government and regulated companies.
-- **Auditors and assessors** who need to check APIs and data access for BOLA.
+- **Internal security and compliance teams** in government and regulated organizations.
+- **Auditors and assessors** checking APIs and systems for authorization, design, and integrity failures.
 - **Developers and architects** doing security-by-design reviews of new APIs or integrations.
-
-## Real-World BOLA Examples (From Practice)
-
-These illustrate the kinds of issues the tool is meant to help find and verify.
-
-### 1. Salesforce — Unrestricted Related Table
-
-- **Context:** A “restricted” case object was correctly scoped, but it was linked to a **team members** table that was **not** restricted.
-- **Risk:** A user who should not see US persons data could reach it via the team members relationship.
-
-### 2. APIs Without Permission Checks
-
-- **Context:** APIs did not verify that the caller was allowed to access the requested patient.
-- **Risk:** Any logged-in user could query and potentially retrieve **all patients’ personal data**, including diagnosis.
-
-### 3. Logs and Queue Visibility
-
-- **Context:** Logs contained full request details; when queue processing retried or failed, this information was visible to the operations team (including teams outside the country).
-- **Risk:** Complaints, resolutions, and personal customer data under **GDPR** were exposed to people who should not have access.
-- **Outcome:** Reputational and compliance risk; highlights that BOLA and data exposure can occur via logs and operational tooling, not only via APIs.
-
-### 4. Third-Party Image Storage
-
-- **Context:** Image storage was outsourced to a third party. API calls could be edited by any user.
-- **Risk:** Users could obtain **full images and designs** of unreleased samples, enabling insider leakage and reputational harm.
-- **Outcome:** Demonstrates BOLA in a multi-party, cross-border setup where object-level checks were missing.
+- **Incident responders** analyzing log/network traces for evidence of exploitation patterns.
 
 ## What the Tool Delivers
 
-- **Analysis** of provided documentation (system info, schemas, API specs, runbooks).
-- **Predictions** of likely BOLA and related authorization weaknesses, with brief rationale.
+- **Analysis** of provided artifacts (documentation, schemas, API specs, HAR captures, log traces).
+- **Findings** across the vulnerability taxonomy, grounded in evidence from provided artifacts, with clear rationale and confidence boundaries.
 - **Verification support:**
-  - Suggested queries (e.g., HTTP requests, parameter changes).
-  - Step-by-step instructions for auditors to confirm or rule out the finding.
-- **Optional automated checks** where the tool can run tests (e.g., ID enumeration, cross-tenant access) in a controlled way.
+  - Suggested queries (HTTP requests, GraphQL operations, SOQL, parameter changes).
+  - Step-by-step instructions for auditors to confirm or rule out each finding.
 - **No persistence of sensitive data** — container and volume can be destroyed after use.
 
 ## Success Criteria
 
-- **No requests to the open internet** — At runtime the tool does not send any requests to the internet. Ollama and the app talk only to each other (and the CLI to the app) on localhost/internal network. Model and RAG data are pre-loaded; no pull or download at run time.
-- **Trained LLM and training data:** RAG is preloaded from `data/knowledge/` and `data/training/bola_rag_chunks.txt`; the Ollama model uses a BOLA system prompt (Modelfile). For adding examples and retraining: add markdown to `data/knowledge/`, extend `generate_data.py` output, and use `data/training/bola_training.jsonl` with your own weights/pipeline for fine-tuning (e.g. externally).
-- Runs **autonomously and fully offline** in a Docker container (LLM, vector DB, UI).
-- Produces **actionable**, BOLA-focused findings with clear verification steps.
-- Produces **logically valid** verification guidance: do not confirm BOLA from auth failures (`401`, invalid token) or missing-object outcomes (`404`) alone; require two valid-user token comparison on an existing object ID.
-- Passes **adversarial manual verification mode**: robust against ambiguous docs (legacy endpoint mentions, mixed scopes/roles, cross-tenant ambiguity) while staying grounded to active documented endpoints.
-- **GraphQL and SOQL support**: When docs describe GraphQL (queries, mutations, nested resolvers) or SOQL/Salesforce (record-level sharing, WITH SECURITY_ENFORCED, cross-object queries), the tool identifies BOLA risks in those paradigms and provides verification steps using the appropriate syntax.
-- Can be **trained or adapted** on BOLA patterns and organizational docs via local data and optional fine-tuning.
-- **Easy to tear down**: one workflow to wipe volumes and remove the container when the analysis is complete.
-- **Deployable by chunks:** There is a documented and scripted way to export the built image (and model data) as chunked files, transfer them to another machine (e.g. without internet), reassemble, and run the stack locally.
-- **Shared-volume document intake:** Users can place documentation in the Docker-shared docs path and ingest by relative filename (no manual paste required), including agent E2E loops.
-- **Self-verification before answer:** The tool **verifies its own results** before returning an answer to the customer, from a **critical perspective**, to reduce hallucinations. For example: check that every endpoint or resource mentioned in the report appears in the ingested documentation; flag or correct invented paths, wrong verification logic (e.g. 401/404 used to “confirm” BOLA), or off-topic findings; **REST-only docs:** strip invented **GraphQL** code fences in `runner._normalize_report` when context states no GraphQL / REST-only. This may be implemented as post-processing (e.g. normalization, path grounding, validation rules) and/or prompt instructions so that outputs are critically checked against the provided context before being shown to the user.
+- **No requests to the open internet** at runtime. Model and RAG data pre-loaded.
+- **Trained LLM and knowledge base:** RAG preloaded from `data/knowledge/` and training data; Ollama model uses system prompt with few-shot examples (Modelfile). Extensible via `generate_data.py` and knowledge markdown.
+- Runs **autonomously and fully offline** in Docker (LLM, vector DB, UI).
+- Produces **actionable**, evidence-grounded findings with clear verification steps.
+- Produces **logically valid** verification guidance: does not confirm vulnerabilities from auth failures (401), missing-object outcomes (404), or single-user tests alone; requires valid comparative checks grounded in artifact semantics.
+- **No fixed finding-count requirement:** when artifacts contain limited evidence, the tool should return fewer high-confidence findings with explicit uncertainty; when artifacts contain broader evidence, it should surface all supported risks.
+- **Broad vulnerability coverage:** identifies findings across the full taxonomy (2.1–2.10+) when evidenced in provided artifacts, not limited to a single class.
+- **GraphQL, SOQL, and platform-specific support:** when docs describe GraphQL, SOQL/Salesforce, Aura/LWC, or other platform-specific patterns, findings use the appropriate syntax and verification approach.
+- Can be **trained or adapted** via local data and the teaching pipeline.
+- **Easy to tear down**: one workflow to wipe volumes and remove the container.
+- **Deployable by chunks:** documented workflow to export, transfer, reassemble, and run on air-gapped machines.
+- **Shared-volume document intake:** users place files in shared docs path and the tool auto-ingests.
+- **Self-verification before answer:** the tool verifies its own results before returning (path grounding, redaction of unknown endpoints, correction of invalid confirmation logic, verification step validity). Implemented as post-processing normalization and prompt instructions.
 
-All agents and LLMs used in the project should align with these goals: no internet at runtime, BOLA-focused, auditor-friendly, disposable, and **no quality tricks** (no shortening prompts, cutting scope, or relaxing bar to avoid failures—fix root causes instead).
+All agents and LLMs used in the project should align with these goals: no internet at runtime, evidence-grounded investigation across the vulnerability taxonomy, auditor-friendly output, disposable operation, and **no quality shortcuts**.
 
 ---
 
@@ -95,73 +172,74 @@ All agents and LLMs used in the project should align with these goals: no intern
 
 ---
 
-## Goals checklist (implementation)
+## Goals checklist (implementation, non-exhaustive)
 
-- [x] **E2E always live:** `pytest tests/` **requires** a running API + Ollama when live E2E files are collected (see docs/E2E_TESTING.md); no silent skip. Unit-only runs exclude those files. In-process tests use fake embedder where applicable (docs/MEMORY.md).
-- [x] **No internet at runtime** — Tool does not send any requests to the open internet; runs autonomously offline.
-- [x] Free, local-only tool
-- [x] BOLA-focused analysis with verification steps
-- [x] Verification logic quality guardrails (no false BOLA confirmation from 401/404-only outcomes; endpoint grounding to provided documentation)
-- [x] Adversarial manual verification cycle with generated tricky docs passes
-- [x] **GraphQL support**: identifies BOLA in operations/arguments (user(id), deleteDocument(id), nested resolvers); verification uses GraphQL syntax and two valid user tokens; heading bleed and auth-only verification post-corrected
-- [x] **SOQL/Salesforce support**: identifies record-level BOLA (missing WITH SECURITY_ENFORCED, cross-object subqueries, sharing model gaps) with SOQL-aware verification steps
+This checklist tracks implementation progress and can include concrete mechanisms used at a point in time. It is **not** a fixed scoring rubric for model quality, and should not be interpreted as a requirement to find a specific number of risks or to mirror one example style.
+
+- [x] **E2E always live:** `pytest tests/` requires a running API + Ollama when live E2E files are collected; no silent skip.
+- [x] **No internet at runtime** — Tool runs autonomously offline.
+- [x] Free, local-only tool.
+- [x] Evidence-grounded vulnerability investigation from documentation and log/network traces across the full taxonomy.
+- [x] Verification logic quality guardrails (no false confirmation from 401/404-only outcomes; endpoint grounding to provided documentation).
+- [x] Adversarial manual verification cycle with generated tricky docs passes.
+- [x] **GraphQL support**: identifies vulnerabilities in operations/arguments and nested resolvers; verification uses GraphQL syntax and two valid user tokens.
+- [x] **SOQL/Salesforce support**: identifies record-level risks (sharing model gaps, cross-object subqueries) with appropriate verification steps.
 - [x] Docker: LLM (Ollama) + Vector DB (Chroma) + UI (FastAPI); default startup uses pre-loaded model (no pull at runtime).
-- [x] Ephemeral volume; wipe before/after use
-- [x] Strategy that tool consumes less than 10 GB
-- [x] Train/adapt via RAG knowledge base + generated training data (generate_data.py, load_knowledge.py)
-- [x] API + CLI for terminal and scripted use (run every time via `python -m bola_ai.cli` or `bola-ai`)
-- [x] Automation tests (pytest with fake embedder). Do not wipe and delete container for test purposes on every test run only when specifically wiping is tested.
-- [x] **Trained, ready-to-go container:** RAG preloaded with BOLA knowledge; Ollama model `bola-analyzer` from Modelfile. For offline: use pre-loaded Ollama volume or optional online setup profile to pull model once, then run offline.
-- [x] Communicate with the model to give fake system info and get suggestions.
-- [x] **Download built image by chunks:** Scripts and docs to export image (and optional model volume) as chunked files, transfer to air-gapped machine, reassemble, and run locally (see docs/OFFLINE_DEPLOY.md and scripts/).
-- [x] **Self-verification before answer:** Tool verifies its own results before answering the customer (path grounding, redaction of unknown endpoints, correction of 401/404 BOLA logic, two-token verification phrasing) to reduce hallucinations. Implemented in `runner.py` via `_normalize_report`; can be extended with additional validation (e.g. explicit checklist before return).
-- [x] **No quality shortcuts:** Agent and development process require analyzing and fixing root causes for failures (timeouts, bad output); no shortening queries, cutting content, or relaxing criteria to make steps “pass.” Documented in GOALS and agent prompt.
-- [x] **Timeouts split (Issue 17):** Longer waits for **ingest**, **stack startup**, and **training load**; **LLM inference** timeout (`BOLA_AI_LLM_CHAT_TIMEOUT`) not increased to mask slow replies — improve model/prompt/hardware instead.
-- [x] **Agent E2E loop:** Each quality loop uses **new** generated docs, **new** person-style questions, and **expectations tied only to that run’s data** (see AGENT_PROMPT_FULL_CYCLE.md E). E2E-loop failures are **`[E2E-LOOP]`** issues with tests in **`tests/test_e2e_loop_failures.py`**, run **separately** from `test_issues_resolved.py`.
-- [x] **Failures/interruptions → OPEN issues:** Failed or interrupted loops create **OPEN** tasks in ISSUES.md; the next loop continues until those (and goals) are satisfied — see AGENT_PROMPT hard requirement 3b.
-- [x] **Progress writes OK, stopping is not:** Agents may document what’s done mid-loop but must **continue** until OPEN issues, goals, and improvements are cleared — see AGENT_PROMPT (“Progress notes vs stopping”).
-- [x] **Weak-place registry:** Gaps are tracked in **`docs/AGENT_WEAK_PLACES.md`**; **OPEN** rows block “done”; agents **chain fix → re-verify loops** in-session per **`docs/AGENT_PROMPT_FULL_CYCLE.md`** and **`docs/ANALYSIS_AGENT_LOOP_STOP_GAP.md`**.
-- [x] **Goal immutability by default:** Agents must not delete user-defined goals from `docs/GOALS.md` unless the user explicitly requests deletion; goals are edited/superseded with traceability.
-- [x] **Shared Docker volume ingestion workflow:** Users can provide docs by copying files into shared docs volume/path (`shared_docs` ↔ `/shared-docs`), then ingest via API/CLI (`POST /ingest_shared`, `bola-ai ingest-shared`). Agent E2E uses this path by default.
-- [x] **AI-assisted teaching pipeline scaffolding:** Prompt templates + task-pack generator exist to create high-quality synthetic docs/schemas/network logs and grounded expected responses for continuous model teaching (`src/training/ai_teacher_prompts.py`, `scripts/generate_ai_training_tasks.py`, `docs/AI_MODEL_TEACHING_PLAN.md`).
-- [x] **AI-agent teaching at scale:** Recurring teacher/reviewer gate cycle implemented with acceptance artifacts and trend tracking (`scripts/run_ai_teaching_cycle.py`, `data/training/ai_cycles/teaching_cycle_summary_*.json`), with accepted-only output packs.
-- [x] **Diverse test-data generation is mandatory:** Agent E2E fixture rotation enforces cross-type diversity across loops (`rest_doc`, `graphql`, `salesforce_soql`, `har_like`) via `scripts/run_agent_e2e_loop_once.py` + `docs/e2e_fixture_rotation_state.json`.
-- [x] **Assume documentation is incomplete by default:** Runtime prompt now explicitly requires uncertainty marking when ownership controls are not documented (`src/bola_ai/agent/prompts.py`), and phase-1 teaching prompts enforce an `## Uncertainty` section.
-- [x] **Trained model must be baked into shipped image:** Production image must include the prepared model (not a fresh runtime pull). Startup should fail fast when the baked model is missing unless explicit fallback is opted in.
-- [x] **Model-size policy decision (user-mandated):** Standard runtime baseline is a smaller local model class (3B/3.5B-class). Do not use larger-model defaults or targets for this project line; quality must be achieved via better teaching data, prompts, and evaluation loops on the smaller model.
-- [x] **Small-model teaching phase 1 (mandatory):** Implemented and executed: strict phase-1 prompts/contracts, curated cross-domain task profile, and gate execution with cycle summary artifacts (`docs/SMALL_MODEL_PHASE1_PLAN.md`, `scripts/generate_ai_training_tasks.py --phase small-model-phase1`, `scripts/run_ai_teaching_cycle.py`).
+- [x] Ephemeral volume; wipe before/after use.
+- [x] Portable memory profile with documented guardrails and low-memory test modes.
+- [x] Train/adapt via RAG knowledge base + generated training data.
+- [x] API + CLI for terminal and scripted use.
+- [x] Automation tests (pytest with fake embedder).
+- [x] **Trained, ready-to-go container:** model and RAG knowledge baked into image; no internet needed at startup.
+- [x] Communicate with the model to give system info and get suggestions.
+- [x] **Download built image by chunks:** scripts and docs for air-gapped deployment.
+- [x] **Self-verification before answer:** path grounding, redaction, verification logic correction.
+- [x] **No quality shortcuts:** root-cause analysis and fixes, not workarounds.
+- [x] **Timeouts split:** longer waits for ingest/startup/training; LLM inference timeout not raised to mask slow replies.
+- [x] **Agent E2E loop:** each quality loop uses new generated docs and expectations tied only to that run's data.
+- [x] **Failures/interruptions → OPEN issues:** unfinished work tracked for next loop.
+- [x] **Weak-place registry:** gaps tracked and verified before completion.
+- [x] **Goal immutability by default.**
+- [x] **Shared Docker volume ingestion workflow.**
+- [x] **AI-assisted teaching pipeline scaffolding.**
+- [x] **AI-agent teaching at scale:** recurring teacher/reviewer gate cycle.
+- [x] **Diverse test-data generation is mandatory:** cross-type diversity across loops.
+- [x] **Assume documentation is incomplete by default:** uncertainty marking when ownership controls are not documented.
+- [x] **Trained model baked into shipped image.**
+- [x] **Model-size policy decision (user-mandated):** production baseline is a local model; quality achieved via better teaching data, prompts, and evaluation loops.
+- [x] **Small-model teaching phase 1.**
 
 ---
 
 ## Interactive Web Chat Interface
 
-- [x] **Web chat UI:** Interactive chat page at `/chat` (same port 8000) where users can converse with the BOLA agent in natural language. Messages and responses displayed in a chat bubble layout with markdown rendering. Works fully offline (no CDN dependencies).
-- [x] **Smart message routing:** Backend `/api/chat` endpoint that intelligently routes user messages: ingest commands trigger document ingestion from shared volume; help/usage questions return guidance; analysis questions go to the LLM; status/reset commands are handled directly.
-- [x] **Shared docs awareness:** Users can say "I copied files to the volume" or "list files" and the tool responds with available documents and offers to ingest them. `GET /api/shared_docs` endpoint lists files in the shared docs directory.
-- [x] **Usage guidance:** When asked "how do I use this tool?" or "help", the tool returns clear, structured guidance covering all features (ingest, analyze, shared docs, reset, chat commands). This makes the tool self-documenting for new users.
-- [x] **Manual web E2E verification:** Agent prompt E2E includes a step to open `http://localhost:8000/chat` in a browser and verify the chat interface works (send a message, see response, test ingest command). Documented in `docs/E2E_TESTING.md`.
-- [x] **Startup loading indicator:** When Ollama is not yet ready (model downloading, container booting), the chat UI shows a clear loading/startup state instead of appearing broken. The health dot turns red/amber, a banner explains the system is starting up, and chat input is disabled until the backend is healthy. Prevents user confusion during first-run model download.
+- [x] **Web chat UI:** interactive chat at `/chat` with markdown rendering, fully offline.
+- [x] **Smart message routing:** ingest commands, help, analysis, and status handled intelligently.
+- [x] **Shared docs awareness:** users can reference files in the shared volume.
+- [x] **Usage guidance:** self-documenting help system.
+- [x] **Manual web E2E verification.**
+- [x] **Startup loading indicator.**
 
 ---
 
 ## User Document Awareness & Analysis Integrity
 
-- [x] **Auto-ingest on startup:** When the container starts and files exist in the shared docs folder (`/shared-docs`), auto-ingest them so the user doesn't have to manually say "ingest". The chat UI shows what was auto-ingested. Health endpoint reports `user_documents` count and `user_doc_sources`.
-- [x] **Analysis requires user documents:** The tool must NEVER run BOLA analysis if only preloaded RAG knowledge exists (no user documents ingested). Instead, it returns clear instructions: list available files, suggest ingesting them. Prevents hallucinated findings from generic training data.
-- [x] **Broader ingest vocabulary:** The tool understands a wide range of natural language phrases for ingesting files: "get my files", "investigate my documents", "take a look", "scan the folder", "check my docs", "analyze my files", "read the documents", "look at my files", "process the docs", etc. All trigger bulk ingest from the shared folder.
-- [x] **Chat history persistence:** Chat conversation is preserved across page reloads via localStorage. A "Clear" button lets users wipe history.
+- [x] **Auto-ingest on startup.**
+- [x] **Analysis requires user documents:** never runs analysis from training data alone.
+- [x] **Broader ingest vocabulary.**
+- [x] **Chat history persistence.**
 
 ---
 
 ## Startup Reliability & Testing Process
 
-- [x] **Non-blocking auto-ingest:** Auto-ingest runs in a background thread so the server starts accepting connections immediately. Health endpoint reports `auto_ingest_status` for UI progress display.
-- [x] **All-in-one image smoke test in E2E:** Cold-start image smoke verified on freshly pulled `ghcr.io/igorredkach/bolai:latest` with a new shared-doc fixture and manual `/chat` command checks (`help`, `list files`, `ingest <file>`, analysis question, `status`) after startup wait.
-- [x] **Release verification cycle is mandatory after runtime bugs:** Completed full publish/pull/verify cycle in-session: pushed code to `main`, removed local BOLA containers/images, pulled newer `latest` digest, ran from scratch with new shared docs, waited startup window, and revalidated health/chat/analyze behavior.
+- [x] **Non-blocking auto-ingest.**
+- [x] **All-in-one image smoke test in E2E.**
+- [x] **Release verification cycle is mandatory after runtime bugs.**
 
 ---
 
 ## Hands-free Analysis (run, wait, read)
 
-- [x] **Auto-analyze on startup:** When the container starts with files in shared_docs/, after auto-ingest completes and Ollama is ready, automatically run BOLA analysis and store the result. The chat UI fetches and displays it on load. Users can: `docker run -p 8000:8000 -v ~/shared:/shared-docs ghcr.io/igorredkach/bolai:latest`, wait ~15 minutes, open `/chat`, and see the full analysis without typing anything.
-- [x] **Ollama context window fix:** Set `num_ctx: 8192` in Ollama API options to prevent prompt truncation when RAG context + system prompt exceeds the default 4096 token limit.
+- [x] **Auto-analyze on startup:** users can run the container, wait, and see findings without typing anything.
+- [x] **Context window configured** for model size to prevent prompt truncation.

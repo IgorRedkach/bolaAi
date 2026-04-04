@@ -2,19 +2,19 @@
 
 ## Objective
 
-Raise BOLA analysis quality on a smaller local model baseline (3B/3.5B-class) without using larger-model fallback.
+Raise security vulnerability analysis quality on a local model baseline without requiring larger-model fallback.
 
 ## Scope of Phase 1
 
-- Enforce a compact, grounded response contract.
+- Enforce a compact, grounded response contract across the vulnerability taxonomy.
 - Generate diverse cross-domain training tasks (API docs, schemas, network logs).
 - Gate all generated examples before accepting them into training/RAG.
 - Validate quality with standard agent prompt flow (tests + adaptive E2E).
 
 ## Implemented in this phase
 
-1. **Smaller-model baseline policy**
-   - Runtime/build defaults switched to `qwen2.5-coder:3b` via Modelfile and compose/entrypoint paths.
+1. **Local model baseline policy**
+   - Runtime/build defaults use a local model via Modelfile and compose/entrypoint paths.
 
 2. **Phase-aware AI teaching tasks**
    - `scripts/generate_ai_training_tasks.py` now supports `--phase small-model-phase1` (default).
@@ -22,7 +22,7 @@ Raise BOLA analysis quality on a smaller local model baseline (3B/3.5B-class) wi
 
 3. **Smaller-model response contract**
    - Added `PHASE1_SMALL_MODEL_INSTRUCTIONS` and `PHASE1_EXPECTED_RESPONSE_PROMPT` in `src/training/ai_teacher_prompts.py`.
-   - Forces concise findings, explicit two-token verification, grounding self-check, and explicit uncertainty statement.
+   - Forces concise findings, class-appropriate verification logic (comparative checks where needed), grounding self-check, and explicit uncertainty statement.
 
 4. **Recurring teaching-cycle gate runner**
    - Added `scripts/run_ai_teaching_cycle.py` for recurring teacher/reviewer acceptance cycles.
@@ -52,9 +52,9 @@ Cycle output includes:
 ## Phase 1 acceptance gates
 
 - Grounding: every endpoint/object in answers exists in source artifact.
-- BOLA specificity: findings are object-level authorization issues.
-- Verification validity: Token A vs Token B on same object ID.
-- Compactness: 2-3 findings only, no generic filler.
+- Vulnerability specificity: findings are evidence-grounded security issues from the taxonomy.
+- Verification validity: comparative checks for object-boundary claims; class-appropriate checks for other findings.
+- Compactness: concise, evidence-first findings; no generic filler and no forced finding count.
 - Uncertainty discipline: explicit unknowns when docs are incomplete.
 
 ## Exit criteria

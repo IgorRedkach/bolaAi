@@ -20,7 +20,7 @@ Quality is validated on the **real** stack, not optional mocks.
 4. Stack restarted or reset + ingest via chat/API
 5. Analysis run with per-response R1-R7 checklist
 6. Strict coverage verified: every expected risk has matching finding
-7. Wider communication: 6+ analysis calls including follow-ups
+7. Wider communication: multiple analysis calls including follow-ups, driven by the model's prior answers
 8. Web UI verification: all 7 manual checks pass
 9. No hallucinated endpoints in any response
 
@@ -95,14 +95,14 @@ Before ingesting (or after reset), any analysis question should return a `type: 
 ## What we assert (live LLM) — goals for any E2E pass
 
 1. **Fresh documentation every meaningful E2E cycle**  
-   Generate new test documentation from scratch for that run: think through the **system under test**, **plausible BOLA angles**, and **what you expect** the tool to surface before you write the doc.  
+   Generate new test documentation from scratch for that run: think through the **system under test**, **plausible vulnerability angles**, and **what you expect** the tool to surface before you write the doc.  
    **Required intake path:** copy the doc into the shared Docker docs path (`shared_docs` on host, mounted to `/shared-docs` in container), then either let auto-ingest handle it on startup, or say "ingest" in the chat after **`reset`**.
 
 2. **Analysis requires user documents**  
-   The tool must **refuse** to run BOLA analysis if no user documents are ingested. It must show a message listing available files and how to ingest them. This is the guard against hallucinated findings from generic training data.
+   The tool must **refuse** to run analysis if no user documents are ingested. It must show a message listing available files and how to ingest them. This is the guard against hallucinated findings from generic training data.
 
 3. **Reports match tool goals**  
-   Responses should stay **BOLA-focused**, include **actionable verification steps**, and stay **grounded** in the ingested doc (paths, methods, no invented GraphQL/SOQL when the doc is REST-only, etc. — see **`docs/GOALS.md`**).
+   Responses should include **actionable verification steps** across relevant vulnerability classes and stay **grounded** in the ingested doc (paths, methods, no invented GraphQL/SOQL when the doc is REST-only, etc. — see **`docs/GOALS.md`**).
 
 4. **Answers are grounded in generated data**  
    After ingesting your test doc, verify that:
@@ -119,23 +119,23 @@ Before ingesting (or after reset), any analysis question should return a `type: 
    |------|----------------|
    | **Clean shared folder** | Remove all files except `.gitkeep`. |
    | **Start the stack** | Docker up, health OK. |
-   | **Verify guard** | Ask a BOLA question — should get "No documents ingested" response. |
+   | **Verify guard** | Ask a security analysis question — should get "No documents ingested" response. |
    | **Pass generated data** | Copy doc to `shared_docs/`. Say "ingest" in chat (or restart for auto-ingest). |
    | **Verify ingest** | Check health endpoint: `user_documents` > 0. |
    | **First request** | One analysis question tied to that doc. |
    | **Read the answer** | Judge it against **your scenario**: coverage, grounding, verification logic. |
    | **Next request from context** | Ask a **new** question **informed by what the model just said**. |
    | **Repeat** | Continue until satisfied the tool has been exercised enough. |
-   | **Per-response analysis** | For **every** response: grounded? BOLA-relevant? verification sound? |
+   | **Per-response analysis** | For **every** response: grounded? vulnerability-relevant? verification sound? |
 
 6. **Improvements become work items**  
    Anything that should change product or process → **`docs/ISSUES.md`** and/or **`docs/GOALS.md`**.
 
 ---
 
-## NO Scripted minimum (smoke should be created but not as a substitute for the e2e test described before)
+## Scripted smoke is support only (not a substitute for adaptive E2E)
 
-`scripts/run_agent_e2e_loop_once.py` enforces **6** separate analysis calls. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
+`scripts/run_agent_e2e_loop_once.py` runs a baseline multi-question flow. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
 
 When `BOLA_AI_E2E_FIXTURE` is **not** set, the script auto-selects fixtures using diversity rotation and records the selection metadata in `docs/e2e_loop_last_run.json`.
 
@@ -157,9 +157,9 @@ After API-level E2E completes, verify the **interactive web chat** works:
 1. **Open `http://localhost:8000/chat`** in a browser (or use browser automation).
 2. **Verify page loads:** Header shows "BOLA AI" with a green status dot. Welcome message is visible. Status shows user doc count.
 3. **Test "help" command:** Type `help` and send. Verify the usage guide appears with sections: Getting Started, Commands, Example Conversation, Tips.
-4. **Test analysis guard:** After reset, type a BOLA question. Verify you get "No documents have been ingested yet" (NOT an analysis).
+4. **Test analysis guard:** After reset, type a security analysis question. Verify you get "No documents have been ingested yet" (NOT an analysis).
 5. **Test broad ingest phrases:** Type "get the files" or "investigate my documents" or "take a look". Verify bulk ingest is triggered.
-6. **Test analysis question:** Type a BOLA-related question. Verify the response references endpoints from the ingested document.
+6. **Test analysis question:** Type a security analysis question. Verify the response references endpoints from the ingested document.
 7. **Test "status" command:** Type `status`. Verify system info includes user document count and source names.
 
 **Pass criteria:** All 7 steps succeed. The chat UI renders markdown correctly, auto-scrolls, and the loading spinner appears during analysis.

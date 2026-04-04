@@ -129,8 +129,8 @@ _auto_ingest_status: str = "idle"
 _auto_analysis_status: str = "idle"
 _auto_analysis_result: Optional[str] = None
 _AUTO_ANALYZE_QUERY = (
-    "Analyze only uploaded user documents for likely BOLA risks. "
-    "Return up to 3 highest-confidence, source-grounded findings with exact endpoints and short two-user verification steps."
+    "Analyze only uploaded user documents for likely security vulnerabilities. "
+    "Prioritize object-level authorization findings when evidenced, and return up to 3 highest-confidence, source-grounded findings with exact endpoints and concise class-appropriate verification steps."
 )
 
 
@@ -192,7 +192,7 @@ def _auto_ingest_and_analyze():
         return
 
     _auto_analysis_status = "analyzing"
-    logger.info("Auto-analyze: starting BOLA analysis on %d user doc(s)...", len(_user_doc_sources))
+    logger.info("Auto-analyze: starting security analysis on %d user doc(s)...", len(_user_doc_sources))
     try:
         user_sources = list(_user_doc_ingest_order) if _user_doc_ingest_order else sorted(_user_doc_sources)
         max_sources = max(1, int(app_config.AUTO_ANALYZE_MAX_SOURCES))
@@ -233,7 +233,7 @@ def create_app() -> FastAPI:
     log_memory(logger, "create_app start")
     app = FastAPI(
         title="BOLA AI",
-        description="Local AI agent for BOLA (Broken Object-Level Authorization) analysis",
+        description="Local AI agent for security vulnerability analysis from documentation and traces",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -357,7 +357,7 @@ def create_app() -> FastAPI:
 
     @app.post("/analyze")
     def analyze(body: Optional[AnalyzeRequest] = None):
-        """Run BOLA analysis on ingested docs. Optional custom query."""
+        """Run security analysis on ingested docs. Optional custom query."""
         store = get_store()
         query = body.query if body and body.query else None
         logger.info("Analyze: query=%s chunks_available=%s", query or "(default)", store.count())
@@ -408,12 +408,12 @@ def create_app() -> FastAPI:
 
     USAGE_GUIDE = """## BOLA AI — Usage Guide
 
-**I'm a local, offline BOLA (Broken Object-Level Authorization) analysis tool.** Here's how to talk to me:
+**I'm a local, offline security analysis tool (BOLA prioritized, broad taxonomy supported).** Here's how to talk to me:
 
 ### Getting Started
 1. **Copy your API documentation** (markdown, text, HAR analysis) into the `shared_docs/` folder
 2. **Tell me to ingest:** Type `ingest` to load all files, or `ingest <filename>` for a specific one
-3. **Ask me questions:** "What BOLA risks exist?" or "Generate curl commands to test BOLA on GET /api/users/{id}"
+3. **Ask me questions:** "What security risks exist?" or "Generate curl commands to test authorization on GET /api/users/{id}"
 
 ### Commands I Understand
 | What you say | What I do |
@@ -424,7 +424,7 @@ def create_app() -> FastAPI:
 | `list files` or `what files are available?` | List files in `shared_docs/` |
 | `status` | Show system health and chunk count |
 | `reset` | Clear all ingested documents |
-| Any BOLA/security question | Run analysis on ingested docs |
+| Any security analysis question | Run analysis on ingested docs |
 
 ### Example Conversation
 ```
@@ -434,10 +434,10 @@ Bot: ✓ Ingested 3 files (24 chunks total)
 You: ingest my-api-spec.md
 Bot: ✓ Ingested my-api-spec.md (12 chunks)
 
-You: What BOLA vulnerabilities exist in this API?
+You: What security vulnerabilities exist in this API?
 Bot: ## Potential findings ...
 
-You: Generate curl commands to test BOLA on GET /users/{id} with two tokens
+You: Generate curl commands to test authorization on GET /users/{id} with two tokens
 Bot: ## Verification steps ...
 ```
 
@@ -569,7 +569,7 @@ Bot: ## Verification steps ...
             n = store.count()
             return {
                 "role": "assistant",
-                "content": f"Ingested **{filename}** ({len(text):,} chars, {n} total chunks).\n\nYou can now ask me about BOLA risks in this document.",
+                "content": f"Ingested **{filename}** ({len(text):,} chars, {n} total chunks).\n\nYou can now ask me about security risks in this document.",
                 "type": "info",
             }
 
@@ -596,10 +596,10 @@ Bot: ## Verification steps ...
             parts.append("\n".join(ingested))
             if errors:
                 parts.append("\n\n**Skipped:**\n" + "\n".join(errors))
-            parts.append("\n\nYou can now ask me about BOLA risks in these documents.")
+            parts.append("\n\nYou can now ask me about security risks in these documents.")
             return {"role": "assistant", "content": "".join(parts), "type": "info"}
 
-        # Default: BOLA analysis — requires user documents
+        # Default: security analysis — requires user documents
         store = get_store()
         if not has_user_docs():
             shared_root = app_config.SHARED_DOCS_DIR.resolve()
@@ -611,7 +611,7 @@ Bot: ## Verification steps ...
                 return {
                     "role": "assistant",
                     "content": (
-                        "**No documents have been ingested yet.** I can only analyze BOLA risks in your API documentation, not generic patterns.\n\n"
+                        "**No documents have been ingested yet.** I can only analyze security risks in your documentation, not generic patterns.\n\n"
                         f"**Files available in `shared_docs/` ({len(available)}):**\n{file_list}\n\n"
                         "Say **ingest** to load all files, or **ingest <filename>** for a specific one.\n\n"
                         "Type **help** for full usage guide."
@@ -621,11 +621,11 @@ Bot: ## Verification steps ...
             return {
                 "role": "assistant",
                 "content": (
-                    "**No documents have been ingested yet.** I need your API documentation to analyze BOLA risks.\n\n"
+                    "**No documents have been ingested yet.** I need your documentation to analyze security risks.\n\n"
                     "**How to get started:**\n"
                     "1. Copy your API documentation (markdown, text, HAR logs) into the `shared_docs/` folder\n"
                     "2. Say **ingest** to load all files, or **ingest <filename>** for a specific one\n"
-                    "3. Then ask me about BOLA risks\n\n"
+                    "3. Then ask me about security risks\n\n"
                     "Type **help** for full usage guide."
                 ),
                 "type": "info",
@@ -682,7 +682,7 @@ def _index_html() -> str:
     <head><title>BOLA AI</title></head>
     <body>
     <h1>BOLA AI</h1>
-    <p>Local BOLA analysis. Use API: POST /ingest, POST /analyze.</p>
+    <p>Local security analysis. Use API: POST /ingest, POST /analyze.</p>
     </body>
     </html>
     """

@@ -752,3 +752,17 @@ def test_normalize_report_deduplicates_repeated_findings():
     assert "repeated" not in out
     assert "Third copy" not in out
 
+
+
+def test_normalize_report_q5_skips_auth_token_path_and_uses_object_endpoint():
+    """WP-037: q5 two-curl shape enforcement must skip /auth/token and use an object-by-ID path."""
+    from bola_ai.agent.runner import _enforce_strict_adaptive_shapes
+    allowed_paths = ["/auth/token", "/api/v1/devices/{deviceId}", "/api/v1/manufacturers/{manufacturerId}/devices"]
+    context = "GET /api/v1/devices/{deviceId}\nPOST /auth/token\n"
+    q = "I have Bearer token_A and token_B. Give **only** two curl commands: one with token_A and one with token_B."
+    result = _enforce_strict_adaptive_shapes("any report", user_query=q, allowed_paths=allowed_paths, context=context)
+    # Must use object endpoint, not /auth/token
+    assert "/auth/token" not in result
+    assert "/api/v1/devices/{deviceId}" in result or "/api/v1/manufacturers/{manufacturerId}/devices" in result
+    assert "token_A" in result
+    assert "token_B" in result

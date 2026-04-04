@@ -2,19 +2,20 @@
 
 ## Goal
 
-Create a reproducible, offline-capable training workflow that uses AI agents to generate, critique, and refine high-quality BOLA training artifacts and gold responses across domains (government, healthcare, finance, utilities).
+Create a reproducible, offline-capable training workflow that uses AI agents to generate, critique, and refine high-quality security vulnerability training artifacts and gold responses across domains (government, healthcare, finance, utilities, defense, critical infrastructure).
 
 This plan targets:
-- stronger grounding
-- better BOLA reasoning depth
+- stronger grounding across the full vulnerability taxonomy
+- better reasoning depth for authorization, design, integrity, and injection patterns
 - stricter verification logic
 - higher auditor usefulness
+- less bias toward any single fixture template or vulnerability phrasing style
 
 ## Why this is needed
 
-- Runtime quality still depends on model reasoning + prompt consistency.
-- Complex HAR/Salesforce/GraphQL scenarios need deeper examples than static seed data.
-- We need domain-general standards, not examples tied to one product only.
+- Runtime quality depends on model reasoning + prompt consistency across diverse vulnerability classes.
+- Complex scenarios (HAR/Salesforce/GraphQL/multi-service) need deeper examples than static seed data.
+- We need domain-general standards, not examples tied to one product or vulnerability class only.
 
 ## Parallelizable workstreams
 
@@ -25,8 +26,9 @@ When waiting on model inference, image build, or long test runs, run these in pa
    - Enforce realistic role/tenant/ownership rules.
 
 2. **Gold response stream**
-   - For each artifact, produce expected BOLA findings and two-token verification runbooks.
-   - Include anti-pattern guardrails (what is not BOLA).
+   - For each artifact, produce expected findings across all evidenced vulnerability classes (BOLA prioritized where relevant, but not exclusive).
+   - Use verification runbooks that match the class: comparative identity checks for object-boundary claims, and class-appropriate checks for design/injection/misconfiguration/integrity issues.
+   - Include anti-pattern guardrails (what should NOT be treated as confirmed risk).
 
 3. **Review stream**
    - Critique generated outputs using a fixed scoring rubric.
@@ -66,9 +68,11 @@ Every generated example must pass:
 
 1. **Grounding gate**: all paths/objects in expected response must appear in source artifact.
 2. **BOLA gate**: findings must be object-level authz, not generic auth failures.
-3. **Verification gate**: two valid user tokens/users on same object ID.
-4. **Format gate**: deterministic section layout for training stability.
-5. **Actionability gate**: auditor can execute steps without ambiguity.
+3. **Taxonomy correctness gate**: findings must map to supported vulnerability classes with correct rationale (not generic auth-only claims).
+4. **Verification gate**: verification logic must match the finding type (comparative identity checks for object-boundary claims; class-appropriate checks elsewhere).
+5. **Scope gate**: no fixed finding-count requirement; quality and evidence coverage over quantity.
+6. **Format gate**: deterministic section layout for training stability.
+7. **Actionability gate**: auditor can execute steps without ambiguity.
 
 Reject and regenerate on any gate failure.
 
@@ -88,16 +92,16 @@ Reject and regenerate on any gate failure.
 
 ## Model policy
 
-- Keep a smaller local model (3B/3.5B-class) as the quality default for production use in this project line.
-- Do not depend on larger-model capacity to pass quality gates.
+- Keep a local model as the quality baseline for production use.
+- Quality must be achieved via better teaching data, prompts, and evaluation loops — not by depending on ever-larger models.
 - Use this teaching loop to continuously improve:
-  - small-model behavior (prompt + curated data + strict output contract)
+  - model behavior across the full vulnerability taxonomy (prompt + curated data + strict output contract)
   - downstream distilled/fine-tuned variants derived from the same evaluation gates
 
 ## National-interest reliability policy
 
 - No internet required at runtime.
 - No user-data exfiltration.
-- Highest priority: grounded, reproducible, auditor-actionable vulnerability guidance.
+- Highest priority: grounded, reproducible, auditor-actionable vulnerability guidance across the full taxonomy.
 - Any quality regression is treated as a tracked issue with a test before closure.
 

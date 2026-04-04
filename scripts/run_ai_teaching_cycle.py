@@ -66,6 +66,25 @@ def _extract_paths(text: str) -> set[str]:
     return {p.rstrip(".,;:") for p in raw}
 
 
+def _has_comparative_verification_markers(text_lower: str) -> bool:
+    markers = (
+        "token a",
+        "token b",
+        "two token",
+        "two-token",
+        "two user",
+        "different user",
+        "different role",
+        "role a",
+        "role b",
+        "session a",
+        "session b",
+        "compare results",
+        "comparative",
+    )
+    return any(m in text_lower for m in markers)
+
+
 def _gate_phase1(artifact: str, expected_response: str) -> list[str]:
     reasons: list[str] = []
     reasons.extend(
@@ -75,8 +94,11 @@ def _gate_phase1(artifact: str, expected_response: str) -> list[str]:
         )
     )
     low = expected_response.lower()
-    if "token a" not in low or "token b" not in low:
-        reasons.append("missing two-token verification markers (Token A / Token B)")
+    # Comparative identity/role/session verification is mandatory for object-boundary claims.
+    if ("bola" in low or "object-level" in low or "ownership" in low) and (
+        not _has_comparative_verification_markers(low)
+    ):
+        reasons.append("missing comparative verification markers for object-boundary claim")
     if "without a token" in low or "invalid token" in low:
         reasons.append("invalid verification logic (auth-only token checks)")
 
@@ -133,8 +155,8 @@ def _run_task(
         )
         expected_response = (
             "## Findings\n"
-            "- GET /api/v1/records/{recordId}: ownership check may be missing; verify with Token A and Token B.\n"
-            "- PATCH /api/v1/records/{recordId}: write authorization may be missing; verify with Token A and Token B.\n\n"
+            "- Class: BOLA - GET /api/v1/records/{recordId}: ownership check may be missing; verify with Token A and Token B.\n"
+            "- Class: BAC - PATCH /api/v1/records/{recordId}: write authorization boundary may be missing; verify role boundary with Token A and Token B.\n\n"
             "## Verification Runbook\n"
             "1. Call GET /api/v1/records/{recordId} with Token A.\n"
             "2. Call GET /api/v1/records/{recordId} with Token B.\n"

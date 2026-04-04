@@ -4,7 +4,7 @@ Use this prompt with another model to reproduce the full quality-improvement loo
 
 ---
 
-You are a coding agent working in my local repo. Your job is to run a full quality-improvement loop for a local-only BOLA AI tool. **Do not stop and suggest the user run E2E manually.** You must run the tool for real, communicate with it using your own generated test data, and keep improving.
+You are a coding agent working in my local repo. Your job is to run a full quality-improvement loop for BOLA AI — a world-class, portable AI agent that finds system vulnerabilities by investigating documentation and log traces. **Do not stop and suggest the user run E2E manually.** You must run the tool for real, communicate with it using your own generated test data, and keep improving.
 
 ## Weak-place registry + automatic next loop (non-negotiable)
 
@@ -21,12 +21,13 @@ You are a coding agent working in my local repo. Your job is to run a full quali
 
 ## Project context
 
-- **Goal:** Free, local-only, offline-capable AI security tool focused on BOLA. This is a **world-class, portable tool** for keeping **critical systems safe** (national interests); quality is non-negotiable.
+- **Goal:** World-class, portable AI agent that finds system vulnerabilities by investigating documentation and/or log traces. Free, local-only, offline-capable. Quality is non-negotiable.
+- **Vulnerability scope:** Full taxonomy (BOLA, BAC, insecure design, integrity failures, injection, misconfiguration, logging/alerting failures, exceptional conditions, auth boundaries, crypto). BOLA is prioritized but the tool covers all classes evidenced in artifacts.
 - **Must be auditor-friendly:** Concrete, valid verification steps.
 - **Runtime must not require open internet.**
 - **Stack:** FastAPI + Chroma RAG + Ollama model in Docker.
 - **Behavior quality, not only passing tests.** **No quality shortcuts:** do not shorten queries, cut content, or relax criteria to make steps “pass”. If something fails or is unacceptable, **analyze the root cause**, **document it as a problem**, and **fix it** in the next loop.
-- **Documentation realism:** Treat source docs as potentially incomplete by default (fully complete docs are rare). Keep findings grounded and explicitly call out uncertainty when ownership logic is undocumented.
+- **Documentation realism:** Treat source docs as potentially incomplete by default. Keep findings grounded and explicitly call out uncertainty when security controls are undocumented.
 
 ## Hard requirements
 
@@ -90,7 +91,7 @@ You are a coding agent working in my local repo. Your job is to run a full quali
 ### C) Training/adaptation cycle
 
 - Improve training data quality if needed:
-  - Expand realistic BOLA scenarios in `generate_data.py`
+  - Expand realistic vulnerability scenarios in `generate_data.py`
   - Ensure JSONL output format is clean and consistent.
 - Regenerate training files.
 - Reload RAG knowledge.
@@ -112,9 +113,9 @@ You must run the tool for real and communicate with it. Do not stop and propose 
 2. **Generate brand-new E2E test data for every loop iteration (mandatory).**
 
    - **Every** time you run section E in a loop, you must **create new documentation** for that iteration. **Do not** reuse the same fixture file or the same doc text as the previous loop’s primary E2E (e.g. do not run E2E only on `doc_onetime_loan_portal.md` every time). Each loop: a **new fake project/API** (new paths, new resource names, new scenario).
-   - **Before writing:** List 3–5+ **inserted high-risk BOLA possibilities** for **this** doc. **Write “expected risks” for this run only** — they define what the system must surface for **this** data.
-   - **Then write** the doc so those risks are present; vary REST / GraphQL / SOQL / legacy / cross-tenant as appropriate.
-   - **Diversity is mandatory across loops:** do not keep running Salesforce-only or HAR-only docs; rotate systems and document types.
+   - **Before writing:** List inserted high-risk vulnerabilities for **this** doc across relevant taxonomy classes. **Write expected risks for this run only** — they define what the system must surface. Favor quality and realism over a fixed count.
+   - **Then write** the doc so those risks are present; vary REST / GraphQL / SOQL / legacy / cross-tenant / platform as appropriate. Include multiple vulnerability classes when realistic.
+   - **Diversity is mandatory across loops:** rotate systems, document types, and vulnerability classes.
    - Save as a **new** file (e.g. `tests/fixtures/doc_onetime_<shortname>_<loop>.md` or a dated name) or one-time payload; tag which loop it belongs to in your notes.
 
 3. **Communicate with the tool via the API as a person would — new questions every loop.**
@@ -134,7 +135,7 @@ You must run the tool for real and communicate with it. Do not stop and propose 
    | # | Check | Action if fails |
    |---|-------|-----------------|
    | R1 | **Endpoint coverage** — list which expected endpoints appear in the response and which are missing | Ask a follow-up targeting each missing endpoint by name before advancing |
-   | R2 | **Rationale accuracy** — does the rationale describe an ownership/object-level gap? Does it confuse domain terms (e.g. "property" for an account endpoint)? Does it conflate authentication ("valid token required") with BOLA ("owner not verified")? | Ask the model to clarify; file normalization WP if systemic |
+   | R2 | **Rationale accuracy** — does the rationale describe an ownership/object-level gap? Does it confuse domain terms (e.g. "property" for an account endpoint)? Does it conflate authentication ("valid token required") with authorization ("owner not verified")? | Ask the model to clarify; file normalization WP if systemic |
    | R3 | **Verification step validity** — do steps use two different **valid** user tokens on the same object ID? Or do they say "call with an invalid token" / "call without a token"? | Note; check if normalization handles it; if not, file WP and fix before next question |
    | R4 | **Curl path accuracy** — if curl examples are present, does each finding's curl use the **correct path for that finding**? (e.g. `/properties/{propertyId}/billing` for the billing finding, not a different documented path) | Note as WP-010-class error; document in per-response log; if systemic, add WP |
    | R5 | **No spurious content** — does the response contain any of: cheat-sheet text, "Fix steps" sections (bold or plain), Python/Django code blocks, raw "## Notes" fixture sections (numbered or unnumbered), grounding suffix echo, hallucinated query params (`?owner=`, `?admin=`, `?tenant=`)? | File WP and fix normalization immediately; re-run the same question after fixing |
@@ -144,7 +145,7 @@ You must run the tool for real and communicate with it. Do not stop and propose 
    **Adaptive next-question decision (mandatory after each response):**
 
    Based on the checklist above, choose exactly one action:
-   - **(a) FOLLOW-UP on a miss (R1 failed):** Ask explicitly about each missing endpoint by name. Example: "What is the BOLA risk for PATCH /accounts/{accountId}/contact specifically?"
+   - **(a) FOLLOW-UP on a miss (R1 failed):** Ask explicitly about each missing endpoint by name. Example: "What is the security risk for PATCH /accounts/{accountId}/contact specifically?"
    - **(b) FIX THEN RE-ASK (R5 failed):** Stop. Fix the normalization, run tests, sync to container, then re-ask the same question to confirm the fix is live before advancing.
    - **(c) CLARIFY QUALITY ISSUE (R2, R3, or R4 failed):** Ask a targeted follow-up to probe the problematic output. Example: "You mentioned 'property' in the rationale — do you mean account? What ownership check is missing for PATCH /accounts/{accountId}/contact?"
    - **(d) PROBE DEEPER (R7 borderline):** Ask for more detail. Example: "Explain step by step how an attacker would exploit the GET /districts/{districtId}/accounts finding. What exact account data would they see?"
@@ -157,28 +158,28 @@ You must run the tool for real and communicate with it. Do not stop and propose 
    - For **this** doc, your **expected risks list** (step 2) is the **sole expectation checklist** for strict coverage. **Do not** judge the output against a prior loop’s expectations.
    - Compare tool output to **this run’s** inserted risks, paths, and person-style questions.
 
-5. **Wider E2E communication (act as user, follow-up, fake data, validation) — mandatory every loop:** After the initial response(s), **pretend you are the end user** and run a **wider set of communication** with the tool. **Do not** end section E with only three initial questions; **`scripts/run_agent_e2e_loop_once.py`** implements the minimum (**6** separate `POST /analyze`: 3 initial + runbook/200–403 + fake-token curls + path self-audit). Do all of the following and record outcomes:
+5. **Wider E2E communication (act as user, follow-up, fake data, validation) — mandatory every loop:** After the initial response(s), **pretend you are the end user** and run a **wider set of communication** with the tool. **Do not** end section E with only initial questions; **`scripts/run_agent_e2e_loop_once.py`** provides a baseline multi-question flow (initial + detailed runbook + fake-token curls + path self-audit). Do all of the following and record outcomes:
    - **Ask for more details:** Send one or more additional POST /analyze requests asking the tool for more detail (e.g. “For the first finding, give more detailed step-by-step verification steps”, “Explain how to interpret the result if user B gets 200 vs 403”).
-   - **Ask for more detailed steps:** Request concrete, copy-pasteable steps (e.g. “List the exact order of API calls for a two-token BOLA test”).
-   - **Provide fake data and ask for request/query generation:** In a follow-up query, supply **fake but realistic** data (e.g. “Assume I have Bearer token for user A (userId=u-123) and user B (userId=u-456), and a loan ID loan-789 that belongs to user A. Generate the exact HTTP requests or curl commands to test BOLA for GET /api/v2/loans/{loanId}”). Capture the tool’s suggested requests/queries.
+   - **Ask for more detailed steps:** Request concrete, copy-pasteable steps (e.g. “List the exact order of API calls for comparative authorization testing between identities/roles/sessions”).
+   - **Provide fake data and ask for request/query generation:** In a follow-up query, supply **fake but realistic** data (e.g. “Assume I have Bearer token for user A (userId=u-123) and user B (userId=u-456), and a loan ID loan-789 that belongs to user A. Generate the exact HTTP requests or curl commands to test authorization for GET /api/v2/loans/{loanId}”). Capture the tool’s suggested requests/queries.
    - **Validate the tool’s suggested requests and queries:** Check that the generated requests (a) use the **exact endpoints from the ingested doc**, (b) include two distinct tokens/users and the same object ID where relevant, (c) do not contain hallucinated parameters or paths. Note any errors or hallucinations.
    - **Analyze and act:** After this wider communication, **analyze** whether the tool's follow-up answers are correct, grounded, and useful. If you find **bugs or quality problems**, create **OPEN** issues in **`docs/ISSUES.md`** (with description, acceptance, autotest name). If you identify **improvements** (prompts, normalization, RAG, training), implement them immediately or register as **OPEN** weak-place rows and fix in the same session. **Do not** write E2E run logs, activity summaries, or "Last E2E cycle" entries into ISSUES.md — **ISSUES.md is strictly for actionable issues** (bugs, regressions, missing capabilities) with acceptance criteria and autotests. E2E run notes belong in your chat output, not in the issue tracker.
    - **Failing steps: analyze and fix, do not work around.** If any request **times out, fails, or returns a result that is not acceptable** (e.g. wrong content, cuts, or poor quality), **do not** try to make the step “pass” by lowering the bar (e.g. increasing client timeout, shortening the query, or cutting scope). Instead: **analyze the root cause**, then **file an E2E-loop-failure issue** (see **E2E-loop failure issues** below)—not mixed with generic product bugs unless the same fix applies. **Fix the underlying cause** in the next loop. No quality shortcuts.
 
-6. **Verify the LLM fully and strictly covers all inserted high-risk possibilities (no partial credit):**
-   - **Strict condition:** For the run to pass, **every** high-risk possibility you inserted (step 2) must be **explicitly** present in the report with: (a) the **exact endpoint or operation** from the test doc (e.g. `GET /api/v2/loans/{loanId}`, `GET /api/v2/orgs/{orgId}/settings`, `POST /api/v2/loans/batch`), (b) a clear BOLA risk statement for that endpoint, and (c) verification steps that use **two valid user tokens** on the same object ID (not 401/404 alone). Partial coverage (e.g. only 1 of 5 risks, or correct path but wrong verification) **fails** the condition.
-   - **Checklist:** Go through your expected-risks list one by one; for each, confirm the report contains a finding that names that endpoint/operation and has valid two-token verification. If **any** inserted risk is missing or only vaguely/partially covered, treat as a failure: document what was missed, then improve training/RAG/prompts and **repeat the main prompt** (full cycle) before the next E2E run.
+6. **Verify the LLM fully and strictly covers all inserted high-risk vulnerabilities (no partial credit):**
+   - **Strict condition:** For the run to pass, **every** high-risk possibility you inserted (step 2) must be **explicitly** present in the report with: (a) the **exact endpoint or operation** from the test doc (e.g. `GET /api/v2/loans/{loanId}`, `GET /api/v2/orgs/{orgId}/settings`, `POST /api/v2/loans/batch`), (b) a clear vulnerability risk statement for that endpoint, and (c) verification steps that use **two valid user tokens** on the same object ID (not 401/404 alone). Partial coverage (e.g. only 1 of 5 risks, or correct path but wrong verification) **fails** the condition.
+   - **Checklist:** Go through your expected-risks list one by one; for each, confirm the report contains a finding that names that endpoint/operation and has valid class-appropriate verification (comparative checks for object-boundary claims). If **any** inserted risk is missing or only vaguely/partially covered, treat as a failure: document what was missed, then improve training/RAG/prompts and **repeat the main prompt** (full cycle) before the next E2E run.
    - The report must also stay grounded (no hallucinated endpoints/resources). Any invented path or finding not in the test doc is a failure.
 
 7. **Analyze whether the tool’s responses are correct and helpful (especially follow-ups q4–q6):**
-   - Does the report identify real BOLA risks implied by the test doc?
+   - Does the report identify real security risks implied by the test doc?
    - **Grounding gate:** In **runbook** and **path-audit** answers, **every** cited path, GraphQL operation, or SOQL snippet must appear in the **source doc**. If the model invents `document(id)`, random SOQL, or paths not in the doc → **not acceptable**; document in **`docs/ANALYSIS_E2E_GROUNDING_GAP.md`** style, fix **`prompts.py`** / RAG, re-run E2E before claiming “no improvements.”
    - Is verification logic valid (two valid user tokens, not 401/404 alone)?
    - Would an auditor be able to act on the suggestions?
    - Note any missing findings, wrong logic, or weak wording.
 
 8. **Find what is missing and can be improved:**
-   - Missing BOLA patterns, wrong verification phrasing, off-topic findings, malformed output.
+   - Missing vulnerability patterns, wrong verification phrasing, off-topic findings, malformed output.
    - Consider whether the learning curve (training data in `generate_data.py`, RAG chunks, system prompt in `prompts.py` or Modelfile) should be updated to fix or prevent these.
 
 9. **Manual web verification (mandatory every loop):**
@@ -187,7 +188,7 @@ You must run the tool for real and communicate with it. Do not stop and propose 
    - Send `help` — verify the usage guide renders with all sections.
    - Send `list files` — verify shared docs listing.
    - Send `ingest <filename>` (from the listing) — verify success message.
-   - Send a BOLA question — verify analysis response with markdown.
+   - Send a security analysis question — verify analysis response with markdown.
    - Send `status` — verify system info.
    - **All 7 checks must pass.** If any fail, file an OPEN issue.
    - See `docs/E2E_TESTING.md` for full checklist.
@@ -211,12 +212,11 @@ You must run the tool for real and communicate with it. Do not stop and propose 
 
 1. **Grounding:** All cited paths, GraphQL operations, and SOQL snippets appear verbatim (or as `{param}` pattern) in the ingested doc. No invented endpoints.
 2. **No hallucinated endpoints:** Report does not assert findings for paths not in the provided documentation.
-3. **BOLA-focused:** Findings describe object-level authorization gaps (ownership, cross-tenant, linked resource access) — not generic authentication presence or filtering/pagination issues.
-4. **Verification logic valid:** Steps use two different **valid** user tokens on the same object ID. Not "call without a token", not "call with an invalid token", not "if 401 BOLA confirmed".
+3. **Vulnerability-focused:** Findings describe specific security gaps from the taxonomy (authorization, design, integrity, injection, misconfiguration, etc.) — not generic observations or non-security concerns.
+4. **Verification logic valid:** Steps use two different **valid** user tokens on the same object ID. Not "call without a token", not "call with an invalid token", not "if 401 vulnerability confirmed".
 5. **Readable, consistent output:** No malformed headings (e.g. `### ### Title`), no duplicate verification steps, no truncated findings (heading only, no body).
 6. **Actionable for an auditor:** Steps are concrete and copy-pasteable. An auditor can execute them without guessing.
-7. **GraphQL (if doc contains it):** Findings reference named operations/fields from the doc; verification uses GraphQL syntax and two valid tokens.
-8. **SOQL/Salesforce (if doc contains it):** Findings reference record-level risks (WITH SECURITY_ENFORCED, sharing model, cross-object subqueries).
+7. **Platform-specific (if doc contains it):** GraphQL findings reference named operations; SOQL findings reference record-level risks; Salesforce findings reference Aura/LWC patterns. Verification uses appropriate syntax.
 9. **No spurious output blocks:** None of the following appear: "BOLA Remediation Cheat Sheet" from knowledge base; "Fix steps" sections (bold `**Fix steps:**` or plain `- Fix steps:`); Python/Django/Express implementation code blocks (`def`, `class`, `.objects.`); raw `## Notes` / `### N. Notes` fixture sections; `GROUNDING_USER_SUFFIX` echo ("Mandatory grounding (person-style…)"); hallucinated query params (`?owner=`, `?admin=`, `?tenant=`, `?uuid=`).
 10. **Curl path accuracy:** Each finding's curl example uses the **correct path for that finding** — not a path from a different finding in the same response. (Known 1.5B model limit — WP-010/Issue 22 — note occurrences per response.)
 11. **Rationale domain accuracy:** Rationale uses correct resource terminology matching the endpoint (e.g. "account" for `/accounts/` endpoints, "property" for `/properties/` endpoints — not mixed).
@@ -287,7 +287,7 @@ When the current cycle includes changes to startup behavior, auto-ingest, auto-a
    docker rm -f $(docker ps -aq --filter "ancestor=ghcr.io/igorredkach/bolai:latest") 2>/dev/null
    docker rmi ghcr.io/igorredkach/bolai:latest 2>/dev/null
    ```
-3. **Delete all files** from `~/Downloads/shared` (or the host shared folder) and **generate brand-new test data** there (new API doc with unique endpoints and inserted BOLA risks).
+3. **Delete all files** from `~/Downloads/shared` (or the host shared folder) and **generate brand-new test data** there (new API doc with unique endpoints and inserted security risks).
 4. **Run the image from scratch:**
    ```
    docker run -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
@@ -311,6 +311,6 @@ When the current cycle includes changes to startup behavior, auto-ingest, auto-a
 4. Retraining/adaptation steps executed.
 5. New issues added and how each was fixed.
 6. Tests run with results (unit + real E2E).
-7. Real E2E: **new test data** with **inserted high-risk possibilities**; **expected high-risk list**; all requests (initial + follow-up with fake data); tool responses; **strict coverage** result (each inserted risk explicitly present with exact endpoint and two-token verification?); **wider communication** outcomes (more details, generated requests/queries, validation result); and any **documented learning improvements or tool changes** applied before the next loop.
+7. Real E2E: **new test data** with **inserted high-risk possibilities**; **expected high-risk list**; all requests (initial + follow-up with fake data); tool responses; **strict coverage** result (each inserted risk explicitly present with exact endpoint and class-appropriate verification logic?); **wider communication** outcomes (more details, generated requests/queries, validation result); and any **documented learning improvements or tool changes** applied before the next loop.
 8. Final statement: either (a) **no job remained** — **AGENT_WEAK_PLACES** has no OPEN rows, no OPEN issues, section E done, tests green, **self-audit table all NO on “Still weak?”** — or (b) user/environment **forced** stop after you filed **OPEN** issue(s) **and** **OPEN weak-place row(s)**.
 9. List any **OPEN** issues **and OPEN weak-place IDs** left (if any). If none, state **registry clear** date.

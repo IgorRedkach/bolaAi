@@ -1,0 +1,19 @@
+{
+  "history": [
+    {
+      "fixture": "tests/fixtures/doc_adversarial_graphql.md",
+      "doc_type": "graphql",
+      "system": "general"
+    },
+    {
+      "fixture": "tests/fixtures/doc_adversarial_procurement.md",
+      "doc_type": "rest_doc",
+      "system": "procurement"
+    },
+    {
+      "fixture": "tests/fixtures/doc_adversarial_salesforce.md",
+      "doc_type": "salesforce_soql",
+      "system": "salesforce"
+    }
+  ]
+}

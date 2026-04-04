@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate AI prompt tasks for synthetic BOLA training data production.
+"""Generate AI prompt tasks for synthetic security training data production.
 
 This script does not call external models. It creates a task pack (JSONL) that
 can be executed by local AI agents to produce:
@@ -32,24 +32,35 @@ DEFAULT_TASKS: list[TrainingTask] = [
         architecture="REST + PostgreSQL + role-based reviewer portal",
         artifact_type="API documentation",
         complexity="high",
-        required_patterns="cross-tenant read, write-by-foreign-id, nested linked-resource access",
-        risk_count=5,
+        required_patterns="BOLA cross-tenant read, BAC role pivot, lifecycle integrity drift, nested linked-resource access, verbose error leakage",
     ),
     TrainingTask(
         sector="healthcare claims processing",
         architecture="GraphQL gateway + microservices + document store",
         artifact_type="network log",
         complexity="high",
-        required_patterns="resolver-level ownership miss, list enumeration, mutation write escalation",
-        risk_count=5,
+        required_patterns="resolver ownership miss, graph traversal injection, metadata side-channel leakage, mutation write escalation, fail-open on timeout",
     ),
     TrainingTask(
         sector="public utility billing",
         architecture="REST + legacy SOAP bridge + shared admin console",
         artifact_type="schema",
         complexity="medium",
-        required_patterns="tenant scoping gap, parent-child relationship bypass, invoice write abuse",
-        risk_count=4,
+        required_patterns="tenant scoping gap, parent-child dependency bypass, insecure workflow decoupling, integrity downgrade via versioning",
+    ),
+    TrainingTask(
+        sector="defense contractor supply chain",
+        architecture="REST + event bus + multi-tenant SaaS",
+        artifact_type="API documentation",
+        complexity="high",
+        required_patterns="cross-service identity propagation drift, confused deputy via export service, race condition on approval workflow, schema over-exposure",
+    ),
+    TrainingTask(
+        sector="financial services lending",
+        architecture="REST + OAuth2 + webhook callbacks",
+        artifact_type="network log",
+        complexity="high",
+        required_patterns="token scope leakage, implicit callback trust, mass assignment via loan fields, anti-forensic audit log modification",
     ),
 ]
 
@@ -59,24 +70,21 @@ PHASE1_SMALL_MODEL_TASKS: list[TrainingTask] = [
         architecture="REST + PostgreSQL + tenant-scoped case workflow",
         artifact_type="API documentation",
         complexity="medium",
-        required_patterns="cross-tenant read, write-by-foreign-id, linked-resource ownership bypass",
-        risk_count=3,
+        required_patterns="cross-tenant read, linked-resource ownership bypass, functional role pivot",
     ),
     TrainingTask(
         sector="regional healthcare provider",
         architecture="GraphQL gateway + patient notes service",
         artifact_type="network log",
         complexity="medium",
-        required_patterns="resolver ownership miss, record-id comment disclosure, mutation write escalation",
-        risk_count=3,
+        required_patterns="resolver ownership miss, record-id comment disclosure, resolver traversal abuse, mutation write escalation",
     ),
     TrainingTask(
         sector="public utility operations",
         architecture="REST + job queue + internal admin panel",
         artifact_type="schema",
         complexity="medium",
-        required_patterns="parent-child relationship bypass, queue payload object leak, unauthorized status update",
-        risk_count=3,
+        required_patterns="parent-child relationship bypass, queue payload object leak, unauthorized status update, verbose error leakage",
     ),
 ]
 
@@ -89,7 +97,7 @@ def _output_path(base_dir: Path) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate AI training task pack for BOLA model teaching")
+    parser = argparse.ArgumentParser(description="Generate AI training task pack for security model teaching")
     parser.add_argument(
         "--repo-root",
         default=str(Path(__file__).resolve().parents[1]),
@@ -142,4 +150,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

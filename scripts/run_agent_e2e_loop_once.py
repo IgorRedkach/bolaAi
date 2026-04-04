@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Agent E2E: new doc → ingest → person Q&A including mandatory follow-ups (AGENT_PROMPT §5).
+"""Agent E2E: new doc → ingest → adaptive person-style Q&A with follow-ups.
 
-Minimum **6** separate POST /analyze calls:
-  - q1–q3: initial risks / endpoints / GraphQL
-  - q4–q6: more detail + 200 vs 403, fake-token curls from doc only, self-validation of paths
+Baseline flow:
+  - initial risk questions tailored to the selected fixture
+  - follow-ups for detailed runbook, fake-token curls, and self-validation of paths
 
   BOLA_AI_E2E_FIXTURE=tests/fixtures/doc_onetime_energy_billing_api_20250318.md \\
     PYTHONPATH=src python scripts/run_agent_e2e_loop_once.py http://localhost:8000
@@ -32,16 +32,12 @@ TIMEOUT_INGEST = httpx.Timeout(config.INGEST_HTTP_TIMEOUT, connect=60.0)
 TIMEOUT_ANALYZE = httpx.Timeout(config.ANALYZE_CLIENT_TIMEOUT, connect=60.0)
 TIMEOUT_QUICK = httpx.Timeout(60.0, connect=30.0)
 
-# Mandatory wider communication (person follow-up) — same for every loop
+# Wider communication follow-ups (person style)
 FOLLOWUPS: list[tuple[str, str]] = [
     (
         "q4_detail_runbook",
-        "**STRICT:** Use ONLY endpoints and operations that appear in the ingested documentation excerpt. "
-        "Do NOT mention GraphQL, SOQL, Salesforce, Lightning, or nested resolvers unless that exact technology "
-        "appears in the excerpt. Do NOT write 'Assume the API has…' for features not in the doc. "
-        "For the **single highest-risk** finding among **documented** endpoints only, produce a **numbered runbook** "
-        "(at least 8 steps) for our SOC. Explain: if the second user's same request returns **200** vs **403**, "
-        "what each means for BOLA.",
+        "For the single highest-risk documented endpoint, provide a numbered authorization test runbook with grounded steps only. "
+        "Explain what 200 vs 403 means for the second user's same-object request.",
     ),
     (
         "q5_fake_curls",
@@ -184,15 +180,15 @@ def _initial_queries(name: str) -> list[tuple[str, str]]:
             (
                 "q1",
                 "I'm auditing this WMS API — could a picker at one warehouse complete another site's "
-                "pick tasks or read another bin by changing binId or taskId?",
+                "pick tasks or read another bin by changing binId or taskId? What security risks should we validate first?",
             ),
             (
                 "q2",
-                "Only for POST /wms/v1/batch/picks: what BOLA risk and how do I prove it with two different API keys/users?",
+                "Only for POST /wms/v1/batch/picks: what authorization risk exists and how do I prove it with two different API keys/users?",
             ),
             (
                 "q3",
-                "This documentation is REST-only (no GraphQL). List BOLA tests using only the three paths shown in the doc.",
+                "This documentation is REST-only (no GraphQL). List the highest-risk security tests using only the three paths shown in the doc.",
             ),
         ]
     if "energy" in n:
@@ -200,7 +196,7 @@ def _initial_queries(name: str) -> list[tuple[str, str]]:
             (
                 "q1",
                 "I'm reviewing this energy billing API for a utility — could one billing analyst pull "
-                "another territory's meter or account data by changing IDs? What BOLA should we test first?",
+                "another territory's meter or account data by changing IDs? What security risks should we test first?",
             ),
             (
                 "q2",
@@ -209,7 +205,7 @@ def _initial_queries(name: str) -> list[tuple[str, str]]:
             ),
             (
                 "q3",
-                "For the GraphQL usagePoint(id) field — how would I verify object-level auth with two tokens on the same id?",
+                "For the GraphQL usagePoint(id) field — how would I verify object-level authorization with two tokens on the same id?",
             ),
         ]
     if "fleet" in n:
@@ -217,7 +213,7 @@ def _initial_queries(name: str) -> list[tuple[str, str]]:
             (
                 "q1",
                 "I'm auditing this fleet API — could one fleet manager read another company's telemetry by swapping vehicle IDs? "
-                "What BOLA angles and two-session proof?",
+                "What authorization-risk angles and two-session proof?",
             ),
             (
                 "q2",
@@ -225,21 +221,21 @@ def _initial_queries(name: str) -> list[tuple[str, str]]:
             ),
             (
                 "q3",
-                "GraphQL trip(id): two-token verification on the same trip id—spell it out.",
+                "GraphQL trip(id): two-token authorization verification on the same trip id—spell it out.",
             ),
         ]
     return [
         (
             "q1",
-            "As a security reviewer reading this API doc only: what are the top BOLA risks and how to test with two user sessions?",
+            "As a security reviewer reading this API doc only: what are the top security risks and how should I validate them?",
         ),
         (
             "q2",
-            "Pick the batch or bulk endpoint in the doc and describe two-token verification.",
+            "Pick the batch or bulk endpoint in the doc and describe two-identity comparative verification.",
         ),
         (
             "q3",
-            "If the doc has GraphQL, how to verify BOLA with two tokens on the same object id?",
+            "If the doc has GraphQL, how should I verify authorization with two tokens on the same object id?",
         ),
     ]
 
@@ -275,8 +271,8 @@ def main() -> int:
     log: dict = {
         "fixture": str(fixture),
         "fixture_selection": fixture_meta,
-        "person_e2e_minimum": {
-            "initial_person_questions": 3,
+        "person_e2e_baseline": {
+            "initial_person_questions": len(_initial_queries(fixture.name)),
             "followup_detail_200_403": True,
             "followup_fake_token_curls": True,
             "followup_self_path_validation": True,
@@ -339,7 +335,7 @@ def main() -> int:
 
     OUT.write_text(json.dumps(log, indent=2)[:800000], encoding="utf-8")
     print("Wrote", OUT)
-    print("Person E2E: 3 initial + 3 follow-up (detail, fake curls, path validation) = 6 analyze calls.")
+    print(f"Person E2E completed: {len(queries)} separate analyze calls.")
     return 0
 
 

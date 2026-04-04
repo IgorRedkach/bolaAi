@@ -1,4 +1,4 @@
-"""CLI: run BOLA AI via terminal and API."""
+"""CLI: run BOLA AI security analysis via terminal and API."""
 
 import argparse
 import json
@@ -109,7 +109,7 @@ def cmd_analyze(query: str | None, base: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="BOLA AI — local BOLA analysis (API client)")
+    parser = argparse.ArgumentParser(description="BOLA AI — local security analysis (API client)")
     parser.add_argument("--api", default=API_BASE, help="API base URL")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -129,7 +129,7 @@ def main() -> int:
     ing_shared.add_argument("--relative-path", "-r", required=True, help="Relative path under shared docs dir")
     ing_shared.add_argument("--source", "-s", default="shared_volume", help="Source label")
 
-    ana = sub.add_parser("analyze", help="Run BOLA analysis")
+    ana = sub.add_parser("analyze", help="Run security analysis")
     ana.add_argument("--query", "-q", help="Custom analysis query")
 
     args = parser.parse_args()

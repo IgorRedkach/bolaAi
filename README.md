@@ -1,7 +1,7 @@
 # BOLA AI
 
-**Local-only AI agent to find BOLA (Broken Object-Level Authorization) vulnerabilities.**  
-Free, disposable, no network at runtime. For goals and architecture see [docs/GOALS.md](docs/GOALS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). **Low-memory:** [docs/MEMORY.md](docs/MEMORY.md).
+**World-class, portable AI agent that finds system vulnerabilities by investigating documentation and log traces.**  
+Free, local-only, disposable, no network at runtime. Covers BOLA, broken access control, insecure design, integrity failures, injection, misconfiguration, logging gaps, and more. For goals and architecture see [docs/GOALS.md](docs/GOALS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). **Low-memory:** [docs/MEMORY.md](docs/MEMORY.md).
 
 ## Quick start
 

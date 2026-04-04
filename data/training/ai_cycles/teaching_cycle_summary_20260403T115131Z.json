@@ -1,0 +1,12 @@
+{
+  "task_pack": "/home/iredkach/Downloads/bola/bolaAi/data/training/ai_tasks/teacher_tasks_20260403T115131Z.jsonl",
+  "with_llm": false,
+  "model": "offline-gates-only",
+  "total_tasks": 3,
+  "accepted": 0,
+  "rejected": 3,
+  "acceptance_rate": 0.0,
+  "acceptance_rate_delta_vs_previous": 0.0,
+  "accepted_path": "/home/iredkach/Downloads/bola/bolaAi/data/training/ai_cycles/accepted_20260403T115131Z.jsonl",
+  "rejected_path": "/home/iredkach/Downloads/bola/bolaAi/data/training/ai_cycles/rejected_20260403T115131Z.jsonl"
+}

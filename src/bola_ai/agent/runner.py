@@ -1,4 +1,4 @@
-"""Run BOLA analysis: RAG retrieval + LLM."""
+"""Run security vulnerability analysis: RAG retrieval + LLM."""
 
 import logging
 import re
@@ -14,15 +14,16 @@ from bola_ai.rag.store import DocStore
 logger = get_logger("agent")
 
 
-_BOLA_RAG_QUERY = (
+_SECURITY_RAG_QUERY = (
     "API endpoint authorization access control object ID path resource "
-    "BOLA vulnerability ownership check permission token user"
+    "BOLA BAC insecure design integrity injection misconfiguration logging "
+    "authentication cryptographic vulnerability ownership check permission token user tenant"
 )
 
 
 def run_analysis(
     store: DocStore,
-    query: str = "Identify potential BOLA vulnerabilities and suggest verification steps.",
+    query: str = "Identify potential security vulnerabilities and suggest verification steps.",
     *,
     n_context: int = 10,
     model: Optional[str] = None,
@@ -32,7 +33,7 @@ def run_analysis(
     """
     Retrieve relevant chunks from the store, build prompt, call LLM, return response.
 
-    RAG search always uses a BOLA-focused query to find the most relevant
+    RAG search always uses a security-focused query to find the most relevant
     chunks regardless of the user's phrasing.  The user's actual query is
     sent to the LLM as-is.
 
@@ -41,7 +42,7 @@ def run_analysis(
             (user documents), preventing training data contamination.
     """
     log_memory(logger, "run_analysis start")
-    rag_query = _BOLA_RAG_QUERY
+    rag_query = _SECURITY_RAG_QUERY
     logger.info("RAG search: n_context=%s rag_query_len=%s user_query_len=%s source_filter=%s",
                 n_context, len(rag_query), len(query or ""), source_filter)
     context_parts = store.search(rag_query, n_results=n_context, source_filter=source_filter)
@@ -566,7 +567,7 @@ def _normalize_report(
     report_lower = report.lower()
     has_unambiguous_two = any(p in report_lower for p in two_token_phrases)
     if "potential findings" in report_lower and ("verification" in report_lower or "### " in report_lower) and not has_unambiguous_two:
-        report = report.rstrip() + "\n\n**Verification reminder:** To confirm BOLA, call the same endpoint with two different user tokens (e.g. user A and user B); if both receive data for the same object ID, object-level authorization may be missing.\n"
+        report = report.rstrip() + "\n\n**Verification reminder:** For object-boundary authorization findings, call the same endpoint with two different user tokens (e.g. user A and user B); if both receive data for the same object ID, object-level authorization may be missing.\n"
     # Remove dangling trailing finding headings before reminder blocks (e.g. "### GET /api").
     report = re.sub(
         r"\n###\s+[^\n]+(?:\n\s*){1,3}(?=\*\*Verification reminder:\*\*)",
@@ -577,6 +578,12 @@ def _normalize_report(
     # Strip generic meta headings that are not real endpoint findings.
     report = re.sub(
         r"^\s*###\s+Potential BOLA findings with rationale and verification steps\s*$\n?",
+        "",
+        report,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    report = re.sub(
+        r"^\s*###\s+Potential findings with rationale and verification steps\s*$\n?",
         "",
         report,
         flags=re.IGNORECASE | re.MULTILINE,
@@ -595,8 +602,8 @@ def _normalize_report(
         report = (
             report.rstrip()
             + "\n\nNo grounded finding could be reliably extracted from this response. "
-            "Re-run analysis with a narrower endpoint-focused query and provide explicit BOLA ownership rationale "
-            "plus a two-token verification runbook.\n"
+            "Re-run analysis with a narrower endpoint-focused query and provide explicit vulnerability rationale "
+            "plus class-appropriate verification steps.\n"
         )
     report = _enforce_strict_adaptive_shapes(
         report,
@@ -639,7 +646,13 @@ def _enforce_strict_adaptive_shapes(
 
     # Issue 35: q5 asks for exactly two curl commands only.
     if "only two curl commands" in q or "give **only** two curl commands" in q:
-        target_path = allowed_paths[0] if allowed_paths else "/api/resource/{id}"
+        # WP-037: skip auth/token paths — prefer object-by-ID endpoints for the two-curl test.
+        _AUTH_PATH_PREFIXES = ("/auth/", "/oauth/", "/login", "/token")
+        object_paths = [
+            p for p in allowed_paths
+            if not any(p.lower().startswith(prefix) for prefix in _AUTH_PATH_PREFIXES)
+        ]
+        target_path = (object_paths[0] if object_paths else allowed_paths[0]) if allowed_paths else "/api/resource/{id}"
         method = _method_for_path(target_path, context)
         return (
             f'curl -X {method} "https://api.example.com{target_path}" '
@@ -825,7 +838,7 @@ def analyze_for_bola(
     source_filter: Optional[list[str]] = None,
     timeout: Optional[float] = None,
 ) -> str:
-    """Convenience: run BOLA-focused analysis with default or custom query."""
+    """Convenience: run security-focused analysis with default or custom query."""
     k = cfg.N_CONTEXT if n_context is None else n_context
-    query = custom_query or "Identify potential BOLA vulnerabilities and suggest verification steps."
+    query = custom_query or "Identify potential security vulnerabilities and suggest verification steps."
     return run_analysis(store, query=query, n_context=k, source_filter=source_filter, timeout=timeout)
