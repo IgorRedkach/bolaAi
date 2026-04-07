@@ -94,6 +94,20 @@ Before ingesting (or after reset), any analysis question should return a `type: 
 
 ## What we assert (live LLM) — goals for any E2E pass
 
+0. **Per-response logical correctness (mandatory for every step)**  
+   After every `POST /analyze` call, verify the response logically answers the question asked — not just that it contains text. Question type determines the expected response shape:
+
+   | Question type | Expected shape | Failure signal |
+   |---|---|---|
+   | Runbook / numbered steps | Numbered list (1. 2. 3. …) present | No `\d+\.` lines found |
+   | Curl generation (q5) | ≥2 `curl` commands, token_A and token_B | Fewer than 2 curl blocks, or only one token |
+   | Path audit (q6) | YES/NO entries for each cited path | No YES/NO or `->` entries |
+   | Request generation | `curl` with method and `Authorization` header | Missing curl or missing auth header |
+   | Security analysis | Finding headings (`###`) or path + rationale | No paths and no rationale language |
+   | Outcome interpretation | Explanation of both 200 and 403 | One or both outcomes missing |
+
+   `scripts/run_agent_e2e_loop_once.py` runs `_check_logical_correctness(query, report)` for every step and reports failures in the `automated_checks.logical_correctness_summary` field of the output JSON. Any `logical_match: false` entry **must** be investigated and logged as an OPEN issue if it is a repeatable tool failure.
+
 1. **Fresh documentation every meaningful E2E cycle**  
    Generate new test documentation from scratch for that run: think through the **system under test**, **plausible vulnerability angles**, and **what you expect** the tool to surface before you write the doc.  
    **Required intake path:** copy the doc into the shared Docker docs path (`shared_docs` on host, mounted to `/shared-docs` in container), then either let auto-ingest handle it on startup, or say "ingest" in the chat after **`reset`**.
@@ -179,3 +193,15 @@ When a loop fixes runtime problems (timeouts, startup contention, deployment reg
 5. Verify `/health`, `/chat`, and one interactive analysis request.
 
 This prevents "works in source tree but not in pulled image" regressions.
+
+### Completion blocker (new)
+
+If the cycle touches runtime behavior (`src/bola_ai/api/**`, `src/bola_ai/agent/**`, `docker/**`, startup/ingest/analyze orchestration, or E2E runner scripts), release/loop completion is blocked until:
+
+1. Changes are pushed to remote.
+2. CI image build for that pushed SHA is successful.
+3. Pulled image digest is recorded from local `docker inspect`.
+4. Pulled image is run from scratch with cleaned shared docs.
+5. Manual chat verification passes.
+
+If any step above is not possible, the cycle must be reported as **OPEN/BLOCKED** (not complete) with explicit blocker evidence.

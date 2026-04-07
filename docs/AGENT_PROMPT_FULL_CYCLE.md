@@ -97,6 +97,7 @@ You are a coding agent working in my local repo. Your job is to run a full quali
 - Reload RAG knowledge.
 - Ensure loading does not duplicate endlessly (prefer reset-before-load behavior, configurable by env var).
 - Recreate/update Ollama model from Modelfile.
+- For retraining stability, prefer from-scratch rebuild flow (`scripts/retrain_model_from_scratch.py`) so the target model is removed and recreated from a base `FROM` model each cycle.
 
 ### D) Automated testing
 
@@ -134,6 +135,7 @@ You must run the tool for real and communicate with it. Do not stop and propose 
 
    | # | Check | Action if fails |
    |---|-------|-----------------|
+   | R0 | **Logical answer** — does the response type match the question asked? (runbook → numbered steps; curl-generation → ≥2 curl commands with both tokens; path audit → YES/NO list; request generation → curl with method and auth; general analysis → structured findings) | Treat as a format failure; check `_check_logical_correctness` output; if normalization can fix it, fix and re-ask; if it is a persistent pattern, file WP |
    | R1 | **Endpoint coverage** — list which expected endpoints appear in the response and which are missing | Ask a follow-up targeting each missing endpoint by name before advancing |
    | R2 | **Rationale accuracy** — does the rationale describe an ownership/object-level gap? Does it confuse domain terms (e.g. "property" for an account endpoint)? Does it conflate authentication ("valid token required") with authorization ("owner not verified")? | Ask the model to clarify; file normalization WP if systemic |
    | R3 | **Verification step validity** — do steps use two different **valid** user tokens on the same object ID? Or do they say "call with an invalid token" / "call without a token"? | Note; check if normalization handles it; if not, file WP and fix before next question |
@@ -281,25 +283,55 @@ If **anything** above is unfinished—including **not yet running E2E for this c
 
 When the current cycle includes changes to startup behavior, auto-ingest, auto-analysis, inference timeouts/locking, Ollama context, or the all-in-one image:
 
-1. **Push changes** and wait for the GitHub Actions image build to complete (~10 minutes).
-2. **Remove all BOLA containers and images** locally:
+1. **Push changes** and capture the pushed commit SHA.
+2. **Wait for GitHub Actions image build** for that SHA to complete successfully. Do not continue on "in progress" or failed workflows.
+3. **Pull the image digest/metadata for the newly built image** and record evidence (tag + digest + build workflow URL) in notes.
+4. **Remove all BOLA containers and images** locally:
    ```
    docker rm -f $(docker ps -aq --filter "ancestor=ghcr.io/igorredkach/bolai:latest") 2>/dev/null
    docker rmi ghcr.io/igorredkach/bolai:latest 2>/dev/null
    ```
-3. **Delete all files** from `~/Downloads/shared` (or the host shared folder) and **generate brand-new test data** there (new API doc with unique endpoints and inserted security risks).
-4. **Run the image from scratch:**
+5. **Delete all files** from `~/Downloads/shared` (or the host shared folder) and **generate brand-new test data** there (new API doc with unique endpoints and inserted security risks).
+6. **Pull latest image after deletion** (must be the just-built artifact):
+   ```
+   docker pull ghcr.io/igorredkach/bolai:latest
+   docker inspect ghcr.io/igorredkach/bolai:latest --format '{{index .RepoDigests 0}}'
+   ```
+7. **Run the image from scratch:**
    ```
    docker run -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
    ```
-5. **Wait 15 minutes** (model load + auto-ingest + auto-analysis).
-6. **Open `http://localhost:8000/chat`** — the auto-analysis result should already be displayed without the user typing anything. Verify:
+8. **Wait 15 minutes** (model load + auto-ingest + auto-analysis).
+9. **Open `http://localhost:8000/chat`** — the auto-analysis result should already be displayed without the user typing anything. Verify:
    - Analysis is present and grounded (only endpoints from your generated test data)
    - No hallucinated endpoints
    - Health dot is green, status shows doc count
    - Chat history persists across reload
-7. **Talk to the agent** — send follow-up questions via the chat UI. Verify responses are ONLY related to the test data you generated (no generic training data leaking).
-8. **If all good:** Section H passes. If issues found: create OPEN issues/weak-places and immediately start a new loop.
+10. **Talk to the agent** — send follow-up questions via the chat UI. Verify responses are ONLY related to the test data you generated (no generic training data leaking).
+11. **If all good:** Section H passes. If issues found: create OPEN issues/weak-places and immediately start a new loop.
+
+### H-Evidence block (mandatory, no exceptions)
+
+When reporting completion for any cycle that triggers section H, you MUST include all evidence below:
+
+1. Pushed commit SHA used for image build.
+2. GitHub Actions workflow URL and final status `success`.
+3. Pulled image digest from local `docker inspect` after `docker pull`.
+4. Exact `docker run` command used for the fresh container.
+5. Proof that shared folder was cleaned and replaced with newly generated data (list filenames).
+6. Manual chat verification transcript summary for:
+   - auto-analysis shown before manual question
+   - one follow-up question and grounded answer check
+   - confirmation that answer references only newly generated dataset endpoints
+7. Explicit verdict line: `H_PASS=true` or `H_PASS=false`.
+
+**Hard fail rule for H:** If startup/ingest/analysis/image behavior changed and H was not executed end-to-end against the newly built pulled image, or the H-Evidence block is incomplete, completion is forbidden.
+
+**Escape prevention rule:** The agent is not allowed to stop with "done", "mostly done", "manual follow-up needed", or equivalent language unless `H_PASS=true` is explicitly present (when H is applicable). If H is applicable and not passed, agent must file OPEN issue + OPEN weak-place and continue loop.
+
+**H applicability lock (new):** If this cycle changes any file under `src/bola_ai/api/`, `src/bola_ai/agent/`, `docker/`, `scripts/run_agent_e2e_loop_once.py`, or startup/ingest/analyze settings, section H is automatically applicable. No subjective interpretation is allowed.
+
+**Point-13 lock (new):** A "run full agent prompt complete" claim is invalid unless section H has been executed and `H_PASS=true` is recorded. If CI/push/pull cannot be executed (auth/network/policy), the agent must explicitly mark `H_PASS=false`, record blocker evidence, and keep the work OPEN.
 
 **Priority rule:** If a runtime timeout/deploy issue is detected in any loop, file the issue immediately and treat Section H as mandatory in the next loop before claiming completion.
 
