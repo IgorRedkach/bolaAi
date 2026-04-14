@@ -1,22 +1,21 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0253-E-COMMERCE
 
-This example (SF-0253) was generated independently for **ShopGrid Marketplace API** (E-Commerce / Marketplace).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **E-Commerce / Marketplace**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 1.5 (Multi-tenant / cross-tenant access)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. context.txt — Removed Vulnerability Labels
+- Section 5.0 "Vulnerability Context" renamed to "Behavioral Notes"; removed "**Pattern:** 1.5 — Multi-tenant / cross-tenant access" label
+- Section 5.0 now describes the cross-tenant behavior: client supplies `contractId`, server does not validate ownership or tenant membership
+- Removed "// VULNERABILITY:" comments from Section 4.0 Apex code; replaced with neutral observational comments
+- HAR message params corrected to use escaped JSON (`\"`) instead of unescaped quotes
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `taskId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+### 2. expected_response.md — Corrected Controller and Parameters
+Original used `c.LeadController.getLeadData` with `leadId`. HAR specifies `c.ContractController.approveContract` with `contractId`. Corrected throughout including remediation class name.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 3. Corrected Org Host and Session Token
+Original used `<ORG_ID>.lightning.force.com` and `<YOUR_SESSION_TOKEN>`. HAR specifies `57ebc647.lightning.force.com` and `00D57EBC647!AR57ebc647...`. Corrected.
 
-## Pattern Coverage
-- Primary: Pattern 1.5 — Multi-tenant / cross-tenant access (BOLA)
+### 4. Explained Pattern 1.5 in E-Commerce Marketplace Context
+Pattern 1.5 "multi-tenant / cross-tenant access" — one marketplace seller accesses another seller's contract records by substituting `contractId`. In marketplace context: seller pricing agreements, vendor PII (SSN), and payment terms are exposed. The `approveContract` action also means the attacker can approve another seller's contracts — marketplace integrity violation.
+
+### 5. Method Name Inconsistency
+Section 4.0 code defines `getContractDetails`; HAR and Section 5.0 use `approveContract`. HAR is authoritative.

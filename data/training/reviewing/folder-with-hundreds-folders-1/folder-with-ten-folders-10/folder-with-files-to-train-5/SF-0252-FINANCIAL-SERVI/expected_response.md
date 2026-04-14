@@ -1,73 +1,66 @@
 # Expected Response
 
 ## System
-- Domain: Financial Services / Retail Banking
-- System: NexaBank Open Finance API (Salesforce-Integrated)
+- System: NexaBank Open Finance API (Salesforce-Integrated) v4.3.0
+- Domain: FINANCIAL SERVICES / RETAIL BANKING
 - Example ID: SF-0252
+- Risk IDs: RISK-SF-252, RISK-SF-253
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Parameter escalation (own session scope extension) (Pattern 10.2)
-**Severity:** Critical
-**Category:** Single-User
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 10.2 — Parameter Escalation (Own Session Scope Extension): `c.AccountController.getAccounts` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.QuoteController.getQuoteDetails` is vulnerable to Pattern 10.2.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `quoteId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+The Aura controller `c.AccountController.getAccounts` accepts a client-supplied `accountId`. Pattern 10.2 "parameter escalation (own session scope extension)" — a user with a legitimate session for their own Account record substitutes a different `accountId` in the Aura payload to extend their session's access scope to records they do not own. The `without sharing` class (RISK-SF-252) bypasses OWD=Private, and the missing `OwnerId` predicate (RISK-SF-253) means the scope extension succeeds.
+
+In Financial Services / Retail Banking, Account records contain customer banking relationships, SSN PII, and GLBA-protected financial data. Session scope extension enables any authenticated bank employee or customer to access another customer's account record — GLBA financial privacy violation.
 
 **Evidence from HAR:**
-- Aura action: `c.QuoteController.getQuoteDetails`
-- Requested `quoteId`: `001CFAD` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+- Aura action: `c.AccountController.getAccounts`
+- Requested `accountId`: `001CFAD` — belongs to `OwnerId: "005VICTIM"`
+- Session user's org: `7d68cfad.lightning.force.com`
+- Response state: `SUCCESS` — session scope extended to victim's Account
+- Response includes `SensitiveData__c: "SSN: 000-71-4238"` and `InternalNotes__c: "CONFIDENTIAL: internal review notes"` — PII/financial data exposed
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `quoteId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `quoteId` sourced directly from Aura params without server-side validation
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Capture a baseline Aura request to your own record
+**Step 1 — Capture baseline Aura request:**
 Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.QuoteController.getQuoteDetails` action in the `message` POST body.
-Record your own `quoteId` value (e.g., `001YOURRECORDID000000`).
+Identify `c.AccountController.getAccounts` in the `message` POST body.
+Record your own `accountId`.
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `quoteId` values.
-
-### Step 3 — Substitute victim ID in Aura request
+**Step 2 — Substitute victim `accountId` — session scope extension (primary HAR attack):**
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://7d68cfad.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D7D68CFAD!AR7d68cfad...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D7D68CFAD!AR7d68cfad...
 
-message={"actions":[{"id":"1;a","descriptor":"c.QuoteController.getQuoteDetails","callingDescriptor":"UNKNOWN",
-"params":{"quoteId":"001CFAD","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.AccountController.getAccounts","callingDescriptor":"UNKNOWN",
+"params":{"accountId":"001CFAD","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+**Step 3 — Enumerate adjacent Account IDs:**
+```
+accountId: 001CFAC, 001CFAE, 001CFAF, ...
+```
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 4 — Verify session scope extension:**
+**Vulnerable outcome:** Response `state: "SUCCESS"` with victim Account data including:
+- `SensitiveData__c: "SSN: 000-71-4238"` — SSN exposed (GLBA financial privacy violation)
+- `InternalNotes__c: "CONFIDENTIAL: internal review notes"` — internal banking notes
+- `OwnerId: "005VICTIM"` — session extended to another user's record
+
+**Secure outcome:** Response `state: "ERROR"` with `INSUFFICIENT_ACCESS` or empty `records` array.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+1. **Add `with sharing` to Apex class (RISK-SF-252):**
    ```apex
-   public with sharing class QuoteController { ... }
+   public with sharing class AccountController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL (RISK-SF-253):**
    ```apex
-   WHERE Id = :quoteId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :accountId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `quoteId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries** to enforce field-level and record-level security.
+4. **Automated test:** Apex test authenticating as User A requesting User B's `accountId` — assert `INSUFFICIENT_ACCESS` or empty result.

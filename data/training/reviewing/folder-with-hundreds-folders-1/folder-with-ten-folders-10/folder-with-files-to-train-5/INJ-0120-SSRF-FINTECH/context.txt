@@ -3,20 +3,22 @@
 **Document Version:** 2.0.0 (FINAL)
 **Classification:** SENSITIVE
 **Domain:** Fintech / Payments Gateway
-**Vulnerability Type:** SSRF
 **Training Example ID:** INJ-0120
 
 ## 1.0 Executive Summary
-PayBridge Transaction API is a fintech / payments gateway platform with a REST API backed by backend HTTP fetch.
-The platform exposes search and filter endpoints that accept user-supplied parameters.
+PayBridge Transaction API is a fintech / payments gateway platform with a REST API. The platform
+exposes search and filter endpoints that accept user-supplied parameters. The `/api/v1/orders`
+endpoint is a legacy endpoint that accepts a `filter` parameter used both in SQL query building
+and in an internal backend HTTP fetch for external data enrichment.
 Input sanitization is inconsistent across the codebase due to a mix of raw query
-construction and ORM usage.
+construction and direct URL usage in outbound HTTP requests.
 
 ## 2.0 Architecture
-- **API Layer:** Node.js / Express or Java Spring Boot REST API
-- **Database:** backend HTTP fetch — primary data store
+- **API Layer:** Node.js / Express REST API
+- **Database:** PostgreSQL (via pg library)
+- **External Data Enrichment:** Backend HTTP fetch using the `filter` parameter as URL for data source lookups
 - **Auth:** JWT Bearer tokens
-- **Known Debt:** Older endpoint `/api/v1/orders` uses string concatenation for queries
+- **Known Debt:** Older endpoint `/api/v1/orders` uses string concatenation for queries AND passes filter to outbound HTTP fetch without URL validation
 
 ## 3.0 Vulnerable Endpoint
 ```
@@ -24,15 +26,26 @@ GET /api/v1/orders?filter=<user_input>
 Authorization: Bearer <JWT>
 ```
 
-**Vulnerable Code Snippet:**
+**Backend Code Snippet (SQL path — legacy orders service):**
 ```javascript
-// Node.js — raw query construction (VULNERABLE)
+// Node.js — raw query construction (legacy endpoint)
+// Note: filter is interpolated directly into SQL string without sanitization
 const query = `SELECT * FROM orders WHERE filter = '${req.query.filter}'`;
 db.execute(query, (err, results) => { ... });
 ```
 
+**Backend Code Snippet (HTTP fetch path — external data enrichment):**
+```javascript
+// External payment processor enrichment — filter used as URL directly
+// Note: no URL allowlist validation before outbound request
+const enrichmentData = await fetch(req.query.filter, {
+  headers: { 'Authorization': `Bearer ${process.env.ENRICHMENT_API_KEY}` }
+});
+const data = await enrichmentData.json();
+```
+
 ## 4.0 Injection Payload
-The following input exploits the lack of parameterization:
+The following input was recorded in the penetration test:
 ```
 filter=http://169.254.169.254/latest/meta-data/
 ```
@@ -74,11 +87,13 @@ filter=http://169.254.169.254/latest/meta-data/
 }
 ```
 
-## 6.0 Misconfiguration Context
+## 6.0 Misconfiguration Notes
 - Over-privileged DB account: application connects as `db_owner` instead of a restricted role
 - Verbose error messages enabled in staging (and leaked to production accidentally)
 - No WAF or input validation middleware on legacy endpoints
+- Internal payment processor services accessible at `http://internal-payments.paybridge.local/`
 
 ## 7.0 Known Risk
 - **RISK-INJ-120:** Endpoint `/api/v1/orders` uses raw string concatenation.
   Parameterized queries are used in newer endpoints but this one was missed in the migration.
+  The same endpoint also passes the `filter` parameter to an outbound `fetch()` call without URL allowlist validation.

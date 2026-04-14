@@ -233,9 +233,9 @@ context.txt is raw evidence given to the AI agent — it simulates real-world pe
 - [x] **0154** [GQL-0426-AEROSPACE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/GQL-0426-AEROSPACE/context.txt)
 - [x] **0155** [INJ-0118-SSTI-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/INJ-0118-SSTI-TRAVEL/context.txt)
 - [x] **0156** [INJ-0119-XXE-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/INJ-0119-XXE-MEDIA/context.txt)
-- [ ] **0157** [INJ-0120-SSRF-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/INJ-0120-SSRF-FINTECH/context.txt)
-- [ ] **0158** [SF-0252-FINANCIAL-SERVI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0252-FINANCIAL-SERVI/context.txt)
-- [ ] **0159** [SF-0253-E-COMMERCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0253-E-COMMERCE/context.txt)
+- [x] **0157** [INJ-0120-SSRF-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/INJ-0120-SSRF-FINTECH/context.txt)
+- [x] **0158** [SF-0252-FINANCIAL-SERVI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0252-FINANCIAL-SERVI/context.txt)
+- [x] **0159** [SF-0253-E-COMMERCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0253-E-COMMERCE/context.txt)
 - [ ] **0160** [SF-0254-SMART-CITY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0254-SMART-CITY/context.txt)
 #### folder-with-files-to-train-6
 
