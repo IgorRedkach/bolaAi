@@ -15,12 +15,11 @@ where the token encodes `sub` (user ID) and `tenant_id`.
 - **API:** REST (/api/v3/assets endpoints)
 - **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
 - **Database:** PostgreSQL with logical tenant partitioning
-- **Pattern under test:** 5.3 — SSRF via user-controlled URLs
 
 ## 3.0 Database Schema
 ```sql
 
--- Asset table
+-- Asset table (flight operations assets: aircraft, fleet, maintenance plans)
 CREATE TABLE assets (
     asset_id    VARCHAR(50) PRIMARY KEY,
     owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
@@ -34,14 +33,13 @@ CREATE INDEX idx_asset_tenant ON assets(tenant_id);
 
 ```
 
-## 4.0 Vulnerability Context
-**Pattern:** 5.3 — SSRF via user-controlled URLs (Injection)
+## 4.0 Behavioral Notes
 
-The `GET/PATCH/DELETE /api/v3/assets/:id` endpoint accepts a `asset_id` in the URL path.
-The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
-An authenticated user from `ORG-0E38` can access objects owned by `ORG-3337`.
-
-_Specific exploitation for Pattern 5.3:_ The `/api/v3/assets` handler does not enforce tenant/owner boundaries for Pattern 5.3.
+The `GET/PATCH/DELETE /api/v3/assets/:id` endpoint accepts an `asset_id` in the URL path.
+The backend handler queries the database by `asset_id` only, without filtering by `owner_id` or `tenant_id`.
+The user controls the URL path `asset_id` segment — the server uses this value as the sole
+lookup key, making the resolved asset entirely dependent on the caller-supplied path parameter.
+An authenticated user from `ORG-0E38` can access or delete objects owned by `ORG-3337`.
 
 ## 5.0 Artifact (HAR)
 ```json
@@ -80,6 +78,6 @@ _Specific exploitation for Pattern 5.3:_ The `/api/v3/assets` handler does not e
 ```
 
 ## 6.0 Known Risk Log
-- **RISK-53-087:** Pattern 5.3 detected in `/api/v3/assets` handler.
+- **RISK-53-087:** Cross-tenant access in `/api/v3/assets` handler.
   The handler was written before the tenant isolation policy was established.
   Remediation is blocked pending DB migration ticket #DB-187.

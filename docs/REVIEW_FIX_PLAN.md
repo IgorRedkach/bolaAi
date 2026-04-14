@@ -236,11 +236,11 @@ context.txt is raw evidence given to the AI agent — it simulates real-world pe
 - [x] **0157** [INJ-0120-SSRF-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/INJ-0120-SSRF-FINTECH/context.txt)
 - [x] **0158** [SF-0252-FINANCIAL-SERVI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0252-FINANCIAL-SERVI/context.txt)
 - [x] **0159** [SF-0253-E-COMMERCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0253-E-COMMERCE/context.txt)
-- [ ] **0160** [SF-0254-SMART-CITY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0254-SMART-CITY/context.txt)
+- [x] **0160** [SF-0254-SMART-CITY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-5/SF-0254-SMART-CITY/context.txt)
 #### folder-with-files-to-train-6
 
-- [ ] **0161** [BOLA-0086-P52-TELEMEDICI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/BOLA-0086-P52-TELEMEDICI/context.txt)
-- [ ] **0162** [BOLA-0087-P53-AVIATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/BOLA-0087-P53-AVIATION/context.txt)
+- [x] **0161** [BOLA-0086-P52-TELEMEDICI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/BOLA-0086-P52-TELEMEDICI/context.txt)
+- [x] **0162** [BOLA-0087-P53-AVIATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/BOLA-0087-P53-AVIATION/context.txt)
 - [ ] **0163** [GQL-0427-NON-PROFIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/GQL-0427-NON-PROFIT/context.txt)
 - [ ] **0164** [GQL-0428-CONSTRUCTION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/GQL-0428-CONSTRUCTION/context.txt)
 - [ ] **0165** [INJ-0121-SQLi-PHARMACEUT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/INJ-0121-SQLi-PHARMACEUT/context.txt)

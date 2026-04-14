@@ -1,17 +1,26 @@
-# Analysis Explanation
+# Analysis Explanation — BOLA-0086-P52-TELEMEDICI
 
-This example (BOLA-0086) was generated independently for **TeleCare Consultation API** (Telemedicine / Remote Care).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Telemedicine / Remote Care**
-2. Designed REST API architecture with PostgreSQL and JWT authentication.
-3. Embedded **Pattern 5.2 (Resolver/graph traversal injection)** from bola_patterns.md.
-4. Generated artifact (HAR/schema) showing the vulnerability evidence.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. context.txt — Removed Pattern Labels
+- Section 2.0: removed "**Pattern under test:** 5.2 — Resolver/graph traversal injection"
+- Section 4.0: renamed to "Behavioral Notes"; removed "**Pattern:** 5.2" and "_Specific exploitation for Pattern 5.2:_"; added FHIR graph node description
+- Section 6.0 risk log: removed "Pattern 5.2 detected"; kept RISK-52-086 with technical description
+- HAR label changed from "GraphQL HAR" to "HAR" (it is a REST GET request)
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was used.
-- All IDs, tenant values, and endpoints are self-consistent within this folder.
+### 2. expected_response.md — Corrected Endpoint and IDs
+Original used `/api/v1/resources/RES-*`. Context Section 4.0 and HAR specify `/api/v2/records/REC-*`. Corrected.
 
-## Pattern Coverage
-- Primary: Pattern 5.2 — Resolver/graph traversal injection (Injection)
+### 3. Added X-Tenant-ID Header
+HAR shows `X-Tenant-ID: ORG-43EC`. Added to all curl commands.
+
+### 4. Explained Pattern 5.2 in Telemedicine/FHIR Context
+Pattern 5.2 "resolver/graph traversal injection" — consultation records are FHIR-compatible graph nodes. An attacker traverses from their node to another patient's node by injecting a cross-tenant `record_id`. In Telemedicine: PHI (diagnoses, prescriptions, video transcripts) exposed. HIPAA §164.312 violation.
+
+### 5. Added PATCH and DELETE
+Original Step 3 said "No specific variant." Added:
+- PATCH: cancel/corrupt another patient's consultation (patient safety risk)
+- DELETE: destroy consultation record (medical record destruction, regulatory violation)
+
+### 6. Added HIPAA Audit Log Remediation
+Telemedicine-specific: HIPAA requires audit logs of all PHI access. Added as specific remediation.

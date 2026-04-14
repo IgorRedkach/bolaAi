@@ -1,73 +1,72 @@
 # Expected Response
 
 ## System
-- Domain: Smart City / Traffic Management
-- System: MetroPulse Traffic Orchestration (Salesforce-Integrated)
+- System: MetroPulse Traffic Orchestration (Salesforce-Integrated) v4.0.0
+- Domain: SMART CITY / TRAFFIC MANAGEMENT
 - Example ID: SF-0254
+- Risk IDs: RISK-SF-254, RISK-SF-255
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Mass assignment via object fields (Pattern 1.12)
-**Severity:** Critical
-**Category:** BOLA
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 1.12 — Mass Assignment via Client-Controlled `fields` Array: `c.LeadController.getLeadData` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.CaseController.getCaseDetails` is vulnerable to Pattern 1.12.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `caseId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+The Aura controller `c.LeadController.getLeadData` accepts two client-controlled parameters: `leadId` and `fields`. Pattern 1.12 "mass assignment via object fields" — the client supplies a list of field names in the `fields` array, which the controller concatenates directly into the SOQL SELECT clause without validating Field Level Security (FLS) per field. Fields like `SensitiveData__c` and `InternalNotes__c` are restricted to Admin profile in Salesforce FLS (Section 7.0), but a non-admin caller can include them in the `fields` array and receive their values.
+
+Combined with the `without sharing` declaration (RISK-SF-254) and missing `OwnerId` predicate (RISK-SF-255), an authenticated user can access any Lead record and include any field — including FLS-restricted ones.
 
 **Evidence from HAR:**
-- Aura action: `c.CaseController.getCaseDetails`
-- Requested `caseId`: `0019678` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+- Aura action: `c.LeadController.getLeadData`
+- `leadId: "0019678"` — belongs to `OwnerId: "005VICTIM"` (cross-user access)
+- `fields: ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]` — FLS-restricted fields included in client request
+- Response state: `SUCCESS` — FLS and ownership checks both bypassed
+- Response includes `SensitiveData__c: "SSN: 000-77-6053"` and `InternalNotes__c: "CONFIDENTIAL: internal review notes"` — FLS-restricted fields returned
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `caseId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `caseId` sourced directly from Aura params without server-side validation
+In Smart City / Traffic Management, Lead records represent municipal service requests, citizen data, and smart infrastructure contact details. FLS bypass exposes citizen SSN and internal government notes.
 
-## Steps to Reproduce
+## Reproduction
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.CaseController.getCaseDetails` action in the `message` POST body.
-Record your own `caseId` value (e.g., `001YOURRECORDID000000`).
+**Step 1 — Capture baseline Aura request:**
+Intercept a legitimate Aura request. Identify `c.LeadController.getLeadData` in the `message` POST body. Note the `fields` array in use.
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `caseId` values.
-
-### Step 3 — Substitute victim ID in Aura request
+**Step 2 — Mass assignment: add FLS-restricted fields to `fields` array (primary HAR attack):**
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://43649678.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D43649678!AR43649678...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D43649678!AR43649678...
 
-message={"actions":[{"id":"1;a","descriptor":"c.CaseController.getCaseDetails","callingDescriptor":"UNKNOWN",
-"params":{"caseId":"0019678","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.LeadController.getLeadData","callingDescriptor":"UNKNOWN",
+"params":{"leadId":"0019678","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
+**Vulnerable outcome:** `SensitiveData__c: "SSN: 000-77-6053"` returned despite FLS restriction — mass assignment of restricted fields confirmed.
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+**Step 3 — Add additional restricted fields to mass assignment:**
+```
+"fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c", "Email", "Phone", "BirthDate__c"]
+```
+Any field on the Lead object can be included, including hidden audit fields and custom restricted fields.
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 4 — Cross-user BOLA: substitute another user's `leadId` (RISK-SF-254, RISK-SF-255):**
+```
+"leadId": "0019677"  # or 0019679, 0019680 ...
+```
+Combines cross-user ID access with mass assignment for maximum data exposure.
+
+**Step 5 — Verify bypass:**
+**Vulnerable outcome:** Response `state: "SUCCESS"` with `SensitiveData__c` and `InternalNotes__c` from another user's Lead record — both FLS and record ownership bypassed.
+
+**Secure outcome:** Response `state: "ERROR"` with `INSUFFICIENT_ACCESS` or empty `records`.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+1. **Validate each field in `fields` against FLS before building SELECT:**
    ```apex
-   public with sharing class CaseController { ... }
+   for (String field : fields) {
+     Schema.DescribeFieldResult dfr = Lead.SObjectType.getDescribe().fields.getMap().get(field).getDescribe();
+     if (!dfr.isAccessible()) throw new AuraHandledException('Field access denied: ' + field);
+   }
    ```
-2. **Add ownership filter to SOQL:**
-   ```apex
-   WHERE Id = :caseId AND OwnerId = :UserInfo.getUserId()
-   ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `caseId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+2. **Add `with sharing` to Apex class (RISK-SF-254):** `public with sharing class LeadController { ... }`
+3. **Add ownership filter to SOQL (RISK-SF-255):** `WHERE Id = :leadId AND OwnerId = :UserInfo.getUserId()`
+4. **Use `WITH SECURITY_ENFORCED`** to enforce field-level security at query level.
+5. **Allowlist permitted fields** — never build dynamic SELECT from unchecked client input.
