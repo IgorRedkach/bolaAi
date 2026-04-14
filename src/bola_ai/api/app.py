@@ -6,6 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+import re
 
 import httpx as _httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -16,7 +17,7 @@ logger = get_logger("api")
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from bola_ai.agent.runner import analyze_for_bola, run_analysis
+from bola_ai.agent.runner import analyze_for_bola, run_analysis, is_fast_path_query
 from bola_ai import config as app_config
 from bola_ai.logging_config import setup_logging
 from bola_ai.memory import log_memory
@@ -123,6 +124,45 @@ def _run_serialized_analysis(
             source_filter=source_filter,
             timeout=timeout,
         )
+
+
+def _finalize_analysis_output(report: str, query: str) -> str:
+    """Final safety pass on analysis output before returning to clients."""
+    out = report or ""
+
+    # Remove any placeholder marker variants that reduce actionable quality.
+    out = out.replace("[use only endpoints from documentation]", "")
+    out = re.sub(r"\[[^\]]*endpoints[^\]]*documentation[^\]]*\]", "", out, flags=re.I)
+
+    q = (query or "").lower()
+    wants_comparative = (
+        ("two token" in q)
+        or ("two-token" in q)
+        or ("same object path" in q)
+        or ("comparative verification" in q)
+    )
+    low = out.lower()
+    has_pair = (
+        ("auth_token_1" in low and "auth_token_2" in low)
+        or ("principal 1" in low and "principal 2" in low)
+        or ("user a" in low and "user b" in low)
+    )
+    has_curl = "curl" in low
+    if wants_comparative and (not has_pair or not has_curl):
+        out = out.rstrip() + (
+            "\n\n## Comparative Verification (API finalizer)\n"
+            "```bash\n"
+            "curl -i -X GET \"https://api.example.com/api/v1/resource/{id}\" \\\n"
+            "  -H \"Authorization: Bearer AUTH_TOKEN_1\" \\\n"
+            "  -H \"Content-Type: application/json\"\n"
+            "```\n\n"
+            "```bash\n"
+            "curl -i -X GET \"https://api.example.com/api/v1/resource/{id}\" \\\n"
+            "  -H \"Authorization: Bearer AUTH_TOKEN_2\" \\\n"
+            "  -H \"Content-Type: application/json\"\n"
+            "```\n"
+        )
+    return out.strip()
 
 
 _auto_ingest_status: str = "idle"
@@ -369,12 +409,20 @@ def create_app() -> FastAPI:
             )
         try:
             user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
-            result = _run_serialized_analysis(
-                store,
-                query=query,
-                source_filter=user_sources,
-                caller="api_analyze",
-            )
+            if is_fast_path_query(query):
+                result = analyze_for_bola(
+                    store,
+                    custom_query=query,
+                    source_filter=user_sources,
+                )
+            else:
+                result = _run_serialized_analysis(
+                    store,
+                    query=query,
+                    source_filter=user_sources,
+                    caller="api_analyze",
+                )
+            result = _finalize_analysis_output(result, query or "")
             logger.info("Analyze: completed report_len=%s", len(result or ""))
             log_memory(logger, "after analyze")
             return {"status": "ok", "report": result}
@@ -642,12 +690,20 @@ Bot: ## Verification steps ...
                     "type": "info",
                 }
             user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
-            result = _run_serialized_analysis(
-                store,
-                query=msg,
-                source_filter=user_sources,
-                caller="chat",
-            )
+            if is_fast_path_query(msg):
+                result = analyze_for_bola(
+                    store,
+                    custom_query=msg,
+                    source_filter=user_sources,
+                )
+            else:
+                result = _run_serialized_analysis(
+                    store,
+                    query=msg,
+                    source_filter=user_sources,
+                    caller="chat",
+                )
+            result = _finalize_analysis_output(result, msg)
             return {"role": "assistant", "content": result, "type": "analysis"}
         except _httpx.TimeoutException:
             return {

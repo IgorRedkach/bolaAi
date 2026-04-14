@@ -1,0 +1,37 @@
+9.0 Known System Debt & Theoretical Attack Surfaces (Vulnerabilities)
+Internal Security Engineering Note: The following architectural gaps have been identified in the current deployment but are awaiting Q3 remediation. They represent explicit logical vulnerabilities that penetration testers and internal auditors must monitor.
+
+9.1 Vulnerability A: GraphQL BOLA via Reverse-Edge Traversal
+Taxonomy: Broken Object Level Authorization (BOLA) / IDOR
+Sub-system: Apollo Federation Layer (Section 5.0)
+
+The Flaw:
+While the REST APIs strictly enforce OPA rules, the GraphQL resolver logic handles relationships dynamically. In Section 5.2, we noted that the Practitioner entity has a reverse-edge resolver called activePatients.
+If a Patient (Actor A) queries their own Encounter, they are permitted to see their Practitioner (Actor B). However, the GraphQL resolver for Practitioner.activePatients fails to re-evaluate the OPA policy from the context of Actor A. It executes the query using the system's global service account.
+
+Exploitation Path:
+A malicious patient can craft a nested GraphQL query:
+me -> encounters -> practitioner -> activePatients -> demographics
+This bypasses the PatientSelfAccess policy, resulting in a massive BOLA data leak, exposing the PII of every other patient assigned to that doctor.
+
+9.2 Vulnerability B: Confused Deputy via Async Kafka Sync
+Taxonomy: Access Control Bypass / Confused Deputy
+Sub-system: Kafka Integration Event Streaming (Section 4.2 / 6.0)
+
+The Flaw:
+The endpoint POST /api/v1/Encounter/{EncounterID}/_sync is intended to force a real-time data sync with legacy on-premise systems. The API Gateway validates that the user is authenticated, but it delegates the actual Sync logic to an asynchronous background worker (fhir-db-writer) via Kafka.
+Because the Kafka topic fhir.sync.priority does not enforce JWT context propagation, the background worker assumes any message on this topic was already authorized.
+
+Exploitation Path:
+A valid user with the patient role calls the _sync endpoint with an EncounterID belonging to someone else. The REST endpoint returns an immediate HTTP 202 Accepted (acknowledging the request was queued) without checking ownership. The background worker blindly pulls the sensitive encounter from the legacy database and updates the cloud database, potentially triggering webhooks or state changes on an unauthorized record.
+
+9.3 Vulnerability C: Insecure Direct Object Reference via Denormalized JSONB
+Taxonomy: Security Misconfiguration / BAC
+Sub-system: PostgreSQL Persistence Layer (Section 7.2)
+
+The Flaw:
+As noted in Section 7.2, the observations table lacks strict database-level foreign keys linking to the patients table, relying instead on a denormalized JSONB payload to increase write speed.
+When a practitioner creates a new medical observation via POST /api/v1/Observation, the backend service verifies the practitioner has an active CareContext with the patient identified in the URL. However, it fails to validate that the patient ID embedded deep inside the JSONB body payload actually matches the patient ID in the authorized URL string.
+
+Exploitation Path:
+A malicious insider (Practitioner) with valid access to Patient A, submits an Observation payload to /api/v1/Patient/A/Observation. But inside the JSON body, they set "subject": { "reference": "Patient/B" }. The system authorizes the request based on the URL (Patient A), but the database writes the record based on the JSON payload (Patient B). This allows the practitioner to inject false medical records into the chart of a high-profile patient they are not authorized to treat.

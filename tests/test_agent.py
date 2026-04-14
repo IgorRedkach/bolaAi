@@ -4,7 +4,13 @@ from unittest.mock import patch
 
 import pytest
 from bola_ai.agent.prompts import build_analysis_prompt, BOLA_SYSTEM_PROMPT
-from bola_ai.agent.runner import run_analysis, _normalize_report, _extract_paths_from_context, _fix_curl_path_mismatch
+from bola_ai.agent.runner import (
+    run_analysis,
+    _normalize_report,
+    _extract_paths_from_context,
+    _fix_curl_path_mismatch,
+    _maybe_short_circuit_response,
+)
 from bola_ai.rag.chunking import chunk_text, _preprocess_har
 from bola_ai.rag.store import DocStore
 
@@ -279,7 +285,7 @@ def test_normalize_report_replaces_broken_redacted_url_with_grounded_placeholder
     raw = 'curl -X GET https:/[use only endpoints from the documentation] -H "Authorization: Bearer token_A"'
     out = _normalize_report(raw, allowed_paths=allowed)
     assert "https:/[use only endpoints from the documentation]" not in out
-    assert "https://api.example.com/permits/v2/applications/{applicationId}" in out
+    assert "/permits/v2/applications/{applicationId}" in out
 
 
 def test_normalize_report_repairs_redacted_path_field_with_fallback():
@@ -337,7 +343,7 @@ def test_normalize_report_enforces_q5_two_curl_only_shape():
     )
     lines = [ln for ln in out.splitlines() if ln.strip()]
     assert len(lines) == 2
-    assert lines[0].startswith('curl -X POST "https://api.example.com/graphql"')
+    assert lines[0].startswith('curl -X POST "/graphql"')
     assert "token_A" in lines[0]
     assert "token_B" in lines[1]
 
@@ -766,3 +772,72 @@ def test_normalize_report_q5_skips_auth_token_path_and_uses_object_endpoint():
     assert "/api/v1/devices/{deviceId}" in result or "/api/v1/manufacturers/{manufacturerId}/devices" in result
     assert "token_A" in result
     assert "token_B" in result
+
+
+def test_short_circuit_q3_rest_only_returns_not_applicable():
+    out = _maybe_short_circuit_response(
+        user_query="If the doc has GraphQL, how should I verify authorization with two tokens on the same object id?",
+        context="GET /api/v3/shipments/{shipmentId}\nGET /api/v3/warehouses/{warehouseId}/inventory",
+        allowed_paths=["/api/v3/shipments/{shipmentId}", "/api/v3/warehouses/{warehouseId}/inventory"],
+        base_urls=["https://api.example.com"],
+    )
+    assert out is not None
+    low = out.lower()
+    assert "no graphql operation is documented" in low
+    assert "updateShipmentStatus".lower() not in low
+
+
+def test_short_circuit_q4_runbook_has_correct_200_403_semantics():
+    out = _maybe_short_circuit_response(
+        user_query=(
+            "For the single highest-risk documented endpoint, provide a numbered authorization test runbook "
+            "with grounded steps only. Explain what 200 vs 403 means for the second user's same-object request."
+        ),
+        context="GET /api/v3/shipments/{shipmentId}",
+        allowed_paths=["/api/v3/shipments/{shipmentId}"],
+        base_urls=["https://api.example.com"],
+    )
+    assert out is not None
+    low = out.lower()
+    assert "a=200" in low and "b=403/404" in low
+    assert "likely enforced access control" in low
+    assert "confirmed bola" not in low
+
+
+def test_short_circuit_q5_without_base_url_uses_path_only():
+    out = _maybe_short_circuit_response(
+        user_query="Give **only** two curl commands.",
+        context="PATCH /api/v4/cases/{caseId}",
+        allowed_paths=["/api/v4/cases/{caseId}"],
+        base_urls=[],
+    )
+    assert out is not None
+    assert "https://api.example.com" not in out
+    assert 'curl -X PATCH "/api/v4/cases/{caseId}"' in out
+
+
+def test_short_circuit_full_request_description_change_returns_complete_curl():
+    out = _maybe_short_circuit_response(
+        user_query="please generate me full request for description change for PATCH /api/v1/tickets/{ticketId}/description",
+        context="PATCH /api/v1/tickets/{ticketId}/description",
+        allowed_paths=["/api/v1/tickets/{ticketId}/description"],
+        base_urls=[],
+    )
+    assert out is not None
+    assert 'curl -X PATCH "/api/v1/tickets/{ticketId}/description"' in out
+    assert 'Authorization: Bearer <token_user_A>' in out
+    assert 'Content-Type: application/json' in out
+    assert '"description": "Updated description"' in out
+
+
+@patch("bola_ai.agent.runner.chat")
+def test_run_analysis_q5_short_circuit_skips_llm(mock_chat, store):
+    store.add_document("GET /api/v3/shipments/{shipmentId}", source="test")
+    out = run_analysis(
+        store,
+        query="Give **only** two curl commands.",
+        source_filter=["test"],
+    )
+    assert "curl -X GET" in out
+    assert "token_A" in out and "token_B" in out
+    mock_chat.assert_not_called()

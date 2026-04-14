@@ -1,0 +1,16 @@
+{
+  "created_at": "20260410T145433Z",
+  "source": "/home/iredkach/Downloads/bola/bolaAi/data/training/reviewing_training_combined.jsonl",
+  "source_sha256": "23dae3deca16824b4d0386d964c5ba746aa9c0d62a70829c6e10eba9a94a0221",
+  "seed": 42,
+  "split_strategy": "hash_streaming",
+  "counts": {
+    "total": 37,
+    "skipped_invalid_rows": 0,
+    "sft_train": 27,
+    "sft_valid": 6,
+    "dpo_train": 62,
+    "dpo_valid": 4,
+    "eval_holdout": 4
+  }
+}

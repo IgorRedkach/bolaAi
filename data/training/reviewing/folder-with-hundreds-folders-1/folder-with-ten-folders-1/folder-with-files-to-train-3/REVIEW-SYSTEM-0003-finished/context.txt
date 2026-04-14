@@ -1,0 +1,231 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** VitaStream Telehealth Data Lake
+**Document Version:** 2.4.1 (FINAL)
+**Classification:** HIPAA SENSITIVE / EPHI (Electronic Protected Health Information)
+**Domain:** Healthcare / Telemedicine / Clinical Aggregation
+
+## 1.0 Executive Summary
+VitaStream is a high-performance clinical aggregation platform used by telehealth physicians. Because assembling a patient's complete medical history (labs, imaging reports, past encounters) from various siloed Electronic Health Record (EHR) systems takes 3–5 seconds, VitaStream implements an aggressive Edge Caching and Data Lake architecture to bring response times under 100 milliseconds.
+
+The system relies on an AWS API Gateway sitting in front of a distributed Redis Cache cluster. If a clinical summary has been recently compiled, it is served directly from memory, completely bypassing the heavy backend FHIR (Fast Healthcare Interoperability Resources) data lake.
+
+## 2.0 Network Topology & Caching Infrastructure
+To achieve sub-100ms latency, the network intercepts read-heavy requests at the boundary.
+
+### 2.1 The Edge & API Gateway
+* **Ingress:** All web and mobile traffic hits the external API Gateway (`api.vitastream.health`).
+* **Caching Middleware:** Before a request is routed to the backend microservices, an ElastiCache (Redis) lookup is performed.
+* **Backend Data Lake:** A cluster of Python FastAPI microservices that query an Amazon S3 Data Lake and an Aurora PostgreSQL metadata database to assemble FHIR clinical documents.
+
+### 2.2 The Cache Key Strategy
+When the backend generates a Clinical Summary, the API Gateway caches the JSON response.
+* **Cache Expiration (TTL):** 15 minutes.
+* **Cache Key Formulation:** The caching middleware generates the Redis lookup key using a hash of the HTTP Method and the URI Path. 
+  * *Example Key:* `SHA256("GET" + "/api/v2/patients/P-7712/clinical-summary")`
+
+## 3.0 Identity and Access Control
+VitaStream enforces strict HIPAA compliance regarding who can view a patient's data.
+
+### 3.1 Authentication
+Physicians authenticate via Okta using SAML 2.0, receiving an OAuth2 Bearer Token (JWT). The token contains their National Provider Identifier (NPI) and their assigned clinic.
+
+### 3.2 Backend Authorization (The "Care Team" Check)
+When the backend FastAPI service receives a request, it performs a strict "Care Team" check. It queries the PostgreSQL database to ensure that the requesting Doctor has an active, documented clinical relationship with the requested Patient ID. If no relationship exists, the backend returns a `403 Forbidden`.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+
+```yaml
+# Gateway Routing & Cache Policy
+routes:
+  - match:
+      prefix: "/api/v2/patients/"
+    route:
+      cluster: backend_data_lake
+    typed_per_filter_config:
+      envoy.filters.http.cache:
+        "@type": type.googleapis.com/envoy.extensions.filters.http.cache.v3.CacheConfig
+        # It hashes ONLY the :path and :method. 
+        # The Authorization header (JWT) is NOT part of the cache signature.
+        cache_key_builder:
+          exclude_scheme: true
+          exclude_host: true
+          exclude_query_string_parameters: []
+          headers_to_include: [] # CRITICAL implementation detail: Should include "Authorization"
+        allowed_vary_headers:
+          - "Accept"
+        max_age_in_seconds: 900 
+```
+
+## 6.0 Clinical Summary Data Schema
+When a cache hit occurs, the gateway returns this fully assembled JSON payload. Because the backend is bypassed, no auditable log of the unauthorized read is ever generated in the downstream PostgreSQL database.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Clinical Summary Payload",
+  "type": "object",
+  "properties": {
+    "patient_id": {
+      "type": "string",
+      "description": "Internal VitaStream UUID"
+    },
+    "demographics": {
+      "type": "object",
+      "properties": {
+        "full_name": { "type": "string" },
+        "date_of_birth": { "type": "string", "format": "date" },
+        "ssn_last_four": { "type": "string" }
+      }
+    },
+    "active_diagnoses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "icd10_code": { "type": "string" },
+          "description": { "type": "string" },
+          "diagnosed_date": { "type": "string", "format": "date" }
+        }
+      }
+    },
+    "recent_encounters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "date": { "type": "string", "format": "date-time" },
+          "provider_npi": { "type": "string" },
+          "clinical_notes_excerpt": { "type": "string" }
+        }
+      }
+    }
+  },
+  "required": ["patient_id", "demographics"]
+}
+```
+
+## 7.0 Expected API Contract 
+The REST contract intended for the mobile application and web portal.
+
+### 7.1 Retrieve Patient Summary
+**Endpoint:** `GET /api/v2/patients/{patient_id}/clinical-summary`
+**Description:** Fetches the aggregated 360-degree view of a patient.
+**Authorization Verification (Intended):** Backend FastAPI service queries `SELECT count(*) FROM care_teams WHERE provider_npi = $1 AND patient_id = $2`.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Okta OAuth2 JWT>
+Accept: application/json
+X-Request-Trace: <UUID>
+```
+
+
+
+
+
+
+# SYNTHETIC ARTIFACT: CACHE-KEY POISONING / AUTHZ MISMATCH (HAR TRACE)
+**Applies to Architecture:** VitaStream Telehealth Data Lake v2.4.1
+
+
+First, Dr. Smith (the authorized provider) requests the patient's data, resulting in a cache `MISS` and a backend fetch. 45 seconds later, Dr. Jones (an unauthorized provider) requests the exact same URL. The API Gateway sees a cache `HIT` and serves Dr. Smith's cached response directly to Dr. Jones, completely bypassing the backend database's "Care Team" authorization check.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Envoy Gateway Audit Telemetry",
+      "version": "1.24.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T09:15:02.100Z",
+        "time": 350,
+        "request": {
+          "method": "GET",
+          "url": "https://api.vitastream.health/api/v2/patients/P-7712/clinical-summary",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.vitastream.health" },
+            { "name": "authorization", "value": "Bearer eyJhbGci...eyJzdWIiOiJEci5TbWl0aCIsIm5waSI6IjExMjI1NTg4OSIsInJvbGUiOiJwaHlzaWNpYW4ifQ..." },
+            { "name": "accept", "value": "application/json" }
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-cache", "value": "MISS" },
+            { "name": "x-envoy-upstream-service-time", "value": "342" },
+            { "name": "age", "value": "0" }
+          ],
+          "content": {
+            "size": 384,
+            "mimeType": "application/json",
+            "text": "{\"patient_id\": \"P-7712\", \"demographics\": {\"full_name\": \"Richard Roe\", \"date_of_birth\": \"1965-04-12\", \"ssn_last_four\": \"4491\"}, \"active_diagnoses\": [{\"icd10_code\": \"I10\", \"description\": \"Essential hypertension\", \"diagnosed_date\": \"2021-08-14\"}], \"recent_encounters\": [{\"date\": \"2026-03-10T14:00:00Z\", \"provider_npi\": \"112255889\", \"clinical_notes_excerpt\": \"Patient reports dizziness.\"}]}"
+          },
+          "bodySize": 384
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T09:15:47.550Z",
+        "time": 12,
+        "request": {
+          "method": "GET",
+          "url": "https://api.vitastream.health/api/v2/patients/P-7712/clinical-summary",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.vitastream.health" },
+            { "name": "authorization", "value": "Bearer eyJhbGci...eyJzdWIiOiJEci5Kb25lcyIsIm5waSI6Ijk5ODg3NzY2NSIsInJvbGUiOiJwaHlzaWNpYW4ifQ..." },
+            { "name": "accept", "value": "application/json" }
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-cache", "value": "HIT" },
+            { "name": "x-envoy-upstream-service-time", "value": "0" },
+            { "name": "age", "value": "45" }
+          ],
+          "content": {
+            "size": 384,
+            "mimeType": "application/json",
+            "text": "{\"patient_id\": \"P-7712\", \"demographics\": {\"full_name\": \"Richard Roe\", \"date_of_birth\": \"1965-04-12\", \"ssn_last_four\": \"4491\"}, \"active_diagnoses\": [{\"icd10_code\": \"I10\", \"description\": \"Essential hypertension\", \"diagnosed_date\": \"2021-08-14\"}], \"recent_encounters\": [{\"date\": \"2026-03-10T14:00:00Z\", \"provider_npi\": \"112255889\", \"clinical_notes_excerpt\": \"Patient reports dizziness.\"}]}"
+          },
+          "bodySize": 384
+        }
+      }
+    ]
+  }
+}
+```
+
+
+1. **Multi-Request Contextual Reasoning:** The model cannot evaluate Request #2 in isolation. It must look at Request #1 to understand that the payload data truly belongs to Dr. Smith's authorization domain.
+2. **Metadata Triage:** The model must learn to stop looking solely at the URL and JSON body and start prioritizing HTTP Response headers (`x-cache: HIT`, `age: 45`, `x-envoy-upstream-service-time: 0`). These headers are the definitive forensic proof that the application logic (AuthZ) was bypassed by the edge layer.
+
+## 8.0 Clinical Operations Addendum
+### 8.1 Care Delivery Performance Targets
+- Clinical summary retrieval target: p95 under 1.8 seconds during outpatient peak windows.
+- Encounter synchronization jobs are rate-limited to protect downstream EHR connectors.
+- Batch export windows are scheduled to avoid physician shift-change periods.
+
+### 8.2 Data Governance and Audit
+- Access logs retain provider identity, tenant marker, and data-access purpose codes.
+- Audit exports are retained under healthcare record retention policy baselines.
+- Data correction workflows require immutable append-only revision history.
+
+### 8.3 Incident Readiness
+- Joint operations bridge includes API, integration, and compliance teams.
+- Playbooks define degraded-mode behavior for cache outage and connector latency spikes.
+- Post-incident reviews track control drift and compensating-control effectiveness.

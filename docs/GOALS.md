@@ -208,6 +208,30 @@ This checklist tracks implementation progress and can include concrete mechanism
 - [x] **Trained model baked into shipped image.**
 - [x] **Model-size policy decision (user-mandated):** production baseline is a local model; quality achieved via better teaching data, prompts, and evaluation loops.
 - [x] **Small-model teaching phase 1.**
+- [x] **Documentation quality skill available:** project docs edits should follow `.cursor/skills/docs-authoring-quality/SKILL.md`.
+- [x] **Artifact archetyping for training tasks:** scenario prompts produce structural logic seeds aligned to HAR/OpenAPI/SQL archetypes.
+- [x] **Template-wrapped synthetic artifacts:** task generation emits deterministic blueprint templates (OpenAPI, HAR-like logs, SQL DDL) instead of prose-only seeds.
+- [x] **Artifact syntax validation gate in teaching cycle:** generated artifacts are parsed/validated by type (`json/yaml`, HAR JSON shape, SQL parse) before acceptance.
+- [x] **Memory-safe task generation batching:** task pack writing uses bounded batch flushing to keep local RAM stable.
+- [x] **From-scratch retrain policy:** model rebuild must start from base model in `docker/Modelfile` (not previous custom model), with old local custom model removed before `ollama create`.
+
+---
+
+## Conversational Follow-up Support
+
+The agent must respond appropriately to simple user follow-up questions — not just full security analysis requests. Different question types require different response shapes:
+
+- **"Generate a request to verify [finding]"** → complete, copy-pasteable HTTP request (curl-first for REST), grounded to the ingested doc.
+- **"What does 200 vs 403 mean for this test?"** → brief, focused explanation of secure vs vulnerable outcome interpretation.
+- **"Verify [endpoint]" / "Show me the request for [endpoint]"** → targeted curl with method, path, auth header; no full analysis prose.
+- **General findings question** → structured findings response with finding headings and verification steps.
+
+The response type must match the question type. Asking for "a request" must produce a request; asking for "findings" must produce findings — not the other way around.
+
+**Teaching mechanism:** short-circuit fast paths in `runner._maybe_short_circuit_response()` and `_enforce_strict_adaptive_shapes()` handle deterministic question patterns. Training data (via `generate_data.py` and teacher prompts) reinforces the correct response shape per question type.
+
+- [ ] **Conversational follow-up support:** tool responds to simple user questions with the appropriate response type — request generation, outcome explanation, or structured findings — grounded to ingested documentation.
+- [ ] **Per-question-type response shape training:** training data includes examples of simple follow-up questions (request generation, outcome explanation, path verification) with gold-standard answers in the correct shape.
 
 ---
 
@@ -243,3 +267,4 @@ This checklist tracks implementation progress and can include concrete mechanism
 
 - [x] **Auto-analyze on startup:** users can run the container, wait, and see findings without typing anything.
 - [x] **Context window configured** for model size to prevent prompt truncation.
+- [x] **Conversational follow-up support goal defined:** new goal section added to `docs/GOALS.md`; training data expanded with 25 follow-up Q&A examples (request generation, outcome interpretation, findings summary); E2E logical correctness checker validates per-question-type response shape every run.

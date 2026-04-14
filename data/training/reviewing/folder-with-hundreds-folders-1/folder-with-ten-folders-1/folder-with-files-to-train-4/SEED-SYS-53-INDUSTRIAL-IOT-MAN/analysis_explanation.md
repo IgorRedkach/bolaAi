@@ -1,0 +1,13 @@
+## Analysis reasoning
+
+I reviewed the ManuControl Robotics Fleet API v4.2.0 architecture specification, Java source code, Modbus register map, and HAR trace.
+
+1. **Network exposure as the first attack enabler**: the Kubernetes Ingress misconfiguration is the access vector. The HAR URL uses the internal IP `10.1.1.50` (a non-routable address, `10.x.x.x`) which is only reachable from inside the corporate network. The user-agent `Corporate-WiFi-Scanner/1.0` confirms the attacker is on the corporate network, not the internet — exactly what the Ingress misconfiguration enables. Section 2.1 states the Ingress was intended to restrict to "internal IT-only CIDR blocks" but the actual rule was `host: ` (wildcard) — the corporate network is broader than the intended scope.
+
+2. **No authentication as the second enabler**: the Java controller has no authentication check — the comment is explicit: "NO authentication or authorization check here." Section 3.1 confirms the service "skips JWT validation and only checks for a basic `X-Device-ID` header." The `X-Device-ID` is a routing parameter, not a security control. The HAR request has no Authorization header and succeeds — confirming the authentication bypass is complete.
+
+3. **Modbus injection root cause**: the `velocity` parameter is received as an integer from the query string and passed directly to `ModbusClient.writeRegister(deviceId, 40001, velocity)`. The bounds check is present in the code but commented out with the exact fix annotated as RISK-OT-601. The Modbus register map specifies the physical consequences: 0–1500 is the safe range; >2000 causes motor overload. `velocity=5000` is 3.3× the safe maximum. The HAR response `x-modbus-response-time-ms: 42` is critical evidence: Modbus TCP responses within ~40ms confirm the `writeRegister` call completed and the PLC acknowledged the command — this is not a simulated response, it is an OT network round-trip confirmation.
+
+4. **Chain relationship**: the two vulnerabilities are dependent. The Modbus injection (Pattern 5.4) is only exploitable because of the network exposure (Pattern 2.5). Without the Kubernetes Ingress misconfiguration, the attacker cannot reach the endpoint. Without the missing bounds check, reaching the endpoint from an authorized host would still be constrained to safe values. Both must be fixed independently.
+
+5. **Physical safety impact**: this is not a data breach — it is a physical safety incident. The robotic arm `ARM-99182A` received a command at 5× the safe maximum velocity. The Modbus register 40001 description states exceeding 2,000 "causes motor overload, potentially tearing the arm from its mounting." This is an ICS/OT attack with direct physical harm potential to equipment and nearby personnel.

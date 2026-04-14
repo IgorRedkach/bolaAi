@@ -1,0 +1,249 @@
+========================================
+
+Here is the twenty-ninth system, fully expanded to maximize documentation size and technical detail across all sections, per your request. We are shifting into the **Cloud Infrastructure & SaaS** sector, focusing on a **Multi-Tenant Virtual Machine (VM) Provisioning Gateway**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** CloudForge Multi-Tenant Infrastructure Platform
+**Document Version:** 3.3.0 (FINAL)
+**Classification:** CRITICAL CLOUD TENANCY / AWS & GCP SCOPE
+**Domain:** Cloud Infrastructure / Multi-Tenant SaaS / Infrastructure-as-Code (IaC)
+
+## 1.0 Executive Summary
+CloudForge provides Infrastructure-as-Code (IaC) management as a service, allowing thousands of independent corporate customers (the "Tenants") to provision and manage cloud resources (VMs, databases, load balancers) without direct console access. Every tenant's infrastructure is logically segregated within a central, shared AWS/GCP account structure.
+
+
+## 2.0 Comprehensive Network Topology & Provisioning Core
+The architecture maintains an absolute boundary between the public API and the restricted internal provisioning services.
+
+### 2.1 The Customer Ingress Layer
+* **API Gateway (Google Cloud Endpoints):** Handles OAuth 2.0 validation, usage throttling, and routing for all external API calls (e.g., `/api/v3/vms/provision`).
+* **Tenant Isolation Middleware:** A custom Go-lang plugin that extracts the `tenant_id` from the JWT and ensures it is included in all downstream service calls via a trusted `X-Tenant-ID` header.
+
+### 2.2 The Internal IaC Orchestration Plane
+* **Terraform State Storage (AWS S3):** A central, single S3 bucket stores all tenant state files (e.g., `s3://cloudforge-state/tenant-A/prod.tfstate`). Access is restricted by S3 Bucket Policies to the internal Terraform Executor Service IAM role.
+* **Terraform Executor Service:** The privileged service that runs `terraform plan` and `apply`. It is the only service that should have read access to the S3 state files.
+
+## 3.0 Identity, Tenant Isolation, and Secret Management
+Security is based on an explicit, non-guessable `tenant_id` boundary.
+
+### 3.1 Partner Authentication (OAuth 2.0)
+Tenants authenticate using their corporate SSO, receiving a JWT containing their unique
+tenant_id
+(e.g.,
+org-low-991A
+).
+
+### 3.2 Tenant Isolation Logic (The S3 Key Structure)
+The Terraform state files are strictly partitioned by the tenant ID in the S3 key path.
+s3://cloudforge-state/{tenant\_id}/{project\_name}/prod.tfstate
+The IAM policies on the S3 bucket only grant read access to paths matching the calling service's IAM role, and those roles are assumed to have passed the tenant validation check.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+Internal Security Engineering Note: The Resource Import Service was rushed to meet a key customer request. The URL parsing logic uses a permissive Python networking library and the developers failed to include the necessary network address denylist for RFC1918 and internal services. Tracked as RISK-IA C-099.
+
+**Sub-system:** Resource Import Service (`POST /api/v3/resources/import-metadata`)
+
+**The Deep Architectural Flaw:**
+
+
+2. **Internal S3 Access:** The attacker knows the internal S3 endpoint structure and crafts the malicious `resource_url` to point to the victim tenant's state file: `https://cloudforge-state.s3.amazonaws.com/tenant-critical-ops/prod-db/prod.tfstate`.
+
+
+
+1. **The Foothold:** An attacker obtains a valid JWT for a low-value tenant (`org-low-991A`). They identify a high-value victim tenant (`tenant-critical-ops`) and a target project name (`prod-db`) from public internal documentation.
+3. **The Execution:** The Flask/Python service attempts to fetch the URL. The request is intercepted by the internal AWS network and routes to the S3 bucket. The service's privileged IAM role is authorized to read this file, so S3 returns the raw `.tfstate` content.
+4. **The Leak:** The Resource Import Service attempts to parse the raw `.tfstate` file (which is often a massive JSON document) as simple metadata and fails. The resulting exception trace dumps the first few kilobytes of the raw state file content back into the attacker's public HTTP response.
+5. **The Impact:** The attacker extracts the raw `.tfstate` file, gaining access to the victim tenant's database plaintext credentials, private network subnets, and other highly sensitive IaC configuration.
+
+========================================
+**END OF CHUNK 1 (ARCHITECTURE)**
+================================================================================
+
+========================================
+
+**Document Version:** 4.0.1
+**Applies to Architecture:** CloudForge Multi-Tenant Infrastructure Platform v3.3.0
+
+## 5.0 IaC State File Model (S3 & Internal References)
+The system must ensure that the only way to read a state file is through the Terraform Executor, not the general-purpose Resource Import Service.
+
+```json
+-- Example Terraform State File Structure (The Exposed Secret)
+{
+"version": 4,
+"terraform_version": "1.4.6",
+"serial": 12,
+"lineage": "5f4d89a7-9e12-4c2f-b4c5-0a1b2c3d4e5f",
+"outputs": {
+"database_password": {
+"value": "MySecretDBPassw0rd991X",
+"type": "string",
+"sensitive": true
+},
+"network_subnet_ids": {
+"value": ["subnet-0a1b2c3d4e5f6g7h8", "subnet-9i8j7k6l5m4n3o2p1"],
+"type": "set"
+}
+},
+...
+}
+```
+
+## 6.0 The Flawed Implementation (Python / Flask)
+
+```python
+# File: api/resource_import/routes.py
+from flask import request, jsonify
+import requests # Permissive HTTP libraryPOST /api/v3/resources/import-metadata
+
+@app.route('/api/v3/resources/import-metadata', methods=['POST'])
+def import_resource_metadata():
+# Middleware validates JWT and sets X-Tenant-ID (e.g., org-low-991A)
+data = request.get_json()
+resource_url = data.get('resource_url') # Attacker-controlled URL
+if not resource\_url:  
+    return jsonify({"error": "Missing resource URL."}), 400  
+
+# FLAW: Missing network security check (no denylist for 169.254.169.254, 127.0.0.1, etc.)
+# The application blindly executes a GET request to the user-supplied URL.
+try:
+    response = requests.get(resource\_url, timeout=5)
+    
+    # Check 1: Must be a successful response
+    if response.status\_code \!= 200:
+        return jsonify({"error": f"Failed to retrieve resource: HTTP {response.status\_code}"}), 400
+
+    # CRITICAL LEAKAGE POINT: Assumes fetched content is small, parseable JSON metadata.
+    # When fetching the massive, complex JSON of a .tfstate file, this often fails later.
+    raw\_content = response.text 
+    
+    metadata = parse\_metadata(raw\_content) # Internal function that attempts JSON parsing
+    
+    return jsonify({  
+        "status": "METADATA\_SUCCESS",  
+        "metadata": metadata  
+    }), 200  
+
+except Exception as e:
+    # Passes error to global handler
+    return handle\_import\_error(e, resource\_url)
+This function is poorly designed for debugging, and it inadvertently reflects raw, fetched secrets back to the client upon failure.
+
+```python
+# File: api/resource_import/errors.py
+
+def handle_import_error(e, url):
+# When the parser fails, the error message often contains the first few bytes of the raw file content.
+error_message = str(e)
+
+# To help debug the content parsing failure, the logic often includes the raw content in the message.
+if "JSONDecodeError" in error_message and hasattr(e, 'doc'):
+# CRITICAL LEAKAGE: Reflects the beginning of the Terraform state file
+leakage_content = e.doc[:1024]
+error_message = f"Parsing failed for URL {url}. Content start: {leakage_content}..."
+
+return jsonify({
+"error_code": "IMPORT_PARSING_FAILURE",
+"detail": error_message
+}), 500
+```
+
+## 7.0 REST API Contracts (The IaC State Exfiltration)
+
+### 7.1 Intended Safe Payload (Resource Import)
+A tenant imports a publicly accessible VM console URL for management.
+
+**Target URI:** `POST /api/v3/resources/import-metadata`
+**Expected Request Payload:**
+```json
+{
+"resource_url": "https://us-east-1.console.aws.amazon.com/ec2/vms/i-12345"
+}
+```
+
+
+**Target URI:** `POST /api/v3/resources/import-metadata`
+**Malicious Request Payload:**
+```json
+{
+"resource_url": "https://cloudforge-state.s3.amazonaws.com/tenant-critical-ops/prod-db/prod.tfstate"
+}
+```
+*Behavior:* The Resource Import Service fetches the `.tfstate` file using its privileged IAM role, fails to parse it as simple JSON, and dumps the file's content (including plaintext database credentials) into the attacker's `500 Internal Server Error` response.
+
+========================================
+**END OF CHUNK 2 (CODE/CONTRACTS)**
+================================================================================
+
+========================================
+
+**Applies to Architecture:** CloudForge Multi-Tenant Infrastructure Platform v3.3.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 4.4, 5.3, & 1.5)
+
+
+The privileged Resource Import Service fetches the file. The subsequent parsing failure triggers the verbose error handler (Pattern 6.2), which reflects the initial content of the fetched file back to the client. The `500 Internal Server Error` response contains the first 1024 bytes of the raw Terraform state file, confirming the cross-tenant breach and the exposure of the victim's database credentials.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Google Cloud Endpoints / Flask APM Logs",
+"version": "3.3.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T18:50:05.115Z",
+"time": 345,
+"request": {
+"method": "POST",
+"url": "https://api.cloudforge.io/api/v3/resources/import-metadata",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.cloudforge.io" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiJvcmctbG93LTk5MUEiLCJyb2xlIjoiVVNFUiJ9..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"resource_url\": \"https://cloudforge-state.s3.amazonaws.com/tenant-critical-ops/prod-db/prod.tfstate\"}"
+},
+"bodySize": 120
+},
+"response": {
+"status": 500,
+"statusText": "Internal Server Error",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-process-time-ms", "value": "290" }
+],
+"content": {
+"size": 1800,
+"mimeType": "application/json",
+"text": "{\"error_code\": \"IMPORT_PARSING_FAILURE\", \"detail\": \"Parsing failed for URL https://cloudforge-state.s3.amazonaws.com/tenant-critical-ops/prod-db/prod.tfstate. Content start: {\\n  \\\"version\\\": 4,\\n  \\\"terraform_version\\\": \\\"1.4.6\\\",\\n  \\\"serial\\\": 12,\\n  \\\"lineage\\\": \\\"5f4d89a7-9e12-4c2f-b4c5-0a1b2c3d4e5f\\\",\\n  \\\"outputs\\\": {\\n    \\\"database_password\\\": {\\n      \\\"value\\\": \\\"MySecretDBPassw0rd991X\\\",\\n      \\\"type\\\": \\\"string\\\",\\n      \\\"sensitive\\\": true\\\",..."
+},
+"bodySize": 1800
+}
+}
+]
+}
+}
+```
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+
+* **Tenant Mismatch:** The model must correlate the authenticated user's `tenant_id` (`org-low-991A`) with the tenant path in the URL (`tenant-critical-ops`). The successful retrieval of the file content proves the cross-tenant boundary was bypassed.
+* **Secret Reflection:** The raw reflection of the `.tfstate` file, specifically the inclusion of the `"database_password"` field with its plaintext `"value"` and `"sensitive": true` flag, is definitive proof of IaC secret exposure.
+
+3. **Attack Chaining & Privilege Abuse:**
+
+4. **Debugging as a Security Failure (Pattern 6.2):**
+* The verbose error handler, intended to show developers why parsing failed, became the primary exfiltration channel. The model learns that security controls must apply to error paths with the same rigor as successful paths.
+
+========================================
+========================================

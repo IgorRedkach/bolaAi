@@ -1,0 +1,202 @@
+========================================
+
+Here is the twenty-first system, continuing the expanded, high-density training format. We are shifting into the **Defense Industrial Base (DIB) & Classified Automation** sector, focusing on a **Multi-Tenant Infrastructure-as-Code (IaC) Deployment Platform**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** Aegis IaC Automation Platform
+**Document Version:** 8.0.5 (FINAL)
+**Classification:** TOP SECRET / SCIF & CMMC COMPLIANCE SCOPE
+**Domain:** Defense Industrial Base (DIB) / Infrastructure-as-Code / Secret Management
+
+## 1.0 Executive Summary
+Aegis is a secure, multi-tenant platform used by various defense contractors and governmental agencies (the "Tenants") to manage their cloud infrastructure (AWS/Azure) through Infrastructure-as-Code (IaC). To ensure auditability and maintain state, all deployment configurations and runtime states are managed using HashiCorp Terraform.
+
+The platform's most critical component is the State File API, which stores the `.tfstate` files. These files are highly sensitive because, by design, they store the output variables of the deployment, including raw passwords, access keys, and internal network architecture details, which are often not encrypted at rest outside of the state file itself.
+
+## 2.0 Comprehensive Network Topology & Automation Core
+The architecture implements strict network and logical segregation for highly sensitive data.
+
+### 2.1 The Edge & Automation Service
+* **Terraform Runner Microservice:** A hardened Go-lang binary that executes the `terraform plan` and `terraform apply` commands inside isolated containers.
+
+* **AWS S3 Storage:** All Terraform state files (`*.tfstate`) are stored in a centralized, multi-tenant S3 bucket. They are logically separated by tenant and project ID, but the physical bucket is the same.
+* **State API:** A Python/Flask microservice that interfaces with S3. It is responsible for pre-signing the S3 URLs for clients to download their state files directly, bypassing the Flask service for large file transfer.
+
+## 3.0 Identity, Tenant Isolation, and Secret Management
+Logical isolation is the primary security control.
+
+### 3.1 Contractor Identity (OAuth 2.0 & Custom Claims)
+Contractors authenticate via their agency-issued PIV cards (Common Access Cards, or CAC) which map to a JWT containing two critical claims: `tenant_id` (the contractor's agency) and `clearance_level` (the maximum sensitivity of projects they can access).
+
+The API Management layer correctly ensures that the JWT `tenant_id` matches the project's ownership record. However, the internal State API endpoint designed to retrieve the S3 file path has a logic gap: it accepts an optional `project_id` parameter in the URL and only checks if the project exists, not if the authenticated user's `tenant_id` is logically bound to that `project_id`.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The new multi-region S3 bucket policy required simplifying the S3 key path generation logic in the State API. This change inadvertently exposed the full, predictable S3 key path to the client. Tracked as RISK-TF-144.*
+
+**Taxonomy Pattern:** 4.4 (IaC state file exposure) & 1.5 (Multi-tenant / cross-tenant access)
+**Sub-system:** State API (`/api/v1/projects/{project_id}/state/get-url`)
+
+**The Deep Architectural Flaw:**
+This attack chains the information leakage of an S3 key path with a missing cross-tenant ownership check (Pattern 1.5).
+
+1. **Information Leakage (Pattern 4.4):** The API response for requesting a state file URL includes the full S3 key path in the JSON body for auditing purposes. This path is predictably structured as `{target_tenant_id}/{project_id}/prod.tfstate`.
+
+
+3. **The Cascade:** The State API returns a valid, cryptographically signed S3 URL. The attacker uses this URL to download the raw `prod.tfstate` file, which contains the unencrypted database passwords and critical network IP ranges for the target high-clearance project.
+
+
+1. **The Foothold:** Attacker (Tenant A: `tenant_low_tier`) obtains a valid, low-clearance JWT. They know the ID of a target project belonging to a critical operations tenant (Tenant B: `tenant_critical_ops`) from public internal documentation, e.g., `proj_4444X`.
+
+
+3. **The Response Leak:** The State API successfully resolves the project ID to the physical S3 key path but fails to check the tenant ownership. It returns a valid, signed S3 download URL. The attacker notes the exposed path structure: `s3://aegis-state-bucket/tenant_critical_ops/proj_4444X/prod.tfstate`.
+
+4. **The Exfiltration:** The attacker uses the signed URL to download the state file, which contains the raw database credentials for the critical project.
+
+***
+
+**Document Version:** 4.0.1
+**Applies to Architecture:** Aegis IaC Automation Platform v8.0.5
+
+## 5.0 Project Registry Schema (PostgreSQL)
+The database must link the logical project ID to the secure storage location and its owner.
+
+```sql
+CREATE TABLE ia c_projects (
+project_id VARCHAR(50) PRIMARY KEY, -- The URI Path variable
+project_name VARCHAR(100) NOT NULL,
+tenant_id VARCHAR(50) NOT NULL,    -- THE CRITICAL AUTHORIZATION FIELD
+clearance_level VARCHAR(10) CHECK (clearance_level IN ('LOW', 'HIGH', 'CRITICAL')),
+s3_key_path VARCHAR(255) UNIQUE NOT NULL, -- Logical path (e.g., 'proj_4444X/prod.tfstate')
+is_active BOOLEAN DEFAULT TRUE
+);
+
+CREATE INDEX idx_tenant_project ON ia c_projects(tenant_id, project_id);
+```
+
+## 6.0 The Flawed Implementation (Python / Flask)
+
+```python
+# File: api/state_api/controllers.py
+from flask import request, jsonify
+from .models import Project
+from .s3_signer import generate_presigned_url
+
+# GET /api/v1/projects/string:project\_id/state/get-url
+@app.route('/api/v1/projects/<string:project_id>/state/get-url', methods=['GET'])
+def get_state_file_url(project_id):
+# The Authorization Middleware checked if the JWT is valid and populated request.user.
+user_tenant_id = request.user['tenant_id']
+\# The code should query: WHERE project\_id = $1 AND tenant\_id = $2  
+\# Instead, it only queries on project\_id, allowing cross-tenant access.  
+project = Project.query.filter\_by(project\_id=project\_id).first()  
+
+if not project:  
+    return jsonify({"error": "Project not found"}), 404  
+
+\# if project.tenant\_id \!= user\_tenant\_id:  
+\#     return jsonify({"error": "Access denied to project."}), 403  
+
+s3\_key = f"{project.tenant\_id}/{project\_id}/prod.tfstate"  
+
+# Generate temporary, time-limited URL for direct download from S3  
+download\_url = generate\_presigned\_url(bucket\_name=project.s3\_bucket, key=s3\_key)  
+
+return jsonify({  
+    "status": "URL\_GENERATED",  
+    "project\_id": project\_id,  
+    "s3\_key\_path": s3\_key, # LEAKAGE POINT: Exposes the target tenant ID  
+    "download\_url": download\_url  
+}), 200 
+```
+
+## 7.0 REST API Contract (The State File Exfiltration)
+
+### 7.1 Retrieve State File URL (Malicious Use Case)
+**Endpoint:** `GET /api/v1/projects/{project_id}/state/get-url`
+**Description:** Generates a short-lived URL for downloading a project's Terraform state file.
+**Security Level:** HIGH (PII, Secrets).
+
+**Malicious Request Context:**
+* **Attacker Identity:** `tenant_low_tier` (Low-Clearance Contractor Token)
+* **Target URI:** `/api/v1/projects/proj_4444X/state/get-url` (Targeting a CRITICAL tenant project)
+
+```json
+{
+"status": "URL_GENERATED",
+"project_id": "proj_4444X",
+"s3_key_path": "tenant_critical_ops/proj_4444X/prod.tfstate",
+"download_url": "https://aegis-state-bucket.s3.aws.com/tenant_critical_ops/proj_4444X/prod.tfstate?X-Amz-Signature=ABC..."
+}
+```
+
+***
+
+**Applies to Architecture:** Aegis IaC Automation Platform v8.0.5
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 4.4 & Pattern 1.5)
+
+
+The API Gateway forwards the request due to the flawed database query. The response status of `200 OK` confirms the access was granted, and the JSON body explicitly leaks the full S3 key path, which contains the critical secrets, and a valid, signed download URL for the highly sensitive IaC state file.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Azure API Management / Flask APM Logs",
+"version": "2026.4.1"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T18:30:10.010Z",
+"time": 45,
+"request": {
+"method": "GET",
+"url": "https://api.aegis.gov/api/v1/projects/proj_4444X/state/get-url",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.aegis.gov" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfbG93Xzg4MTkiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnRfbG93X3RpZXIiLCJjbGVhcmFuY2UiOiJMT1cifQ..." },
+{ "name": "x-request-id", "value": "req-99182-4419a" }
+],
+"queryString": [],
+"bodySize": 0
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-processing-time-ms", "value": "31" }
+],
+"content": {
+"size": 650,
+"mimeType": "application/json",
+"text": "{\"status\": \"URL_GENERATED\", \"project_id\": \"proj_4444X\", \"s3_key_path\": \"tenant_critical_ops/proj_4444X/prod.tfstate\", \"download_url\": \"https://aegis-state-bucket.s3.aws.com/tenant_critical_ops/proj_4444X/prod.tfstate?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-SignedHeaders=host%3Buser-agent&X-Amz-Signature=4a1e5c7d2b9f8a1c5d2e1b9f7a3c8b4d...\", \"expires_in_seconds\": 300}"
+},
+"bodySize": 650
+}
+}
+]
+}
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+* **Identity Mismatch:** The model must compare the authenticated identity (`"tenant_id": "tenant_low_tier"`) against the resulting exposed path (`"s3_key_path": "tenant_critical_ops/..."`). The existence of two different, highly sensitive tenant identifiers in a single successful transaction is the definitive proof of cross-tenant access.
+
+2. **IaC Secret Exposure (Pattern 4.4):**
+* **Asset Sensitivity:** The model learns to prioritize security assets based on file name. The presence of `prod.tfstate` combined with an S3 download URL signifies a leak of the system's core configuration and secrets. The leak is not the content itself, but the authenticated, temporary URL that grants access to the content.
+
+3. **Operational vs. Security Context:**
+
+========================================
+========================================
+========================================
+========================================
+========================================

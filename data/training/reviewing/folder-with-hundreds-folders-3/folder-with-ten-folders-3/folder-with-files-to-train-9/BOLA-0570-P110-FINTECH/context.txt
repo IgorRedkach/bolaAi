@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** PayBridge Transaction API
+**Document Version:** 3.4.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Fintech / Payments Gateway
+**Architecture:** PCI DSS + REST + Webhook callbacks
+**Training Example ID:** BOLA-0570
+
+## 1.0 Executive Summary
+PayBridge Transaction API is a fintech / payments gateway platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v3/resources endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 1.10 — Cross-service identity propagation drift
+
+## 3.0 Database Schema
+```sql
+
+-- Resource table
+CREATE TABLE resources (
+    resource_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_resource_tenant ON resources(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 1.10 — Cross-service identity propagation drift (BOLA)
+
+The `GET/PATCH/DELETE /api/v3/resources/:id` endpoint accepts a `resource_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-9DAA` can access objects owned by `ORG-D434`.
+
+_Specific exploitation for Pattern 1.10:_ The `/api/v3/resources` handler does not enforce tenant/owner boundaries for Pattern 1.10.
+
+## 5.0 Artifact (schema)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:23:46.275956+00:00",
+        "time": 254,
+        "request": {
+          "method": "GET",
+          "url": "https://api.paybridge-trans.example.com/api/v3/resources/RES-2570",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-9DAA"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"RES-2570\",\"tenantId\":\"ORG-D434\",\"ownerId\":\"other-user-9daad434\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-D434\"}"
+          },
+          "bodySize": 206
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-110-570:** Pattern 1.10 detected in `/api/v3/resources` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-670.

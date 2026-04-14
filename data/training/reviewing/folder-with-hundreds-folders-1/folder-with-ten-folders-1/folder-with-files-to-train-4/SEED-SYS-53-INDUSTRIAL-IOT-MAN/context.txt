@@ -1,0 +1,210 @@
+Here is the twenty-third system, continuing the deep-dive architectural series. We are shifting into the **Industrial IoT & Manufacturing** sector, focusing on a **Robotics Fleet Control API Gateway**.
+
+For the vulnerabilities, we are focusing on **Pattern 2.5 (Critical Infrastructure Interface Exposure)** combined with **Pattern 5.4 (Industrial Protocol Injection)**. This scenario demonstrates how an internal PLC (Programmable Logic Controller) command API is accidentally exposed via a Kubernetes misconfiguration, allowing an unauthenticated attacker to inject a malicious, high-speed operational command (a Modbus register write) to a high-power robotic arm.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ManuControl Robotics Fleet API
+**Document Version:** 4.2.0 (FINAL)
+**Classification:** CRITICAL SAFETY / OT NETWORK INTEGRITY SCOPE
+**Domain:** Industrial IoT (IIoT) / Manufacturing / Operational Technology (OT)
+
+## 1.0 Executive Summary
+ManuControl manages the API bridge between the corporate IT network (where scheduling and dashboard applications reside) and the Operational Technology (OT) network (where the physical robots, PLCs, and sensors operate). The platform is used to monitor and adjust critical physical parameters, such as robotic arm velocity, motor torque limits, and production line safety interlocks.
+
+The most sensitive endpoint is the `DeviceCommandService`, which translates simple REST requests (e.g., `set_speed`) into proprietary Industrial Control System (ICS) protocols, specifically Modbus TCP, before sending them over the firewall into the segmented OT network.
+
+## 2.0 Comprehensive Network Topology & Control Plane
+The architecture implements a classic IT/OT segregation, with the flaw existing in the DMZ bridge.
+
+### 2.1 The IT Network Boundary
+* **Corporate Firewall:** Separates the standard office environment (laptops, phones) from the manufacturing DMZ.
+* **Kubernetes Ingress (The Flaw):** The internal-facing Kubernetes cluster uses an Ingress Controller that was misconfigured to expose a high-privilege service to the entire corporate network instead of restricting it to internal IT-only CIDR blocks.
+
+### 2.2 The IT/OT Bridge (Internal Kubernetes Cluster)
+* **Diagnostic Service:** A Node.js microservice that reads simple telemetry (temperature, vibration).
+* **PLC Control Service (Java/Spring):** The core ICS gateway. It receives REST requests and converts them into Modbus TCP packets, which are then routed through a dedicated firewall to the OT network. This service is intended for machine-to-machine communication and has minimal internal authentication, relying instead on network isolation.
+
+## 3.0 Identity, Authorization, and Control Logic
+Due to the legacy nature of PLCs, the security model is based on network segmentation and implicit trust.
+
+### 3.1 Trust Boundary (The Failure)
+The `PLC Control Service` assumes that any request originating from inside the DMZ Kubernetes cluster is inherently trusted and authorized. It skips JWT validation and only checks for a basic `X-Device-ID` header to determine the target robotic asset.
+
+### 3.2 Modbus Protocol Mapping
+To control the physical speed of the robotic arm, the PLC expects a single, 16-bit integer value written to a specific Modbus Register Address (`40001`).
+*   **Register 40001:** Velocity (0 = stopped, 1000 = normal max speed).
+*   **Safety Hard Limit:** The physical PLC firmware is designed to operate safely up to 1,500. Sending a value over 2,000 causes motor overload, potentially tearing the arm from its mounting.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Java controller was written quickly to support legacy Modbus protocols. It accepts the velocity parameter as a query string and casts it directly to an integer without checking if the resulting value exceeds the safe operating limit (1,500). Tracked as RISK-OT-601.*
+
+### 4.1 Vulnerability A: Exposed Critical Interface & Modbus Injection
+**Taxonomy Pattern:** 2.5 (Critical Infrastructure interface exposure) & 5.4 (Industrial protocol injection)
+**Sub-system:** PLC Control Service (`PUT /api/v1/robotics/command/set_velocity?device_id={id}&velocity={val}`)
+
+**The Deep Architectural Flaw:**
+This attack chains a network misconfiguration with a core data integrity failure.
+
+1.  **Critical Infrastructure Exposure (Pattern 2.5):** The Kubernetes Ingress Rule for the `PLC Control Service` was set to `host: ` and `path: /api/v1/robotics/`, accidentally exposing the control API to the entire internal corporate network. Because the service lacks authentication, any laptop connected to the corporate WiFi can reach the PLC control API bridge.
+
+2.  **Industrial Protocol Injection (Pattern 5.4):** The Java controller blindly accepts the `velocity` query parameter. It converts the input (e.g., "5000") to an integer and embeds it directly into the binary Modbus packet destined for the physical PLC's register `40001`. The code fails to enforce a maximum bound (like `velocity <= 1500`) on the input, resulting in an injection of a physically dangerous command.
+
+**The Exploitation Path:**
+
+1.  **Reconnaissance:** An attacker gains access to the corporate visitor WiFi. They use basic network scanning tools to discover the internal Kubernetes IP address (`10.1.1.50`) and the unauthenticated `/set_velocity` endpoint.
+2.  **Targeting:** The attacker identifies a high-power robotic arm (Device ID: `ARM-99182A`) on the factory floor.
+3.  **The Injection:** The attacker crafts a request to set the speed far above the safe limit: `PUT /api/v1/robotics/command/set_velocity?device_id=ARM-99182A&velocity=5000`.
+4.  **The Execution:** The unauthenticated request passes the exposed Ingress Controller. The Java service accepts the `velocity=5000`, converts it to the Modbus payload, and sends the dangerous command to the physical PLC.
+5.  **The Impact:** The robotic arm attempts to execute the command at five times its designed maximum safe velocity, resulting in immediate physical equipment failure and a catastrophic safety incident on the factory floor (Pattern 5.4).
+
+***
+
+# MANUCONTROL ROBOTICS: SCHEMAS, VULNERABLE CODE, & API CONTRACTS
+**Document Version:** 3.1.2
+**Applies to Architecture:** ManuControl Robotics Fleet API v4.2.0
+
+## 5.0 OT Network Command & Control Schema (Modbus Register Map)
+The system operates on an assumed 16-bit integer safety limit enforced by the application layer, not the network layer.
+
+```modbus
+-- Modbus Register Map for ABB 5000 Series Robot Controller (Slave ID 1)
+ADDRESS: 40001
+DATA TYPE: Holding Register (Integer, 16-bit unsigned)
+DESCRIPTION: Operational Velocity Setting (0-1500 units/sec, Physical Limit)
+ACCESS: Read/Write (Vulnerable Target)
+
+ADDRESS: 40002
+DATA TYPE: Holding Register (Boolean)
+DESCRIPTION: Safety Interlock Override Status (Read-only for operators)
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot)
+The critical flaw is the lack of authorization combined with the application's failure to validate the physical bounds of the input parameter before embedding it into the ICS protocol packet.
+
+### 6.1 Vulnerable PLC Command Controller
+```java
+package com.manucontrol.robotics.controllers;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import com.manucontrol.robotics.modbus.ModbusClient;
+
+@RestController
+@RequestMapping("/api/v1/robotics/command")
+public class PlcCommandController {
+@PutMapping(value = "/set\_velocity")  
+public ResponseEntity\<String\> setVelocity(  
+    @RequestParam("device\_id") String deviceId,  
+    @RequestParam("velocity") int velocity  
+) {  
+    // VULNERABILITY 2.5: Missing Authentication  
+    // Developers rely on network perimeter: NO authentication or authorization check here.  
+    // This service is accessible to any unauthenticated client within the corporate network.  
+
+    // VULNERABILITY 5.4: Missing Input Bounds Check (Industrial Protocol Injection)  
+    // The developer blindly accepts the integer cast from the client request.  
+    /\* FIX:   
+    if (velocity < 0 || velocity > 1500) {  
+        return ResponseEntity.badRequest().body("Error: Velocity must be between 0 and 1500.");  
+    }  
+    \*/  
+
+    try {  
+        // Step 1: Translate REST to Modbus  
+        int targetRegister = 40001;  
+        // The unvalidated 'velocity' value (e.g., 5000) is used directly  
+        ModbusClient.writeRegister(deviceId, targetRegister, velocity);  
+
+        return ResponseEntity.ok("{\\"status\\": \\"COMMAND\_EXECUTED\\", \\"device\_id\\": \\"" + deviceId + "\\", \\"new\_velocity\\": " + velocity + "}");  
+
+    } catch (Exception e) {  
+        return ResponseEntity.status(500).body("{\\"error\\": \\"OT Network Communication Failure\\"}");  
+    }  
+} 
+}
+```
+
+## 7.0 REST API Contract (The Physical Command)
+The contract for the high-consequence endpoint that controls the physical safety critical parameter.
+
+### 7.1 Execute Dangerous Velocity Overwrite
+**Endpoint:** `PUT /api/v1/robotics/command/set_velocity`
+**Description:** Writes a new velocity value to the target robot's PLC register.
+
+**Required Headers:**
+```http
+Host: 10.1.1.50
+Content-Type: application/json
+```
+
+**Request Payload:** (Query parameters only)
+
+**Success Response (200 OK):**
+```json
+{
+"status": "COMMAND_EXECUTED",
+"device_id": "ARM-99182A",
+"new_velocity": 5000
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: CRITICAL INTERFACE EXPOSURE & MODBUS INJECTION (HAR TRACE)
+**Applies to Architecture:** ManuControl Robotics Fleet API v4.2.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 2.5 & Pattern 5.4)
+
+This HTTP Archive (HAR) trace captures the moment the unauthenticated attacker executes the industrial protocol injection. The attacker, operating from the corporate network, targets the exposed internal IP address (`10.1.1.50`). The request uses a simple `PUT` method and contains no `Authorization` header.
+
+The attacker successfully injects a numerical value (`velocity=5000`) far exceeding the safety-critical limit of 1,500. The exposed Java microservice accepts the command, blindly embeds the value into the Modbus TCP packet, and successfully dispatches the physically damaging instruction to the PLC. The `200 OK` response confirms that the unauthenticated command was accepted and executed by the OT network bridge.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Kubernetes Ingress Controller Logs (Misconfigured)",
+"version": "1.8.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T15:31:05.115Z",
+"time": 85,
+"request": {
+"method": "PUT",
+"url": "http://10.1.1.50/api/v1/robotics/command/set_velocity?device_id=ARM-99182A&velocity=5000",
+"httpVersion": "HTTP/1.1",
+"headers": [
+{ "name": "Host", "value": "10.1.1.50" },
+{ "name": "user-agent", "value": "Corporate-WiFi-Scanner/1.0" },
+{ "name": "accept", "value": "application/json" }
+],
+"queryString": [
+{ "name": "device_id", "value": "ARM-99182A" },
+{ "name": "velocity", "value": "5000" }
+],
+"bodySize": 0
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-modbus-response-time-ms", "value": "42" }
+],
+"content": {
+"size": 75,
+"mimeType": "application/json",
+"text": "{\"status\": \"COMMAND_EXECUTED\", \"device_id\": \"ARM-99182A\", \"new_velocity\": 5000}"
+},
+"bodySize": 75
+}
+}
+]
+}
+}
+```
+
+***

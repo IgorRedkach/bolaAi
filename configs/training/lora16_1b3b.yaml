@@ -1,0 +1,33 @@
+run_name: lora16_1b3b_default
+mode: lora16
+base_model: Qwen/Qwen2.5-Coder-3B-Instruct
+dataset:
+  sft_train: data/training/sft/train.jsonl
+  sft_valid: data/training/sft/valid.jsonl
+precision:
+  dtype: bfloat16
+lora:
+  r: 8
+  alpha: 8
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.00005
+  num_train_epochs: 2
+  max_steps: 0
+  gradient_checkpointing: true
+  optimizer: paged_adamw_8bit
+  max_seq_length: 8192
+  sample_packing: true
+outputs:
+  adapters_dir: models/adapters
+  merged_dir: models/merged

@@ -1,0 +1,262 @@
+========================================
+
+Here is the seventeenth system, maintaining the expanded, high-density documentation format. We are shifting into the **EdTech & Online Learning** sector, focusing on a **High-Stakes Examination & Proctoring Gateway**.
+
+
+Here is **Part 1**. Type **c** when you are ready for Part 2.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ScholarNet Assessment Gateway
+**Document Version:** 5.5.0 (FINAL)
+**Classification:** RESTRICTED / ACADEMIC INTEGRITY SCOPE
+**Domain:** EdTech / Online Assessment / Remote Proctoring
+
+## 1.0 Executive Summary
+ScholarNet is a cloud-native Learning Management System (LMS) utilized by major university networks globally. A core component of the platform is the Assessment Engine, which handles the delivery, remote proctoring, and automated grading of high-stakes, timed examinations.
+
+To handle massive concurrency during final exam weeks (often exceeding 50,000 simultaneous test-takers), the architecture decouples the exam delivery frontend (a React Single Page Application) from the asynchronous grading microservices. When a student completes an exam, the frontend application compiles their answers and submits a final JSON payload to the Assessment API Gateway.
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The platform utilizes a modern serverless and microservice blend to ensure elastic scalability.
+
+### 2.1 The Edge & Frontend Delivery
+* **CloudFront CDN:** Serves the static React SPA and handles initial WebRTC handshakes for remote camera proctoring.
+* **API Gateway (AWS):** Routes inbound REST API traffic, enforcing JSON Schema validation (basic type checking) and rate limiting.
+
+### 2.2 The Backend Microservices (Node.js & Prisma)
+* **Exam Session Service:** Manages the active timer, ensuring students do not exceed their allotted exam duration.
+* **Submission & Grading Service:** A Node.js microservice utilizing the Prisma ORM to interact with an Amazon Aurora PostgreSQL database. This service receives the final exam submission, saves the raw answers, and asynchronously pushes an event to an AWS SQS queue to trigger the heavy auto-grading engine.
+
+## 3.0 Identity, Sessions, and Academic Authorization
+Academic integrity requires strict tracking of *who* is submitting *what*, and from *where*.
+
+### 3.1 Student Authentication (OIDC)
+Students authenticate via their university's Single Sign-On (SSO) provider (e.g., Shibboleth or Azure AD) utilizing OpenID Connect (OIDC). ScholarNet issues a session JWT containing the `student_id` and the `active_course_ids`.
+
+### 3.2 Exam State Machine
+An exam goes through strict state transitions: `UNATTEMPTED` -> `IN_PROGRESS` -> `SUBMITTED` -> `GRADED`. The API enforces that a student can only submit answers if their specific `exam_attempt_id` is currently marked as `IN_PROGRESS`.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: To accelerate the release of the "Offline Mode" feature (allowing students with poor internet to submit exams once reconnected), the development team bypassed strict Data Transfer Object (DTO) mapping on the submission endpoint, directly passing the parsed JSON request body into the Prisma ORM `update` function. Tracked as RISK-ED-210.*
+
+**Taxonomy Pattern:** 9.1 (Mass Assignment / Auto-Binding) & 8.3 (Trusting Client-Side Logic)
+**Sub-system:** Submission Service (`/api/v2/assessments/attempts/{attempt_id}/submit`)
+
+**The Deep Architectural Flaw:**
+1.  **Mass Assignment (Pattern 9.1):** The Node.js application receives the exam submission payload. Instead of explicitly extracting only the allowed fields (e.g., `answers_array`, `time_spent_seconds`), the code takes the entire incoming JSON object `req.body` and passes it directly into the Prisma ORM database update method.
+2.  **Trusting Client-Side Logic (Pattern 8.3):** The database table representing the exam attempt contains administrative fields that the automated grading engine uses, such as `final_score`, `is_manually_overridden`, and `exam_status`. Because the ORM blindly binds the request body to the database entity, an attacker can simply append these administrative fields to their HTTP POST request.
+
+1.  A student begins a high-stakes final exam. They realize they do not know the answers.
+2.  The student opens their browser's Developer Tools (Network Tab) and clicks the "Submit Exam" button to capture the outbound HTTP POST request.
+3.  The legitimate payload looks like: `{"answers": [{"q1": "A"}, {"q2": "C"}], "time_spent": 3400}`.
+4.  The student intercepts the request using an intercepting proxy (like Burp Suite) or simply resends it via `fetch()` in the console. They inject new, highly privileged administrative parameters into the JSON body: `{"answers": [{"q1": "A"}], "time_spent": 3400, "final_score": 100.0, "exam_status": "GRADED", "is_manually_overridden": true}`.
+5.  **The Execution:** The backend Node.js server receives this augmented payload. Because of the Mass Assignment flaw, the ORM dynamically constructs an SQL `UPDATE` statement that includes the injected fields. 
+6.  **The Impact:** The student's exam is saved with a perfect `100.0` score. Because the status is explicitly forced to `GRADED` and `is_manually_overridden` is set to `true`, the asynchronous auto-grading engine skips this exam entirely, assuming a professor already graded it manually. The student successfully secures a perfect score without answering the questions.
+
+***
+
+
+
+***
+
+**Document Version:** 2.2.4
+**Applies to Architecture:** ScholarNet Assessment Gateway v5.5.0
+
+## 5.0 Assessment Engine Schema (PostgreSQL)
+The relational database tracks every exam attempt. Crucially, it stores both student-provided data (answers) and system-generated administrative data (scores, grading status) within the exact same database row.
+
+```sql
+-- Core Exam Attempts Table
+CREATE TABLE exam_attempts (
+    attempt_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_id UUID NOT NULL,
+    student_id VARCHAR(100) NOT NULL, -- Corresponds to SSO Subject
+    
+    -- Student-Controlled Data
+    answers_payload JSONB DEFAULT '{}',
+    time_spent_seconds INT DEFAULT 0,
+    
+    final_score DECIMAL(5, 2), -- e.g., 95.50
+    exam_status VARCHAR(20) DEFAULT 'IN_PROGRESS' 
+        CHECK (exam_status IN ('UNATTEMPTED', 'IN_PROGRESS', 'SUBMITTED', 'GRADED')),
+    is_manually_overridden BOOLEAN DEFAULT FALSE,
+    grading_notes TEXT,
+    
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    submitted_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_student_exam ON exam_attempts(student_id, exam_id);
+```
+
+## 6.0 The Flawed Implementation (Node.js / Prisma ORM)
+
+```javascript
+// File: controllers/submissionController.js
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+// POST /api/v2/assessments/attempts/:attempt_id/submit
+exports.submitExam = async (req, res) => {
+    const attemptId = req.params.attempt_id;
+    const studentId = req.user.student_id; // Extracted from verified JWT
+
+    try {
+        // Step 1: Verify the attempt belongs to the student and is in progress
+        const attempt = await prisma.examAttempt.findUnique({ where: { attempt_id: attemptId } });
+        
+        if (!attempt || attempt.student_id !== studentId || attempt.exam_status !== 'IN_PROGRESS') {
+            return res.status(403).json({ error: "Invalid or expired exam attempt." });
+        }
+
+        // The developer passes the raw 'req.body' directly into the ORM update payload.
+        // There is NO explicit property filtering (e.g., using lodash.pick or a DTO class).
+        // If the attacker includes { "final_score": 100, "exam_status": "GRADED" } in req.body, 
+        // Prisma will dynamically generate an SQL query to update those restricted columns.
+        
+        const updatedAttempt = await prisma.examAttempt.update({
+            where: { attempt_id: attemptId },
+            data: {
+                ...req.body, // THE FLAW: Spreading untrusted client input over the DB model
+                submitted_at: new Date()
+            }
+        });
+
+        // STEP 2: Async Grading Trigger
+        // If the attacker forced exam_status to 'GRADED', the worker will ignore this SQS message.
+        if (updatedAttempt.exam_status === 'SUBMITTED') {
+            await sqs.sendMessage({ QueueUrl: process.env.GRADING_QUEUE, MessageBody: attemptId });
+        }
+
+        res.status(200).json({ status: "Exam successfully submitted." });
+
+    } catch (error) {
+        res.status(500).json({ error: "Submission failed." });
+    }
+};
+```
+
+## 7.0 REST API Contracts (The Submission Payload)
+This contract illustrates the extreme danger of trusting client-side logic and failing to explicitly define allowed inbound parameters at the API gateway layer.
+
+### 7.1 Intended Safe Payload (Legitimate Student)
+The React frontend application is programmed to only send the answers array and the local timer data.
+
+**Target URI:** `POST /api/v2/assessments/attempts/att-99182A/submit`
+**Expected Request Payload:**
+```json
+{
+  "answers_payload": {
+    "q1": "A",
+    "q2": "D",
+    "q3": "B"
+  },
+  "time_spent_seconds": 3412,
+  "exam_status": "SUBMITTED"
+}
+```
+*Behavior:* The ORM updates the answers, sets the status to `SUBMITTED`, and triggers the SQS queue for the auto-grader to eventually score the exam.
+
+### 7.2 The Mass Assignment Payload (Attacker)
+The malicious student intercepts the outbound HTTP request. They realize the API uses generic JSON binding, so they inject administrative database column names directly into the root of the JSON payload.
+
+**Target URI:** `POST /api/v2/assessments/attempts/att-99182A/submit`
+**Malicious Request Payload:**
+```json
+{
+  "answers_payload": {
+    "q1": "A"
+  },
+  "time_spent_seconds": 3412,
+  "exam_status": "GRADED",
+  "final_score": 100.00,
+  "is_manually_overridden": true,
+  "grading_notes": "Perfect score validated by system admin."
+}
+```
+*Behavior:* The ORM accepts the payload. It overwrites the administrative columns. Because the status is now `GRADED`, the SQS grading worker logic bypasses the exam, cementing the fraudulent 100% score permanently in the academic record.
+
+***
+
+**End of Part 2.**
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing the exact HTTP transaction where the student submits the augmented payload, successfully forcing the backend to return a `200 OK` while simultaneously altering their own final grade.
+
+**Part 3: Synthetic Telemetry Artifact (HAR Trace) & Deep Analysis**
+
+***
+
+**Applies to Architecture:** ScholarNet Assessment Gateway v5.5.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 8.3)
+
+
+Inside the JSON `postData`, the attacker has included the expected student-controlled fields (`answers_payload`, `time_spent_seconds`). However, they have maliciously injected three administrative fields: `"exam_status": "GRADED"`, `"final_score": 100.0`, and `"is_manually_overridden": true`. Because the backend Node.js server lacks strict Data Transfer Object (DTO) validation and blindly spreads the `req.body` into the Prisma ORM, these injected fields are written directly to the PostgreSQL database. The `200 OK` response confirms the payload was accepted, cementing the fraudulent perfect score and permanently bypassing the asynchronous SQS auto-grading queue.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "AWS API Gateway / WAF Audit Logs",
+      "version": "2.4.1"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-09T15:42:10.055Z",
+        "time": 185,
+        "request": {
+          "method": "POST",
+          "url": "https://api.scholarnet.edu/api/v2/assessments/attempts/att-99182A/submit",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.scholarnet.edu" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWJqZWN0Ijoic3R1ZF84ODE5MkEiLCJyb2xlIjoic3R1ZGVudCJ9..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "user-agent", "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"answers_payload\": {\"q1\": \"A\", \"q2\": \"C\", \"q3\": \"B\"}, \"time_spent_seconds\": 3412, \"exam_status\": \"GRADED\", \"final_score\": 100.0, \"is_manually_overridden\": true, \"grading_notes\": \"System Admin Override: Validated.\"}"
+          },
+          "bodySize": 218
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-orm-latency-ms", "value": "45" }
+          ],
+          "content": {
+            "size": 88,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"SUCCESS\", \"message\": \"Exam successfully submitted and saved to repository.\"}"
+          },
+          "bodySize": 88
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+1. **Mass Assignment / Auto-Binding Detection (Pattern 9.1):**
+    * **Schema Discrepancy:** The AI model must be trained to recognize the semantic mismatch between the endpoint's purpose (`/submit`, an action taken by a student) and the fields present in the payload (`final_score`, `is_manually_overridden`, attributes normally reserved for a professor or system admin). 
+    * **Contextual Anomaly Detection:** The model should learn that passing highly privileged variables (like `score`, `role`, `is_admin`, `balance`) alongside standard user-input data in a single, flat JSON object is the definitive fingerprint of a Mass Assignment probing attack.
+
+2. **Trusting Client-Side State Machines (Pattern 8.3):**
+    * **State Injection:** The model must identify the injection of `"exam_status": "GRADED"`. In a secure architecture, the API gateway dictates the state transition based on the action (e.g., calling `/submit` should force the server to internally transition the state to `SUBMITTED`). Allowing the client-side JSON to dictate the final state variable enables the attacker to manipulate the backend event-driven architecture (in this case, bypassing the SQS grading worker).
+
+3. **The Danger of Modern ORMs:**
+
+========================================
+========================================
+
+========================================

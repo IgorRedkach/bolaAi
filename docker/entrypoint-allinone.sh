@@ -3,8 +3,8 @@ set -e
 
 echo "=========================================="
 echo "  BOLA AI — Starting (all-in-one)"
-echo "  Model: ${OLLAMA_MODEL:-bola-analyzer} (pre-baked)"
-echo "  Knowledge: 215 BOLA examples (pre-loaded)"
+echo "  Model: ${OLLAMA_MODEL:-bola-analyzer}"
+echo "  Knowledge: BOLA security examples (pre-loaded)"
 echo "=========================================="
 
 # --- 1. Start Ollama in the background ---
@@ -26,22 +26,44 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# --- 2. Verify model is present (baked into image during build) ---
+# --- 2. Set up model (from trained bundle or base pull) ---
 MODEL_NAME="${OLLAMA_MODEL:-bola-analyzer}"
-ALLOW_MODEL_PULL="${BOLA_AI_ALLOW_MODEL_PULL:-0}"
+ALLOW_MODEL_PULL="${BOLA_AI_ALLOW_MODEL_PULL:-1}"
+MODEL_READY=0
+
 if ollama list 2>/dev/null | grep -q "${MODEL_NAME}"; then
-  echo "[bola-ai] Model ${MODEL_NAME} found (pre-baked)."
-else
+  echo "[bola-ai] Model ${MODEL_NAME} already loaded."
+  MODEL_READY=1
+fi
+
+# Try importing trained bundle (preferred — offline, deterministic)
+if [ "$MODEL_READY" = "0" ] && [ -f /app/models/published/LATEST ]; then
+  BUNDLE_NAME=$(cat /app/models/published/LATEST | tr -d '\n\r')
+  BUNDLE_DIR="/app/models/published/${BUNDLE_NAME}"
+  if ls "${BUNDLE_DIR}"/trained_model_bundle.part-* >/dev/null 2>&1; then
+    echo "[bola-ai] Importing trained model bundle: ${BUNDLE_NAME}..."
+    cat "${BUNDLE_DIR}"/trained_model_bundle.part-* > /tmp/trained_model_bundle.tar && \
+    tar -xf /tmp/trained_model_bundle.tar -C /app/models/published && \
+    rm -f /tmp/trained_model_bundle.tar
+    if ollama create "${MODEL_NAME}" -f /app/models/published/active/Modelfile 2>&1; then
+      echo "[bola-ai] Trained bundle imported successfully."
+      MODEL_READY=1
+    else
+      echo "[bola-ai] Bundle import failed — falling back to base model pull."
+    fi
+  fi
+fi
+
+# Fallback: pull base model from internet (requires BOLA_AI_ALLOW_MODEL_PULL=1)
+if [ "$MODEL_READY" = "0" ]; then
   if [ "$ALLOW_MODEL_PULL" = "1" ]; then
-    echo "[bola-ai] WARNING: ${MODEL_NAME} not found — creating from Modelfile..."
-    echo "[bola-ai] Pulling qwen2.5-coder:3b (this requires internet)..."
-    ollama pull qwen2.5-coder:3b
-    ollama create "${MODEL_NAME}" -f /app/Modelfile
-    echo "[bola-ai] Model ready."
+    echo "[bola-ai] Pulling qwen2.5-coder:3b base model (requires internet)..."
+    ollama pull qwen2.5-coder:3b && ollama create "${MODEL_NAME}" -f /app/Modelfile
+    echo "[bola-ai] Base model ready."
+    MODEL_READY=1
   else
-    echo "[bola-ai] ERROR: required model '${MODEL_NAME}' is missing in the image."
-    echo "[bola-ai] Refusing runtime model pull to preserve offline/quality guarantees."
-    echo "[bola-ai] Rebuild image or run with BOLA_AI_ALLOW_MODEL_PULL=1 to allow fallback."
+    echo "[bola-ai] ERROR: No model found and BOLA_AI_ALLOW_MODEL_PULL=0."
+    echo "[bola-ai] Set BOLA_AI_ALLOW_MODEL_PULL=1 to allow internet fallback."
     exit 1
   fi
 fi

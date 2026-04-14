@@ -1,0 +1,14 @@
+[
+  {
+    "context": "REVIEW-SYSTEM-0004-finished",
+    "expected_score_4": 4,
+    "live_score_4": 4,
+    "live_not_worse": true
+  },
+  {
+    "context": "REVIEW-SYSTEM-0010-finished",
+    "expected_score_4": 4,
+    "live_score_4": 4,
+    "live_not_worse": true
+  }
+]

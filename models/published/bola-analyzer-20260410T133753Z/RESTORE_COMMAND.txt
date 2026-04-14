@@ -1,0 +1,1 @@
+cat trained_model_bundle.part-* > trained_model_bundle.tar && tar -xf trained_model_bundle.tar

@@ -1,0 +1,242 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** CartVantage Serverless Commerce
+**Document Version:** 4.0.2 (FINAL)
+**Classification:** PUBLIC / PCI-DSS SCOPE
+**Domain:** Retail / E-Commerce / Order Management
+
+## 1.0 Executive Summary
+CartVantage is a massively scalable, serverless e-commerce backend built to handle extreme traffic spikes (e.g., Black Friday sales). It provides headless commerce APIs for web storefronts and mobile apps.
+
+The architecture relies entirely on ephemeral AWS Lambda functions connected via Amazon EventBridge and API Gateway. State is persisted in Amazon DynamoDB. Payment processing is offloaded to Stripe, utilizing a decoupled asynchronous webhook and polling model to finalize orders.
+
+## 2.0 Network Topology & Serverless Microservices
+The system is decomposed into three isolated microservices, each with its own DynamoDB table and API Gateway route.
+
+### 2.1 Cart Service (`/api/v1/cart`)
+* **Function:** Manages the active shopping session. Users add/remove SKUs (Stock Keeping Units).
+* **Data Source:** Reads base prices from the Product Catalog.
+
+### 2.2 Checkout & Payment Service (`/api/v1/checkout`)
+* **Function:** Bridges the CartVantage platform with the external Stripe API. 
+* **Initialization:** Generates a Stripe `PaymentIntent` client secret so the frontend can render the credit card UI.
+* **Completion:** Marks the internal order as `PAID` once the frontend confirms the Stripe transaction was successful.
+
+### 2.3 Fulfillment Service (EventBridge)
+* **Function:** Once an order is marked `PAID`, an EventBridge rule triggers the Warehouse Lambda function to pack and ship the physical goods.
+
+## 3.0 Identity and Access Control
+CartVantage supports both Guest checkout and Authenticated users. 
+
+### 3.1 User Authentication
+Registered users authenticate via Amazon Cognito. The API Gateway utilizes a Cognito Authorizer to validate the JWT and inject the `cognito:username` into the Lambda event payload. 
+Cart IDs are strictly bound to the authenticated user ID.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 DynamoDB Order Schema
+The system uses a Single-Table Design in Amazon DynamoDB. When an order is created during the `init` phase, the items are copied from the active cart into a static Order record.
+
+```json
+{
+  "PK": "USER#usr_99182A",
+  "SK": "ORDER#ord_55419B",
+  "Type": "Order",
+  "Status": "PENDING_PAYMENT",
+  "StripePaymentIntentId": "pi_3MtwBwLkdIwHu7ix28a3tq",
+  "Items": [
+    {
+      "SKU": "LAPTOP-PRO-15",
+      "Quantity": 1,
+      "UnitBasePriceCents": 250000 
+    }
+  ],
+  "FrontendDeclaredTotalCents": 200, 
+  "CreatedAt": "2026-04-08T19:20:00Z"
+}
+```
+*Security Note: Notice the discrepancy between the `UnitBasePriceCents` ($2,500.00) and the `FrontendDeclaredTotalCents` ($2.00). Because the backend does not enforce mathematical integrity between these two fields, the schema blindly accepts the frontend's assertion.*
+
+## 6.0 Implementation Notes (Node.js Lambda Snippet)
+
+The backend completely trusts the `order_total` provided in the HTTP request body instead of calculating it from the database catalog.
+
+```javascript
+exports.handler = async (event) => {
+    const payload = JSON.parse(event.body);
+    const userId = event.requestContext.authorizer.claims.username;
+
+    // An operator can send {"order_total": 200} for a $2,500 cart.
+    const amountToCharge = payload.order_total; 
+
+    // Create the Stripe PaymentIntent
+    const paymentIntent = await stripe.paymentIntents.create({
+        amount: amountToCharge,
+        currency: 'usd',
+        metadata: { userId: userId, cartId: payload.cart_id }
+    });
+
+    // Save PENDING order to DynamoDB
+    await saveOrderToDB(userId, payload.cart_id, paymentIntent.id, amountToCharge);
+
+    return { statusCode: 200, body: JSON.stringify({ client_secret: paymentIntent.client_secret }) };
+};
+```
+
+The final step verifies the payment succeeded, but fails to verify that the *amount paid* matches the true value of the goods being released.
+
+```javascript
+exports.handler = async (event) => {
+    const payload = JSON.parse(event.body);
+
+    // Fetch the payment status from Stripe
+    const intent = await stripe.paymentIntents.retrieve(payload.payment_intent_id);
+
+    // It checks if the payment succeeded, but NEVER checks if:
+    // intent.amount === calculateTrueCartValue(order.Items)
+    if (intent.status === 'succeeded') {
+
+        // Mark order as PAID and trigger warehouse EventBridge rule
+        await updateOrderStatus(payload.order_id, 'PAID');
+        await triggerFulfillment(payload.order_id);
+
+        return { statusCode: 200, body: JSON.stringify({ status: "SUCCESS" }) };
+    }
+
+    return { statusCode: 400, body: JSON.stringify({ error: "Payment not completed" }) };
+};
+```
+
+## 7.0 REST API Contracts (Checkout Flow)
+This is the HTTP contract the React frontend uses to orchestrate the checkout.
+
+### 7.1 Initialize Checkout
+**Endpoint:** `POST /api/v1/checkout/init`
+**Description:** Generates the Stripe token needed to render the credit card input fields.
+**Required Headers:** `Authorization: Bearer <Cognito JWT>`
+**Expected Request Payload:**
+```json
+{
+  "cart_id": "cart_88192",
+  "order_total": 250000 
+}
+```
+
+### 7.2 Complete Checkout
+**Endpoint:** `POST /api/v1/checkout/complete`
+**Description:** Finalizes the order after the frontend receives the success callback from Stripe.
+**Required Headers:** `Authorization: Bearer <Cognito JWT>`
+**Expected Request Payload:**
+```json
+{
+  "order_id": "ord_55419B",
+  "payment_intent_id": "pi_3MtwBwLkdIwHu7ix28a3tq"
+}
+```
+
+
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing the exact HTTP sequence where the operator intercepts the `init` request, changes the price to $2.00, and successfully finalizes the order for a high-value item.
+
+
+
+# SYNTHETIC ARTIFACT: CLIENT-ASSUMED AUTHORITY & WORKFLOW DECOUPLING (HAR TRACE)
+**Applies to Architecture:** CartVantage Serverless Commerce v4.0.2
+
+This HTTP Archive (HAR) trace captures the two-step checkout sequence. The operator (`usr_99182A`) intercepts the first request to `/checkout/init` and manually alters the `order_total` to `200` (which equals $2.00). After successfully paying the $2.00 via the legitimate Stripe UI, their browser sends the success token to `/checkout/complete`. The backend verifies the token is valid, marks the order as paid, and releases the $2,500.00 laptop for shipping.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "AWS API Gateway CloudWatch Exporter",
+      "version": "2.0.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T19:20:05.112Z",
+        "time": 215,
+        "request": {
+          "method": "POST",
+          "url": "https://api.cartvantage.com/api/v1/checkout/init",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.cartvantage.com" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfOTkxODJBIiwiY29nbml0bzp1c2VybmFtZSI6InVzcl85OTE4MkEifQ..." },
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"cart_id\": \"cart_88192\", \"order_total\": 200}"
+          },
+          "bodySize": 45
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 112,
+            "mimeType": "application/json",
+            "text": "{\"client_secret\": \"pi_3MtwBwLkdIwHu7ix28a3tq_secret_abc123\", \"order_id\": \"ord_55419B\"}"
+          },
+          "bodySize": 112
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T19:21:30.441Z",
+        "time": 450,
+        "request": {
+          "method": "POST",
+          "url": "https://api.cartvantage.com/api/v1/checkout/complete",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.cartvantage.com" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfOTkxODJBIiwiY29nbml0bzp1c2VybmFtZSI6InVzcl85OTE4MkEifQ..." },
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"order_id\": \"ord_55419B\", \"payment_intent_id\": \"pi_3MtwBwLkdIwHu7ix28a3tq\"}"
+          },
+          "bodySize": 76
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 75,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"SUCCESS\", \"message\": \"Order PAID. Fulfillment triggered.\"}"
+          },
+          "bodySize": 75
+        }
+      }
+    ]
+  }
+}
+```
+
+## 8.0 Operations and Governance Addendum
+### 8.1 Performance and Capacity
+- API and background-processing SLOs are tracked with percentile latency and saturation metrics.
+- Capacity planning includes seasonal traffic profiles and failover headroom.
+- Queue and cache controls protect interactive workflows under burst load.
+
+### 8.2 Observability and Auditability
+- Structured logs include correlation identifiers and actor/request metadata.
+- Dashboards surface error budgets, retry pressure, and downstream dependency health.
+- Audit exports support incident reconstruction and control validation.
+
+### 8.3 Change Management
+- Changes are deployed via staged rollout with rollback criteria and ownership gates.
+- Runbooks define degraded-mode behavior for core dependency failures.
+- Post-release verification confirms contract compatibility and operational baselines.

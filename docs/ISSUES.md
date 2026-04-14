@@ -711,3 +711,143 @@ Ingestion took 9 minutes, then auto-analysis timed out at 300s. Chat queries als
 - no full findings sections/truncation in q6 response
 
 ---
+
+## Issue 40: Context window utilization mismatch (`n_ctx_seq` below model train context)
+
+**Status:** OPEN
+
+**User-reported symptom:** Logs show `n_ctx_seq (8192) < n_ctx_train (32768) -- the full capacity of the model will not be utilized`.
+
+**Why this matters:** This is not a crash, but it is an important quality/capacity concern. Lower runtime context can improve speed, but may degrade long-document reasoning (HAR/Salesforce) and can look like an underconfigured model on capable hardware.
+
+**Current gap:**
+1. No benchmarked policy in repo for when to run 8k vs 16k vs 32k context.
+2. E2E does not enforce context-capacity checks against long fixtures.
+3. Runtime defaults are not tied to measured quality/latency trade-offs on this hardware profile.
+
+**Acceptance:**
+1. Add reproducible benchmark evidence (quality + latency) for at least 8k/16k/32k on long fixture(s).
+2. Document and enforce selected default/profile in config/docs.
+3. Add regression guard for chosen context policy.
+
+**Autotest/validation target:** add benchmark evidence under `docs/live_e2e_test_timings.md` (or dedicated perf doc) plus config-policy test.
+
+---
+
+## Issue 41: [E2E-LOOP] REST fixture q3 response hallucinates GraphQL operations
+
+**Status:** OPEN
+
+**Fixture:** `tests/fixtures/doc_onetime_supply_chain_api.md`
+
+**Observed bad response (`docs/e2e_loop_last_run.json`, `report_q3_full` from live run):**
+1. Invented GraphQL mutation `updateShipmentStatus` although fixture is REST-only.
+2. Mixed wrong endpoint/method semantics (shipment path with bulk request body shape).
+3. Added non-grounded generic security claims not tied to explicit fixture evidence.
+
+**Impact:** Follow-up guidance becomes untrustworthy; auditors can execute invalid tests.
+
+**Acceptance:**
+1. For q3 wording "If the doc has GraphQL...", non-GraphQL fixtures must explicitly return "not applicable" and remain REST-grounded.
+2. No GraphQL tokens/operations in q3 response when fixture has no GraphQL.
+3. Add dedicated e2e-loop regression test for this scenario.
+
+**Autotest target:** new test in `tests/test_e2e_loop_failures.py`.
+
+---
+
+## Issue 42: [E2E-LOOP] Runbook response still inverts BOLA outcome interpretation
+
+**Status:** OPEN
+
+**Observed in live E2E (`report_q4_detail_runbook_full`):**
+1. In supply-chain runbook: `A=200` and `B=403` interpreted as confirmed BOLA/BAC (incorrect).
+2. In Salesforce HAR-like runbook: contradictory wording maps `403` to missing authorization in places.
+3. Runbook sometimes uses different object IDs rather than same-object two-user comparison.
+
+**Impact:** High-severity logic error; can produce false positives in security testing conclusions.
+
+**Acceptance:**
+1. q4 runbook must consistently interpret `A=200, B=403/404` as likely enforced access control (not confirmed BOLA).
+2. q4 must require same-object two-user comparison.
+3. Add e2e-loop regression for q4 interpretation rules.
+
+**Autotest target:** new q4 regression in `tests/test_e2e_loop_failures.py`.
+
+---
+
+## Issue 43: [E2E-LOOP] E2E harness under-validates response correctness and grounding
+
+**Status:** PASSED
+
+**Problem:** `scripts/run_agent_e2e_loop_once.py` historically recorded outputs but did not assert critical quality failures (hallucinated operations, invalid BOLA logic, unknown paths in q1-q4), so a run could appear complete while quality was unacceptable.
+
+**Resolution (2026-04-06):**
+1. Added `_check_logical_correctness(query, report)` to `scripts/run_agent_e2e_loop_once.py` — detects whether the response type matches the question type (runbook → numbered steps; curl-generation → ≥2 curls with two tokens; path-audit → YES/NO entries; request-generation → curl with auth; security analysis → findings/rationale; GraphQL → steps or "not applicable").
+2. Per-step `logical_match` and `logical_notes` in the step log; `automated_checks.logical_correctness_summary` captures all failures at the end of the run.
+3. Terminal output explicitly lists logical correctness failures so they are visible to the agent.
+4. `_audit_response` already provided per-step unknown-path and suspicious-phrase tracking for q1-q4; now complemented by logical correctness.
+5. Tests added in `tests/test_e2e_script_audit.py` (8 logical-correctness tests + 1 audit test).
+6. `docs/E2E_TESTING.md` updated with per-response logical correctness table.
+7. `docs/AGENT_PROMPT_FULL_CYCLE.md` updated with R0 check in the per-response checklist.
+
+**Autotests when passed:** `tests/test_e2e_script_audit.py` (all 9 tests); live evidence in `docs/e2e_loop_last_run.json` (`automated_checks.logical_correctness_summary.all_logical_matches = true`).
+
+---
+
+## Issue 44: [E2E-LOOP] Initial broad analysis query can monopolize lock for 2+ minutes
+
+**Status:** OPEN
+
+**Evidence (local dev stack, 2026-04-06):**
+1. Manual q1 probe (`"As a security reviewer reading this API doc only..."`) remained running for ~133s and was manually terminated.
+2. During that interval, fast-path follow-up requests queued on analyze lock (`Analyze lock: waiting`) despite being deterministic/low-cost.
+3. Earlier full-loop runs showed 7–10 minute wall-clock for 6-step E2E when q1 dominates.
+
+**Root cause hypothesis:**
+1. Broad q1 prompt triggers long generative output with high token budget (`BOLA_AI_OLLAMA_NUM_PREDICT=768`) on CPU.
+2. Foreground serialize lock means one long generation stalls all subsequent requests.
+
+**Acceptance:**
+1. Keep deterministic fast-path queries outside lock (implemented) and verify no queue wait for q3/q4/q5/q6-style prompts.
+2. Add additional mitigation for q1-style long generations (token-budget/profile tuning or staged response strategy) with measured wall-clock reduction.
+3. Record before/after timings for q1 and full 6-step loop.
+
+**Autotest/validation target:** updated performance evidence in `docs/live_e2e_test_timings.md` + regression check for fast-path lock bypass.
+
+---
+
+## Issue 45: Full-request generation is incomplete for user asks like "please generate me full request for description change"
+
+**Status:** PASSED
+
+**User-facing failure:** When users ask for a complete request payload for a concrete action (for example updating description), responses can be partial: missing method, missing full path, missing headers, or missing JSON body shape.
+
+**Why this is high impact:**
+1. Users expect copy-pasteable requests for immediate verification.
+2. Partial snippets increase test mistakes and reduce trust.
+3. For REST workflows, curl should be the primary output format when request generation is explicitly requested.
+
+**Observed quality gaps:**
+1. Prompt/training favors narrative findings over strict request templates.
+2. No deterministic fallback for "full request" wording when endpoint/action is known.
+3. E2E checks focus on path grounding but not full request completeness.
+
+**Acceptance:**
+1. If user explicitly asks for a full request, output includes:
+   - HTTP method
+   - full URL/path
+   - required headers (at minimum `Authorization`, and `Content-Type` for JSON body)
+   - request body for write operations
+2. For REST endpoints, output is curl-first by default.
+3. Add regression tests for "full request for description change" style prompts.
+4. Update training prompts/examples to reinforce full-request formatting.
+
+**Autotest target:** `tests/test_agent.py::test_short_circuit_full_request_description_change_returns_complete_curl` + manual API check via `/analyze` with explicit description-change ask.
+
+**Resolution notes (2026-04-06):**
+1. Added deterministic fast path in `src/bola_ai/agent/runner.py` for explicit "full request" asks.
+2. For REST requests, output is curl-first with method, path/full target, auth header, JSON header, and body for write methods.
+3. Removed fake-host fallback in short-circuit curl generation when no grounded base URL exists (path-only output instead of `https://api.example.com`).
+
+---

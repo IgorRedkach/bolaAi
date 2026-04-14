@@ -1,0 +1,238 @@
+Here is the twenty-fourth system, focusing on high-stakes failures in the Financial Services sector. We are examining a Third-Party Credit Scoring API used for real-time loan origination decisions.
+
+For the vulnerabilities, we are focusing on Pattern 1.10 (Cross-Service Identity Propagation Drift) combined with Pattern 8.1 (Race Condition / Concurrency Gaps). This scenario demonstrates how a lag in the internal service mesh allows an attacker to exploit a short-lived concurrency window, replacing their own unverified user ID in the request context with the ID of a highly creditworthy victim, enabling them to execute a BOLA-type attack on a financial scoring system.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** CreditDecision Real-Time Scoring API
+**Document Version:** 5.0.0 (FINAL)
+**Classification:** CRITICAL FINANCIAL / GLBA & FCRA COMPLIANCE SCOPE
+**Domain:** Financial Services / Loan Origination / Consumer Credit Scoring
+
+## 1.0 Executive Summary
+CreditDecision is a private API used by banks and auto lenders to fetch pre-approval credit scores and eligibility checks instantly. The system integrates with major credit bureaus (Equifax, TransUnion, Experian) but caches the resulting scores and pre-qualifications for 30 days to avoid unnecessary bureau inquiries and associated costs.
+
+The API is transactional: an application must first submit a full, verified consumer profile (name, SSN, address). This submission returns a short-lived, transaction-scoped request_id (e.g., RID-88192A). All subsequent actions, like fetching the score or the pre-approval letter, must reference this request_id.
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The architecture is designed for low-latency score delivery but sacrifices immediate consistency for speed.
+
+### 2.1 The Ingress & State Creation Layer
+* **API Gateway (Go-lang):** Fronts all traffic. It validates the B2B partner's API key and rate-limits requests.
+* **Profile Submission Service (Node.js):** Receives the full consumer profile and generates the short-lived request_id in the database.
+
+### 2.2 The Internal Service Mesh (The Flaw)
+* **Credit Fetcher Service (Python):** An isolated microservice that takes the request_id, looks up the consumer's profile, executes the synchronous call to the external credit bureau API, saves the score, and updates the profile status to READY. This call takes 500ms-1200ms.
+
+* **Score Retrieval Service (Rust):** A highly optimized service that fetches the final score from the cache/database based on the request_id and is intended to be called only after the status is READY.
+
+## 3.0 Identity, Context, and Transaction Scope
+Authorization must ensure that Partner A cannot fetch a score belonging to Partner B, and that a score cannot be fetched before the bureau returns the results.
+
+### 3.1 Authorization Scope (The Context)
+The Go-lang API Gateway correctly validates the partner_api_key and injects the partner_id and the authenticated user_id (the loan officer) into the HTTP request headers as it routes to the mesh.
+
+### 3.2 The Flawed Identity Propagation
+When the Python Credit Fetcher Service completes the bureau call, it must notify the Score Retrieval Service that the data is ready. This notification is done via an internal Kafka event, but the event structure only includes the request_id and the final score, omitting the original partner_id context. This context is meant to be re-read from the database, but a concurrency gap prevents this.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The ScoreRetrievalService was heavily optimized to read from a local Redis cache to shave 50ms off score delivery. The logic was modified to accept a request_id and the partner_id as separate arguments. If the partner_id parameter is missing or stale, it defaults to checking the database, which leads to a concurrency flaw. Tracked as RISK-FIN-BOLA-110.*
+
+### 4.1 Vulnerability A: Identity Propagation Drift & Concurrency BOLA
+**Taxonomy Pattern:** 1.10 (Cross-service identity propagation drift) & 8.1 (Race condition / concurrency gaps)
+**Sub-system:** Score Retrieval Service (`GET /api/v5/scores/{request_id}`)
+
+**The Deep Architectural Flaw:**
+This attack leverages the timing gap between two services to execute a BOLA-style identity swap.
+
+1. **Concurrency Gap (Pattern 8.1):** When a user submits a profile, it takes 500-1200ms for the bureau score to return. During this window, the initial request_id (RID-Attacker) is in the PENDING state.
+
+2. **Identity Propagation Drift (Pattern 1.10):** The attacker's goal is to fetch a victim's credit score (RID-Victim) using their own partner_id (PARTNER-A), bypassing the rule that only PARTNER-B can see RID-Victim.
+
+3. **The Race:** The attacker submits their own profile (RID-Attacker) and immediately begins polling the Score Retrieval Service with a malicious request: GET /api/v5/scores/RID-Attacker?partner_id=PARTNER-B. (Note: Partner B's ID is used in the query string). The request is blocked because RID-Attacker is not yet READY.
+
+4. **The Attack:** The attacker simultaneously sends a second, genuine request for the victim's already READY score: GET /api/v5/scores/RID-Victim.
+
+5. **The Collision:** The vulnerability lies in the fact that the Score Retrieval Service uses the request_id for the main data lookup, but the partner_id is only used for the final authorization check. By using their own partner_id in the query string, the service's internal logic, due to an improper SELECT * join, returns the victim's score but applies the attacker's partner_id to the final check, causing the authorization to fail-open in the attacker's favor.
+
+**The Exploitation Path:**
+
+1. **The Setup:** An attacker (Partner A) has access to a list of request_ids belonging to Partner B (e.g., from a search endpoint, Pattern 1.3).
+2. **The Concurrent Poll:** The attacker sends a rapid burst of identical requests to GET /api/v5/scores/RID-Victim using their own PARTNER-A API Key, while spoofing the partner_id header or query param.
+3. **The Execution:** The service's internal authorization middleware, due to a flaw in handling partner_id context passed via headers vs. query params, momentarily confuses the authenticated partner (PARTNER-A) with the requested resource's owner (PARTNER-B), allowing the victim's (RID-Victim) full score and data to be exposed to the unauthorized party.
+
+***
+
+# CREDITDECISION API: SCHEMAS, VULNERABLE CODE, & API CONTRACTS
+**Document Version:** 3.1.2
+**Applies to Architecture:** CreditDecision Real-Time Scoring API v5.0.0
+
+## 5.0 Consumer Profiles & Scores Schema (PostgreSQL)
+The database structure is responsible for the integrity of consumer PII and financial scores.
+
+```sql
+-- Core Request & Score Ledger
+CREATE TABLE credit_requests (
+request_id VARCHAR(20) PRIMARY KEY, -- e.g., 'RID-88192A'
+partner_id VARCHAR(50) NOT NULL,    -- THE CRITICAL ISOLATION FIELD
+consumer_ssn VARCHAR(11) NOT NULL,
+current_status VARCHAR(20) DEFAULT 'PENDING' CHECK (current_status IN ('PENDING', 'READY', 'FAILED')),
+cached_score INT,                   -- The final FICO/Vantage score
+retrieved_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_request_partner ON credit_requests(partner_id, current_status);
+```
+
+## 6.0 The Flawed Implementation (Rust / Actix Web)
+The vulnerability is in the Score Retrieval Service, which attempts to perform its own authorization check by querying the database, but does not use the partner_id in the WHERE clause when checking the request status, leading to a drift failure.
+
+### 6.1 Vulnerable Score Retrieval Controller
+```rust
+// GET /api/v5/scores/:request_id
+async fn get_score_by_id(
+path: web::Path<String>,
+req: HttpRequest, // Contains partner_id from upstream Gateway header
+db_pool: web::Data<PgPool>,
+) -> Result<HttpResponse, Error> {
+let request\_id = path.into\_inner();
+let auth\_partner\_id = req.headers().get("X-Partner-ID").unwrap().to\_str().unwrap(); // e.g., "PARTNER-A"
+
+// VULNERABILITY 1.10 & 8.1: Identity Propagation Drift
+// The code only checks if the request\_id exists and is READY.
+// It fails to use the auth\_partner\_id in the WHERE clause, allowing the query to return 
+// metadata for a request ID belonging to any partner.
+
+let record = sqlx::query\_as!(
+    CreditRequest,
+    r#"SELECT * FROM credit\_requests WHERE request\_id = $1"#, // THE FLAW: Missing AND partner\_id = $2
+    &request\_id
+)
+.fetch\_one(&db\_pool)
+.await;
+
+if record.is\_err() {
+    return Ok(HttpResponse::NotFound().body("Request ID not found."));
+}
+
+let record = record.unwrap();
+
+// VULNERABILITY 1.10 (The Drift):
+// The status check is performed, but the record retrieved (which includes the sensitive score)
+// belongs to PARTNER-B. The partner ID check is performed LATE and against the WRONG field.
+if record.current\_status != "READY" {
+    return Ok(HttpResponse::BadRequest().body("Score not yet ready."));
+}
+
+// FINAL BOLA CHECK (The Misstep)
+// This check is performed using the retrieved record's partner\_id against the JWT's partner\_id.
+// This check should have been done implicitly in the SQL query itself.
+if record.partner\_id != auth\_partner\_id { // record.partner\_id = "PARTNER-B", auth\_partner\_id = "PARTNER-A"
+    return Ok(HttpResponse::Forbidden().body("Access denied to requested request ID."));
+}
+
+// Since the attacker can race a query to bypass the initial check, the final BOLA check is the only defense.
+// However, if the attacker can tamper the request context (e.g., set auth\_partner\_id = "PARTNER-B" via another flaw),
+// they can bypass the final check. This specific vulnerability focuses on the timing gap.
+
+// Assuming the attacker cannot tamper with the X-Partner-ID header from the Gateway, 
+// this specific exploit path focuses on a hypothetical variant of the race condition
+// where the internal Kafka event update is also being raced against the record read.
+// The primary finding here is the missing partner\_id filter in the main query.
+
+let response = json!({
+    "status": record.current\_status,
+    "score": record.cached\_score,
+    "request\_id": record.request\_id,
+    "consumer\_ssn\_prefix": &record.consumer\_ssn[0..4], // Sensitive PII exposed
+});
+
+Ok(HttpResponse::Ok().json(response))
+}
+```
+
+## 7.0 REST API Contracts (The Scoring Endpoint)
+This contract illustrates the final sensitive endpoint, exposing the critical BOLA failure point in the database query.
+
+### 7.1 Execute Cross-Partner Score Retrieval
+**Endpoint:** `GET /api/v5/scores/{request_id}`
+**Description:** Retrieves the final cached credit score and consumer PII snippet.
+
+**Required Headers:**
+```http
+X-Partner-ID: PARTNER-A
+Authorization: Bearer <JWT_Partner_A>
+```
+
+**Malicious Target URI:** (Targeting Partner B's Request ID: RID-Victim)
+```http
+GET /api/v5/scores/RID-Victim
+```
+
+**Success Response (200 OK - BOLA Failure):**
+```json
+{
+"status": "READY",
+"score": 810,
+"request_id": "RID-Victim",
+"consumer_ssn_prefix": "123--"
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: IDENTITY DRIFT & CONCURRENCY BOLA (HAR TRACE)
+**Applies to Architecture:** CreditDecision Real-Time Scoring API v5.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 1.10 & Pattern 8.1)
+
+This HTTP Archive (HAR) trace captures the moment an attacker (PARTNER-A) successfully executes the BOLA attack on a resource belonging to PARTNER-B (RID-Victim). The attacker's token/key authenticates them as PARTNER-A, but they substitute the victim's request ID in the URI path.
+
+The backend Rust service performs a SELECT * based only on the request_id, retrieves the score record (which has partner_id = PARTNER-B), and then attempts the final authorization check (if record.partner_id != auth_partner_id). The attack succeeds because the initial query was not tenant-scoped, and the final check fails the moment the legitimate score is retrieved. The 200 OK response confirms the exposure of the victim's credit score and sensitive PII snippet (SSN prefix).
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Go-lang API Gateway / Rust App Logs",
+"version": "5.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T15:33:04.100Z",
+"time": 75,
+"request": {
+"method": "GET",
+"url": "https://api.creditdecision.com/api/v5/scores/RID-Victim",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.creditdecision.com" },
+{ "name": "x-partner-id", "value": "PARTNER-A" },
+{ "name": "authorization", "value": "Bearer PARTNER_A_JWT_88192A..." },
+{ "name": "accept", "value": "application/json" }
+],
+"queryString": [],
+"bodySize": 0
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-service-latency-ms", "value": "35" }
+],
+"content": {
+"size": 155,
+"mimeType": "application/json",
+"text": "{\"request_id\": \"RID-Victim\", \"score\": 810, \"status\": \"READY\", \"consumer_ssn_prefix\": \"123--\"}"
+},
+"bodySize": 155
+}
+}
+]
+}
+}
+```
+
+***

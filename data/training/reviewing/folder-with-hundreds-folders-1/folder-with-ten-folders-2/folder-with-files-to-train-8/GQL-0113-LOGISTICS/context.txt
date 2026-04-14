@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** FreightLens Tracking API
+**Document Version:** 2.0.1 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Logistics / Supply Chain
+**Architecture:** REST + Kafka + GraphQL dashboard
+**Training Example ID:** GQL-0113
+
+## 1.0 Executive Summary
+FreightLens Tracking API is a logistics / supply chain platform that exposes a GraphQL API to authorised consumers.
+The platform manages logistics datas partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `shipmentId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Shipment {
+  shipmentId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: ShipmentData
+  waypoints: [Waypoint!]
+}
+
+type ShipmentData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getShipment(id: ID!): Shipment
+  listShipments(tenantId: ID, status: String): [Shipment!]
+  getShipmentWithChildren(id: ID!): Shipment
+}
+
+type Mutation {
+  updateShipment(id: ID!, input: ShipmentInput!): Shipment
+  deleteShipment(id: ID!): Boolean
+  bulkShipmentLookup(ids: [ID!]!): [Shipment!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-113:** The `getShipment` resolver fetches by `shipmentId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkShipmentLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 1.3 — Bulk or list endpoints (BOLA)
+
+The `shipmentId` field is used as the object identifier across all resolvers.
+The `listShipments` resolver returns all objects when the `tenantId` filter is omitted or when it is supplied from the client without JWT-level validation.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-6b23` but the requested object belongs to `tenant-551e`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:35.174362+00:00",
+        "time": 67,
+        "request": {
+          "method": "POST",
+          "url": "https://api.freightlens-tracking.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.freightlens-tracking.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-6b23"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { updateShipment(id: "S-2113", input: {status: "approved", ownerId: "attacker-6b23551e"}) { shipmentId status } }\"}"
+          },
+          "bodySize": 113
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-6b23551e"}
+          ],
+          "content": {
+            "size": 231,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getShipment\": {\"tenantId\": \"tenant-551e\", \"ownerId\": \"other-user-6b23551e\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-6b23551e\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 390,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 97, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

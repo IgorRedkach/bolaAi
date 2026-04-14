@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** Horizon Social Graph API
+**Document Version:** 3.1.7 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Social Media / Identity Graph
+**Architecture:** GraphQL federation + Neo4j
+**Training Example ID:** GQL-0311
+
+## 1.0 Executive Summary
+Horizon Social Graph API is a social media / identity graph platform that exposes a GraphQL API to authorised consumers.
+The platform manages user contents partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `postId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Post {
+  postId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: PostData
+  comments: [Comment!]
+}
+
+type PostData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getPost(id: ID!): Post
+  listPosts(tenantId: ID, status: String): [Post!]
+  getPostWithChildren(id: ID!): Post
+}
+
+type Mutation {
+  updatePost(id: ID!, input: PostInput!): Post
+  deletePost(id: ID!): Boolean
+  bulkPostLookup(ids: [ID!]!): [Post!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-311:** The `getPost` resolver fetches by `postId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkPostLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 1.3 — Bulk or list endpoints (BOLA)
+
+The `postId` field is used as the object identifier across all resolvers.
+The `listPosts` resolver returns all objects when the `tenantId` filter is omitted or when it is supplied from the client without JWT-level validation.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-79b1` but the requested object belongs to `tenant-558d`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:39.689125+00:00",
+        "time": 153,
+        "request": {
+          "method": "POST",
+          "url": "https://api.horizon-social-graph.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.horizon-social-graph.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-79b1"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { listPosts(tenantId: "tenant-558d") { postId ownerId data { sensitiveField } } }\"}"
+          },
+          "bodySize": 194
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-79b1558d"}
+          ],
+          "content": {
+            "size": 416,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getPost\": {\"tenantId\": \"tenant-558d\", \"ownerId\": \"other-user-79b1558d\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-79b1558d\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 336,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 51, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

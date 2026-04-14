@@ -1,0 +1,13 @@
+## Analysis reasoning
+
+I reviewed the PowerGrid Customer Billing GraphQL API v4.0.0 architecture specification, Python Django resolver code, schema, and HAR trace.
+
+1. **SQL injection mechanism — logical operator override**: the Python resolver uses `"SELECT * FROM invoices WHERE tenant_id = '%s'" % tenant_id` (legitimate) and then appends `" AND (%s)" % filter` (vulnerable). The attacker's payload `billing_period < '2026-04-01' OR tenant_id IS NOT NULL` gets inserted into the parenthesized `AND` clause. The final query is `WHERE tenant_id = 'TENANT_A' AND (billing_period < '2026-04-01' OR tenant_id IS NOT NULL)`. Because `tenant_id IS NOT NULL` is always true, the `AND (...)` evaluates to `true` for all rows — the tenant_id restriction is effectively removed by the logical short-circuit. This is a classic SQLi BOLA bypass via logical operator injection.
+
+2. **HAR volume confirms full table scan**: `x-records-returned: 4122` means the query returned 4,122 rows across all tenants. TENANT_A's legitimate records would be a small subset. The presence of `COMPETITOR_CORP_Z` (55,000 kWh — a large commercial client) and `TENANT_MUNICIPAL_X` (190,000 kWh — a municipal utility) in the response body confirms cross-tenant access. The response body size of 512,000 bytes is consistent with thousands of invoice records serialized to JSON.
+
+3. **String interpolation as the root cause (RISK-GRPH-501)**: section 4.0 explicitly states: "We use string interpolation for dynamic filters in the Billing Service query logic to support complex user requests. This was done to avoid rewriting the entire database query layer. We rely on the BOLA predicate being prepended to the query." This documents the design assumption (BOLA predicate is safe because it's first) and the technical debt (string interpolation kept for convenience). The assumption fails because SQL logical operators allow the injected predicate to override the earlier tenant check.
+
+4. **GraphQL as the injection vector**: unlike REST where injection targets query string parameters or POST body fields, here the GraphQL `filter: String` argument is the injection surface. The pattern is equivalent to a REST `GET /invoices?filter=...` with raw SQL injection — but because it's inside a GraphQL mutation/query body, WAF rules tuned for REST URL injection may not trigger.
+
+5. **Data sensitivity**: energy consumption data (kWh) is commercially sensitive — it reveals production volumes, operational patterns, and peak usage periods for industrial clients. Combined with `totalAmount` (billing), this is competitive intelligence for any manufacturing or municipal competitor tenant in the system.

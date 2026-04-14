@@ -1,0 +1,7 @@
+{
+  "created_at": "20260410T125145Z",
+  "input": "/home/iredkach/Downloads/bola/bolaAi/data/training/distilled/teacher_distilled.jsonl",
+  "output": "/home/iredkach/Downloads/bola/bolaAi/data/training/distilled/mentor_distilled.jsonl",
+  "mentor_name": "mid-size-mentor",
+  "count": 0
+}

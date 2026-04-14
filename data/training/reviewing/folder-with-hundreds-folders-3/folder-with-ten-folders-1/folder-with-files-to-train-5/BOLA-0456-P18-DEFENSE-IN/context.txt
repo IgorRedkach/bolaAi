@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** Aegis Vault Secure Repository
+**Document Version:** 4.0.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Defense Industrial Base
+**Architecture:** Zero-trust + IaC state management
+**Training Example ID:** BOLA-0456
+
+## 1.0 Executive Summary
+Aegis Vault Secure Repository is a defense industrial base platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v3/objects endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 1.8 — Predictable or sequential IDs
+
+## 3.0 Database Schema
+```sql
+
+-- Object table
+CREATE TABLE objects (
+    object_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_object_tenant ON objects(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 1.8 — Predictable or sequential IDs (BOLA)
+
+The `GET/PATCH/DELETE /api/v3/objects/:id` endpoint accepts a `object_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-6922` can access objects owned by `ORG-D216`.
+
+_Specific exploitation for Pattern 1.8:_ IDs are sequential integers (`O-1001`, `O-1002`...) — enumeration is trivial.
+
+## 5.0 Artifact (GraphQL HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:23:31.224127+00:00",
+        "time": 206,
+        "request": {
+          "method": "GET",
+          "url": "https://api.aegis-vault-sec.example.com/api/v3/objects/OBJ-2456",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-6922"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"OBJ-2456\",\"tenantId\":\"ORG-D216\",\"ownerId\":\"other-user-6922d216\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-D216\"}"
+          },
+          "bodySize": 169
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-18-456:** Pattern 1.8 detected in `/api/v3/objects` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-556.

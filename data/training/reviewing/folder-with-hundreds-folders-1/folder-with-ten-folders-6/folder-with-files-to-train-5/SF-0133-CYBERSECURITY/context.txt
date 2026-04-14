@@ -1,0 +1,116 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ThreatLens SOC Platform (Salesforce-Integrated)
+**Document Version:** 2.2.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Cybersecurity / SIEM
+**Platform:** Salesforce Lightning / Aura Framework
+**Training Example ID:** SF-0133
+
+## 1.0 Executive Summary
+ThreatLens SOC Platform is a cybersecurity / siem platform built on Salesforce Lightning Experience.
+The front-end uses Aura Components that communicate with Apex Controllers via the Salesforce
+Aura Framework's `c.ControllerName.methodName` call pattern. Authorization is expected to be
+enforced through Salesforce sharing rules (OWD, Role Hierarchy, Sharing Rules) AND explicitly
+in Apex controller code using `WITH SECURITY_ENFORCED` or manual ownership checks.
+
+## 2.0 Architecture Overview
+- **Front-End:** Salesforce Lightning Aura Components (LWC migrated to Aura)
+- **Middle Layer:** Apex Controllers called via Aura Action Framework
+- **Data Layer:** Salesforce Objects with standard and custom fields
+- **Auth:** Salesforce Session ID (Bearer token), OWD = Private on Contact object
+
+## 3.0 Salesforce Object Schema
+```sql
+-- Contact Object (Standard + Custom Fields)
+Contact (
+  Id           VARCHAR(18) PRIMARY KEY,   -- Salesforce record ID
+  Name         VARCHAR(255),
+  OwnerId      VARCHAR(18),               -- Links to User object
+  AccountId    VARCHAR(18),               -- Parent account
+  SensitiveData__c VARCHAR(500),          -- Custom field: sensitive PII/business data
+  InternalNotes__c  TEXT,                 -- Custom field: internal review notes
+  IsDeleted    BOOLEAN DEFAULT FALSE
+)
+```
+
+## 4.0 Apex Controller (Vulnerable Implementation)
+```apex
+public class ContactController {
+    @AuraEnabled
+    public static List<Contact> getContactDetails(String contactId, List<String> fields) {
+        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
+        // VULNERABILITY: no ownership check on contactId parameter
+        return [Contact]Database.query(
+            'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
+            'FROM Contact ' +
+            'WHERE Id = :' + contactId
+            // Missing: AND OwnerId = UserInfo.getUserId()
+            // Missing: WITH SECURITY_ENFORCED
+        );
+    }
+}
+```
+
+## 5.0 Vulnerability Context
+**Pattern:** 10.2 — Parameter escalation (own session scope extension) (Single-User)
+
+The Apex controller `c.ContactController.updateContact` accepts a `contactId` parameter from the client-side
+Aura component. The controller runs `without sharing` and does not validate that the
+authenticated user owns or has been granted access to the requested record.
+
+An attacker with a valid Salesforce session can substitute any `contactId` value in the
+Aura framework request payload to access records owned by other users.
+
+## 6.0 HAR Capture (Aura Framework Request)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:40.742874+00:00",
+        "time": 105,
+        "request": {
+          "method": "POST",
+          "url": "https://da81ad50.lightning.force.com/aura",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer 00DDA81AD50!ARda81ad50..."},
+            {"name": "Content-Type", "value": "application/x-www-form-urlencoded"},
+            {"name": "X-SFDC-Session", "value": "00DDA81AD50!ARda81ad50..."}
+          ],
+          "postData": {
+            "mimeType": "application/x-www-form-urlencoded",
+            "params": [
+              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.ContactController.updateContact",       "callingDescriptor": "UNKNOWN",       "params": {         "contactId": "001AD50",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "aura.token", "value": "undefined"}
+            ]
+          },
+          "bodySize": 201
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{   \"actions\": [     {       \"id\": \"1;a\",       \"state\": \"SUCCESS\",       \"returnValue\": {         \"records\": [           {             \"Id\": \"001AD50\",             \"Name\": \"Victim Contact Record\",             \"OwnerId\": \"005VICTIM\",             \"InternalNotes__c\": \"CONFIDENTIAL: internal review notes\",             \"SensitiveData__c\": \"SSN: 000-36-8463\"           }         ]       },       \"error\": []     }   ] }"
+          },
+          "bodySize": 660
+        }
+      }
+    ]
+  }
+}
+```
+
+## 7.0 Sharing Rule Configuration
+```
+Contact OWD: Private
+Sharing Rules: Users can access records they own or have been explicitly shared with them.
+Apex Controller Declaration: "public class ContactController" (WITHOUT "with sharing")
+```
+
+## 8.0 Known Risks
+- **RISK-SF-133:** Controller declared without `with sharing`. Sharing rules not enforced.
+- **RISK-SF-134:** No ownership check in SOQL WHERE clause.
+- Client-supplied `contactId` is directly interpolated into SOQL without validation.

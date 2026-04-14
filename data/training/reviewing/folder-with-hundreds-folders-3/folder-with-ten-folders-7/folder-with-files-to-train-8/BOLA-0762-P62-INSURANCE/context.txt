@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ClaimsFlow Underwriting API
+**Document Version:** 3.2.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Insurance / Claims Processing
+**Architecture:** SOAP + REST + GraphQL facade
+**Training Example ID:** BOLA-0762
+
+## 1.0 Executive Summary
+ClaimsFlow Underwriting API is a insurance / claims processing platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v1/objects endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 6.2 — Verbose error feedback
+
+## 3.0 Database Schema
+```sql
+
+-- Object table
+CREATE TABLE objects (
+    object_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_object_tenant ON objects(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 6.2 — Verbose error feedback (Misconfiguration)
+
+The `GET/PATCH/DELETE /api/v1/objects/:id` endpoint accepts a `object_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-BD9D` can access objects owned by `ORG-F283`.
+
+_Specific exploitation for Pattern 6.2:_ The `/api/v1/objects` handler does not enforce tenant/owner boundaries for Pattern 6.2.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:24:16.272359+00:00",
+        "time": 269,
+        "request": {
+          "method": "GET",
+          "url": "https://api.claimsflow-unde.example.com/api/v1/objects/OBJ-2762",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-BD9D"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"OBJ-2762\",\"tenantId\":\"ORG-F283\",\"ownerId\":\"other-user-bd9df283\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-F283\"}"
+          },
+          "bodySize": 364
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-62-762:** Pattern 6.2 detected in `/api/v1/objects` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-862.

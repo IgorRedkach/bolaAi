@@ -1,0 +1,33 @@
+{
+  "expected": {
+    "has_findings_header": true,
+    "has_evidence_section": true,
+    "has_curl": true,
+    "mentions_batch_endpoint": true,
+    "two_token_markers": true,
+    "placeholder_free": true,
+    "score": 6
+  },
+  "live_api_sample": {
+    "has_findings_header": true,
+    "has_evidence_section": true,
+    "has_curl": true,
+    "mentions_batch_endpoint": true,
+    "two_token_markers": false,
+    "placeholder_free": false,
+    "score": 4
+  },
+  "direct_ollama_sample": {
+    "has_findings_header": true,
+    "has_evidence_section": true,
+    "has_curl": true,
+    "mentions_batch_endpoint": true,
+    "two_token_markers": true,
+    "placeholder_free": true,
+    "score": 6
+  },
+  "notes": {
+    "live_report_len": 2173,
+    "direct_len": 1480
+  }
+}

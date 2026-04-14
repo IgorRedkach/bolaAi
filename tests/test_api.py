@@ -87,6 +87,21 @@ def test_analyze_after_ingest_uses_default_query_when_empty(mock_chat, api_clien
     mock_chat.assert_called_once()
 
 
+def test_analyze_fast_path_skips_foreground_lock(api_client: TestClient):
+    """Fast-path queries should bypass serialized lock/LLM queueing path."""
+    from unittest.mock import patch
+    from bola_ai.api import app as app_mod
+
+    api_client.post("/ingest", data={"content": "GET /api/v1/orders/{id}.", "source": "test"})
+    q = "Give **only** two curl commands."
+    with patch.object(app_mod, "_run_serialized_analysis", side_effect=AssertionError("must not use lock path")):
+        r = api_client.post("/analyze", json={"query": q})
+    assert r.status_code == 200, r.text
+    report = r.json().get("report", "")
+    assert "curl -X GET" in report
+    assert "token_A" in report and "token_B" in report
+
+
 def test_index_html(api_client: TestClient):
     r = api_client.get("/")
     assert r.status_code == 200

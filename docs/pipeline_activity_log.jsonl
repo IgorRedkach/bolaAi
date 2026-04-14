@@ -1,0 +1,63 @@
+{"ts": "2026-04-10T13:19:15.575825+00:00", "stage": "pipeline", "msg": "============================================================"}
+{"ts": "2026-04-10T13:19:15.575887+00:00", "stage": "pipeline", "msg": "BOLA AI FULL TRAINING PIPELINE STARTED"}
+{"ts": "2026-04-10T13:19:15.575925+00:00", "stage": "pipeline", "msg": "Base model : Qwen/Qwen2.5-Coder-0.5B-Instruct"}
+{"ts": "2026-04-10T13:19:15.575948+00:00", "stage": "pipeline", "msg": "Config     : configs/training/qlora_cpu_0p5b.yaml"}
+{"ts": "2026-04-10T13:19:15.575970+00:00", "stage": "pipeline", "msg": "Max steps  : 60"}
+{"ts": "2026-04-10T13:19:15.575990+00:00", "stage": "pipeline", "msg": "Model name : bola-analyzer"}
+{"ts": "2026-04-10T13:19:15.576009+00:00", "stage": "pipeline", "msg": "Docker tag : ghcr.io/igorredkach/bolai:latest"}
+{"ts": "2026-04-10T13:19:15.576028+00:00", "stage": "pipeline", "msg": "Activity log: /home/iredkach/Downloads/bola/bolaAi/docs/pipeline_activity_log.jsonl"}
+{"ts": "2026-04-10T13:19:15.576046+00:00", "stage": "pipeline", "msg": "============================================================"}
+{"ts": "2026-04-10T13:19:15.576063+00:00", "stage": "pipeline", "msg": "Checking training dependencies..."}
+{"ts": "2026-04-10T13:19:18.482838+00:00", "stage": "pipeline", "msg": "Training deps: OK (transformers, peft, datasets)"}
+{"ts": "2026-04-10T13:19:18.482956+00:00", "stage": "pipeline", "msg": "STAGE 1: Combining all training data sources"}
+{"ts": "2026-04-10T13:19:18.483004+00:00", "stage": "combine_data", "msg": "Starting: /usr/bin/python scripts/combine_training_data.py"}
+{"ts": "2026-04-10T13:19:18.502745+00:00", "stage": "combine_data", "msg": "SUCCESS in 0s", "rc": 0}
+{"ts": "2026-04-10T13:19:18.503374+00:00", "stage": "pipeline", "msg": "Combined training data: 37 rows"}
+{"ts": "2026-04-10T13:19:18.503468+00:00", "stage": "pipeline", "msg": "STAGE 2: Building SFT/DPO/EVAL splits"}
+{"ts": "2026-04-10T13:19:18.503551+00:00", "stage": "build_splits", "msg": "Starting: /usr/bin/python scripts/build_training_splits.py --input /home/iredkach/Downloads/bola/bolaAi/data/training/reviewing_training_combined.jsonl"}
+{"ts": "2026-04-10T13:19:18.550895+00:00", "stage": "build_splits", "msg": "SUCCESS in 0s", "rc": 0}
+{"ts": "2026-04-10T13:19:18.552381+00:00", "stage": "pipeline", "msg": "  train.jsonl: 27 rows"}
+{"ts": "2026-04-10T13:19:18.552784+00:00", "stage": "pipeline", "msg": "  valid.jsonl: 6 rows"}
+{"ts": "2026-04-10T13:19:18.552889+00:00", "stage": "pipeline", "msg": "STAGE 3: LoRA gradient training (0.5B on CPU)"}
+{"ts": "2026-04-10T13:19:18.552957+00:00", "stage": "pipeline", "msg": "  ETA: ~20-40 minutes for 60 steps on modern CPU"}
+{"ts": "2026-04-10T13:19:18.553035+00:00", "stage": "gradient_train", "msg": "Starting: /usr/bin/python scripts/train_qlora_unsloth.py --config configs/training/qlora_cpu_0p5b.yaml --base-model Qwen/Qwen2.5-Coder-0.5B-Instruct --max-steps 60 --chunk-size-tokens 512"}
+{"ts": "2026-04-10T13:37:53.180427+00:00", "stage": "gradient_train", "msg": "SUCCESS in 18m 34s", "rc": 0}
+{"ts": "2026-04-10T13:37:53.181141+00:00", "stage": "pipeline", "msg": "  Adapter saved: qlora_20260410T131918Z"}
+{"ts": "2026-04-10T13:37:53.181186+00:00", "stage": "pipeline", "msg": "  Train loss: 2.5269553283850352"}
+{"ts": "2026-04-10T13:37:53.181216+00:00", "stage": "pipeline", "msg": "STAGE 4: Packaging model for Ollama"}
+{"ts": "2026-04-10T13:37:53.181237+00:00", "stage": "pipeline", "msg": "  Packaging adapter: qlora_20260410T131918Z"}
+{"ts": "2026-04-10T13:37:53.181264+00:00", "stage": "package_ollama", "msg": "Starting: /usr/bin/python scripts/package_trained_model_for_ollama.py --run-dir /home/iredkach/Downloads/bola/bolaAi/models/adapters/qlora_20260410T131918Z --model-name bola-analyzer"}
+{"ts": "2026-04-10T13:38:19.162251+00:00", "stage": "package_ollama", "msg": "SUCCESS in 25s", "rc": 0}
+{"ts": "2026-04-10T13:38:19.162620+00:00", "stage": "pipeline", "msg": "STAGE 5: Reloading RAG knowledge base"}
+{"ts": "2026-04-10T13:38:19.162684+00:00", "stage": "reload_rag", "msg": "Starting: /usr/bin/python src/training/load_knowledge.py"}
+{"ts": "2026-04-10T13:38:36.956619+00:00", "stage": "reload_rag", "msg": "SUCCESS in 17s", "rc": 0}
+{"ts": "2026-04-10T13:38:36.957606+00:00", "stage": "pipeline", "msg": "STAGE 6: Evaluating on holdout set"}
+{"ts": "2026-04-10T13:38:36.957763+00:00", "stage": "eval_holdout", "msg": "Starting: /usr/bin/python scripts/eval_security_agent_model.py"}
+{"ts": "2026-04-10T13:38:37.011060+00:00", "stage": "eval_holdout", "msg": "SUCCESS in 0s", "rc": 0}
+{"ts": "2026-04-10T13:38:37.011648+00:00", "stage": "pipeline", "msg": "STAGE 7: Running E2E tests against live API"}
+{"ts": "2026-04-10T13:38:37.050217+00:00", "stage": "e2e_tests", "msg": "Starting: /usr/bin/python scripts/run_agent_e2e_loop_once.py http://localhost:8000"}
+{"ts": "2026-04-10T13:39:19.373419+00:00", "stage": "e2e_tests", "msg": "SUCCESS in 42s", "rc": 0}
+{"ts": "2026-04-10T13:39:19.373992+00:00", "stage": "pipeline", "msg": "STAGE 8: Verifying published model bundle for Docker bake"}
+{"ts": "2026-04-10T13:39:19.374619+00:00", "stage": "pipeline", "msg": "  Published bundle found: bola-analyzer-20260410T133753Z (20 parts)"}
+{"ts": "2026-04-10T13:39:19.374724+00:00", "stage": "pipeline", "msg": "STAGE 9: Building all-in-one Docker image"}
+{"ts": "2026-04-10T13:39:19.374808+00:00", "stage": "docker_build", "msg": "Starting: docker build -f docker/Dockerfile.allinone -t ghcr.io/igorredkach/bolai:latest -t docker-bola-ai:latest ."}
+{"ts": "2026-04-10T13:42:28.269076+00:00", "stage": "docker_build", "msg": "FAILED in 3m 8s", "rc": 1}
+{"ts": "2026-04-10T13:42:28.269941+00:00", "stage": "pipeline", "msg": "  Docker build FAILED. Check docker daemon and Dockerfile."}
+{"ts": "2026-04-10T13:42:28.270037+00:00", "stage": "pipeline", "msg": "STAGE 10: Skipping push (--skip-docker-push)"}
+{"ts": "2026-04-10T13:42:28.270231+00:00", "stage": "pipeline", "msg": "============================================================"}
+{"ts": "2026-04-10T13:42:28.270306+00:00", "stage": "pipeline", "msg": "PIPELINE COMPLETE in 23m 12s"}
+{"ts": "2026-04-10T13:42:28.270368+00:00", "stage": "pipeline", "msg": "Stage results:"}
+{"ts": "2026-04-10T13:42:28.270431+00:00", "stage": "pipeline", "msg": "  ✓ combine_data: OK (0s)"}
+{"ts": "2026-04-10T13:42:28.270501+00:00", "stage": "pipeline", "msg": "  ✓ build_splits: OK (0s)"}
+{"ts": "2026-04-10T13:42:28.270559+00:00", "stage": "pipeline", "msg": "  ✓ gradient_train: OK (18m 34s)"}
+{"ts": "2026-04-10T13:42:28.270612+00:00", "stage": "pipeline", "msg": "  ✓ package_ollama: OK (25s)"}
+{"ts": "2026-04-10T13:42:28.270663+00:00", "stage": "pipeline", "msg": "  ✓ reload_rag: OK (17s)"}
+{"ts": "2026-04-10T13:42:28.270713+00:00", "stage": "pipeline", "msg": "  ✓ eval_holdout: OK (0s)"}
+{"ts": "2026-04-10T13:42:28.270761+00:00", "stage": "pipeline", "msg": "  ✓ e2e_tests: OK (42s)"}
+{"ts": "2026-04-10T13:42:28.270810+00:00", "stage": "pipeline", "msg": "  ✗ docker_build: FAIL (3m 8s)"}
+{"ts": "2026-04-10T13:42:28.270889+00:00", "stage": "pipeline", "msg": "  ✗ docker_push: FAIL (0s)"}
+{"ts": "2026-04-10T13:42:28.270941+00:00", "stage": "pipeline", "msg": "============================================================"}
+{"ts": "2026-04-10T13:42:28.270987+00:00", "stage": "pipeline", "msg": "E2E tests   : PASS"}
+{"ts": "2026-04-10T13:42:28.271034+00:00", "stage": "pipeline", "msg": "Docker built: NO"}
+{"ts": "2026-04-10T13:42:28.271081+00:00", "stage": "pipeline", "msg": "Docker pushed: NO/SKIP"}
+{"ts": "2026-04-10T13:42:28.271318+00:00", "stage": "pipeline", "msg": "ALL CRITICAL STAGES PASSED."}

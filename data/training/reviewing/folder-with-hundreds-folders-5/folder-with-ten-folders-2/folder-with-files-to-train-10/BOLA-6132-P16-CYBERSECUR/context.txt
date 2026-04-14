@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ThreatLens SOC Platform
+**Document Version:** 2.4.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Cybersecurity / SIEM
+**Architecture:** REST + STIX/TAXII + GraphQL
+**Training Example ID:** BOLA-6132
+
+## 1.0 Executive Summary
+ThreatLens SOC Platform is a cybersecurity / siem platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v1/objects endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 1.6 — Write operations without ownership check
+
+## 3.0 Database Schema
+```sql
+
+-- Object table
+CREATE TABLE objects (
+    object_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_object_tenant ON objects(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 1.6 — Write operations without ownership check (BOLA)
+
+The `GET/PATCH/DELETE /api/v1/objects/:id` endpoint accepts a `object_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-07CC` can access objects owned by `ORG-D2EA`.
+
+_Specific exploitation for Pattern 1.6:_ PATCH/DELETE `/api/v1/objects/:id` does not verify the authenticated user owns the target object.
+
+## 5.0 Artifact (GraphQL HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:29:55.442689+00:00",
+        "time": 79,
+        "request": {
+          "method": "DELETE",
+          "url": "https://api.threatlens-soc-.example.com/api/v1/objects/OBJ-8132",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-07CC"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"OBJ-8132\",\"tenantId\":\"ORG-D2EA\",\"ownerId\":\"other-user-07ccd2ea\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-D2EA\"}"
+          },
+          "bodySize": 243
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-16-6132:** Pattern 1.6 detected in `/api/v1/objects` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-6232.

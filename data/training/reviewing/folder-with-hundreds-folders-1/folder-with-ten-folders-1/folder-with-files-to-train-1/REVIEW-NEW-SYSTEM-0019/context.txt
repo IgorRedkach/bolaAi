@@ -1,0 +1,274 @@
+========================================
+
+Here is the nineteenth system, continuing our deep-dive architectural series. We are shifting into the **Telecommunications** sector, focusing on a **5G eSIM Provisioning & Diagnostic API Gateway**.
+
+
+Here is **Part 1**. Type **c** when you are ready for Part 2.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** OmniCell 5G Provisioning Gateway
+**Document Version:** 3.9.2 (FINAL)
+**Classification:** CRITICAL TELECOM / SUBSCRIBER PII & CRYPTO SCOPE
+**Domain:** Telecommunications / 5G Core Network / BSS & OSS
+
+## 1.0 Executive Summary
+OmniCell is a tier-1 mobile network operator. Their 5G Provisioning Gateway acts as the bridge between the public internet (consumer self-service apps, third-party IoT fleet managers) and the highly secure internal Operations Support Systems (OSS) and Unified Data Management (UDM) core. 
+
+The API enables the over-the-air (OTA) provisioning of new eSIM profiles, activation of roaming packages, and network diagnostics. Field technicians also use a specialized tablet application that communicates with this gateway to troubleshoot signal degradation and routing issues for high-value enterprise clients.
+
+## 2.0 Comprehensive Network Topology & Core Integration
+The telecommunications architecture requires strict segregation between IT systems and the core signaling network.
+
+### 2.1 The Public IT Boundary
+* **F5 BIG-IP Load Balancers:** Handle initial TLS termination and basic volumetric DDoS protection.
+* **Kong API Gateway (IT Zone):** The primary routing layer for the `api.omnicell.network` domain. It handles initial JWT validation and routes requests to the appropriate microservices.
+
+### 2.2 The 5G Core Network (Internal)
+* **Provisioning Microservice (Node.js):** Translates RESTful JSON requests into internal Diameter or HTTP/2 5G Service-Based Architecture (SBA) commands.
+* **Unified Data Management (UDM) Database:** A highly restricted, proprietary database that holds all subscriber profiles, including the cryptographic root keys assigned to every physical SIM and eSIM (the `Ki` and `OPc` values).
+
+## 3.0 Identity, JWT, and Cryptographic Trust
+To support millions of stateless API calls from mobile apps and technician tablets, OmniCell utilizes JSON Web Tokens (JWT).
+
+### 3.1 Asymmetric Token Signatures (RS256)
+* The central OmniCell OAuth 2.0 Authorization Server signs all JWTs using the **RS256** algorithm (RSA Signature with SHA-256).
+* The Authorization Server holds the private key securely in an HSM (Hardware Security Module).
+* The Kong API Gateway and internal Node.js microservices fetch the corresponding **public key** from a well-known JWKS (JSON Web Key Set) endpoint to verify the tokens.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The diagnostic endpoint was rapidly refactored during the 5G rollout to support new telemetry parameters. The backend developers mapped the UDM database model directly to the API response, assuming the frontend React Native technician app would filter out sensitive fields. Tracked as RISK-TEL-102.*
+
+**Taxonomy Pattern:** 10.2 (JWT Algorithm Confusion) & 3.1 (Excessive Data Exposure)
+**Sub-system:** Kong API Gateway Auth Plugin & Diagnostic Service (`/api/v3/subscribers/{iccid}/diagnostics`)
+
+**The Deep Architectural Flaw:**
+This attack chains a cryptographic implementation flaw with an architectural data-handling violation.
+2.  **Excessive Data Exposure (Pattern 3.1):** Once authenticated as a `FIELD_TECH`, the attacker queries the diagnostics endpoint for a target's SIM card ID (the ICCID). The frontend technician app only displays signal strength (RSRP/RSRQ) and network attachment status. However, the backend Node.js API simply executes a `SELECT *` against the UDM database and returns the *entire* subscriber row. This massive JSON payload includes the ultra-sensitive `Ki` (Authentication Key) and `OPc` (Operator Variant Algorithm Configuration Field) cryptographic values.
+
+1.  **Reconnaissance:** The attacker downloads the OmniCell public key from their open JWKS endpoint (`https://auth.omnicell.network/.well-known/jwks.json`).
+2.  **The Forgery:** The attacker crafts a JWT payload assigning themselves the role of `FIELD_TECH` and targeting a high-profile politician's phone. They set the JWT header to `{"alg": "HS256"}`. 
+4.  **The Breach:** The attacker sends a GET request to `/api/v3/subscribers/89103.../diagnostics` using their forged token. The API Gateway sees `HS256`, grabs the public key from cache, uses it as an HMAC secret, and the signature validates perfectly.
+5.  **The Exfiltration:** The backend processes the authorized request and returns the excessive JSON payload.
+
+***
+
+
+
+***
+
+**Document Version:** 4.5.1
+**Applies to Architecture:** OmniCell 5G Provisioning Gateway v3.9.2
+
+## 5.0 Core Network Schema (Unified Data Management)
+The UDM database acts as the central repository for all subscriber identities and cryptographic secrets. The `Ki` (Authentication Key) and `OPc` (Operator Variant Algorithm Configuration Field) are 128-bit or 256-bit cryptographic keys physically burned into the SIM card and stored securely here to facilitate 5G mutual authentication (5G-AKA).
+
+```sql
+-- 1. Subscriber SIM Profiles Table
+CREATE TABLE sim_profiles (
+    iccid VARCHAR(20) PRIMARY KEY, -- Integrated Circuit Card Identifier (The physical SIM ID)
+    imsi VARCHAR(15) UNIQUE NOT NULL, -- International Mobile Subscriber Identity
+    msisdn VARCHAR(15) NOT NULL, -- The user's public phone number
+    
+    -- Network State Data
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    last_attached_cell_id VARCHAR(50),
+    rsrp_signal_strength INT, -- Reference Signal Received Power (e.g., -85 dBm)
+    
+    -- These must NEVER leave the secure enclave or be exposed to the IT layer.
+    auth_key_ki VARCHAR(64) NOT NULL, 
+    opc_key VARCHAR(64) NOT NULL,
+    
+    provisioned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_sim_msisdn ON sim_profiles(msisdn);
+```
+
+## 6.0 The Flawed Implementation (Node.js / Express)
+
+The authentication middleware retrieves the public RSA key but fails to lock the verification algorithm.
+
+```javascript
+// File: middleware/authMiddleware.js
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+
+// The public key used to verify the RS256 signatures generated by the Auth Server
+const publicKey = fs.readFileSync('/certs/omnicell-auth-public.pem', 'utf8');
+
+exports.verifyFieldTech = (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return res.status(401).send("Token required");
+
+    try {
+        // The developer FAILS to include the options object: { algorithms: ['RS256'] }
+        // If the attacker provides a token with {"alg": "HS256"}, the jsonwebtoken library 
+        // treats the 'publicKey' variable not as an RSA public key, but as a symmetric HMAC secret string.
+        // Since the public key is public knowledge, the attacker can sign their own tokens.
+        
+        const decoded = jwt.verify(token, publicKey); 
+        
+        if (decoded.role !== 'FIELD_TECH') {
+            throw new Error("Insufficient privileges");
+        }
+        
+        req.user = decoded;
+        next();
+    } catch (err) {
+        res.status(403).json({ error: "Invalid token signature" });
+    }
+};
+```
+
+Once the attacker bypasses authentication, they interact with the diagnostics endpoint, which suffers from Pattern 3.1.
+
+```javascript
+// File: controllers/diagnosticsController.js
+const db = require('../lib/udm_postgres_connector');
+
+// GET /api/v3/subscribers/:iccid/diagnostics
+exports.getDiagnostics = async (req, res) => {
+    const targetIccid = req.params.iccid;
+
+    try {
+        // The query uses 'SELECT *' instead of explicitly selecting only the 
+        // diagnostic fields (status, last_attached_cell_id, rsrp_signal_strength).
+        const result = await db.query(
+            `SELECT * FROM sim_profiles WHERE iccid = $1`, 
+            [targetIccid]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "SIM not found on network." });
+        }
+
+        // FLAW: The entire database row, including the 'auth_key_ki' and 'opc_key', 
+        // is serialized to JSON and sent to the client. The backend relies on the 
+        // frontend React Native app to "hide" these fields from the UI.
+        res.status(200).json(result.rows[0]);
+
+    } catch (error) {
+        res.status(500).json({ error: "Core network query failed." });
+    }
+};
+```
+
+## 7.0 API Contracts (The Diagnostic Output)
+This contract illustrates the extreme danger of relying on client-side filtering to protect sensitive data.
+
+### 7.1 Intended Safe Payload (What the Technician App Displays)
+The frontend UI is programmed to only render the following data points to the technician's screen.
+```json
+{
+  "iccid": "89103000000012345678",
+  "status": "ACTIVE",
+  "last_attached_cell_id": "eNB_44910_Sector3",
+  "rsrp_signal_strength": -105
+}
+```
+
+### 7.2 The Actual Excessive Payload (What the Attacker Sees)
+Because the attacker is not using the official frontend app, they intercept the raw HTTP response containing the full database row.
+
+**Endpoint:** `GET /api/v3/subscribers/89103000000012345678/diagnostics`
+**Actual HTTP Response Body:**
+```json
+{
+  "iccid": "89103000000012345678",
+  "imsi": "310410123456789",
+  "msisdn": "15558675309",
+  "status": "ACTIVE",
+  "last_attached_cell_id": "eNB_44910_Sector3",
+  "rsrp_signal_strength": -105,
+  "auth_key_ki": "7A8B9C0D1E2F3A4B5C6D7E8F9A0B1C2D",
+  "opc_key": "1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D",
+  "provisioned_at": "2024-02-14T08:30:00Z"
+}
+```
+*Behavior:* The backend blindly dumps the root cryptographic keys of the SIM card over the API. The attacker extracts the `Ki` and `OPc` hex strings, writes them to a blank SIM, and successfully clones the politician's device.
+
+***
+
+**End of Part 2.**
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing the exact HTTP sequence where the attacker uses their locally forged HS256 token (signed with the public key string) to request the diagnostic data and successfully extract the `Ki` and `OPc` keys in the raw JSON response.
+
+**Part 3: Synthetic Telemetry Artifact (HAR Trace) & Deep Analysis**
+
+***
+
+# SYNTHETIC ARTIFACT: JWT ALG CONFUSION & EXCESSIVE DATA EXPOSURE (HAR TRACE)
+**Applies to Architecture:** OmniCell 5G Provisioning Gateway v3.9.2
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 10.2 & Pattern 3.1)
+
+This HTTP Archive (HAR) trace captures the moment the attacker successfully breaches the IT/OT boundary. The attacker sends a GET request to the diagnostics endpoint. 
+
+Crucially, the `Authorization` header contains a forged JWT. If you decode the first segment of the JWT (`eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9`), it translates to `{"alg":"HS256","typ":"JWT"}`. By forcing the algorithm to HS256, the attacker tricks the backend Node.js server into using its public RSA key string as a symmetric HMAC secret. The signature validates perfectly, granting the attacker `FIELD_TECH` authorization. 
+
+The backend then queries the Unified Data Management (UDM) core. Because the API developer lazily returned the entire database row instead of explicitly mapping only diagnostic fields, the HTTP response body leaks the victim's `auth_key_ki` and `opc_key`—the highly restricted cryptographic master keys required to clone the physical SIM card.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Kong API Gateway / IT-DMZ Traffic Logs",
+      "version": "4.1.2"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-09T07:18:22.041Z",
+        "time": 142,
+        "request": {
+          "method": "GET",
+          "url": "https://api.omnicell.network/api/v3/subscribers/89103000000012345678/diagnostics",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.omnicell.network" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdHRhY2tlcl85OSIsInJvbGUiOiJGSUVMRF9URUNIIiwiaWF0IjoxNzgxMDIxNTAwfQ.XyZ_Forged_HMAC_Signature_Using_Public_Key_String..." },
+            { "name": "accept", "value": "application/json" },
+            { "name": "user-agent", "value": "OmniCell-TechDiag/2.1.0 (Android 14)" }
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-udm-latency-ms", "value": "89" }
+          ],
+          "content": {
+            "size": 312,
+            "mimeType": "application/json",
+            "text": "{\"iccid\": \"89103000000012345678\", \"imsi\": \"310410123456789\", \"msisdn\": \"15558675309\", \"status\": \"ACTIVE\", \"last_attached_cell_id\": \"eNB_44910_Sector3\", \"rsrp_signal_strength\": -105, \"auth_key_ki\": \"7A8B9C0D1E2F3A4B5C6D7E8F9A0B1C2D\", \"opc_key\": \"1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D\", \"provisioned_at\": \"2024-02-14T08:30:00Z\"}"
+          },
+          "bodySize": 312
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+1. **JWT Cryptographic Downgrade/Confusion (Pattern 10.2):**
+    * **Header Extraction & Analysis:** The AI must be trained to decode the Base64Url-encoded header of every JWT it inspects in telemetry (`eyJhbGciOiJIUzI1Ni...`). 
+    * **Asymmetric vs. Symmetric Context:** The model needs to correlate the organizational context (a Tier-1 Telecom using an OAuth 2.0 Auth Server usually mandates asymmetric signatures like `RS256`) with the observed payload (`HS256`). Finding an HMAC-signed token on an endpoint designed for RSA is the definitive signature of an algorithm confusion attack successfully evading the authentication middleware.
+
+2. **Excessive Data Exposure / PII Spillage (Pattern 3.1):**
+    * **Semantic High-Entropy Detection:** The AI must inspect the JSON response body and recognize the presence of high-entropy, 32-character hexadecimal strings (`7A8B9C0D...`). 
+    * **Contextual Tagging:** By correlating the keys `auth_key_ki` and `opc_key` with the telecommunications domain, the AI learns that this is not standard telemetry data, but cryptographic root material. It teaches the model to identify when backend systems fail to strip sensitive attributes before serializing database rows to the client.
+
+3. **Client-Side Filtering Fallacy:**
+    * The trace proves that relying on the frontend application (`OmniCell-TechDiag/2.1.0`) to hide data is a fatal architectural flaw. The model learns that attackers interact directly with the API gateway via raw HTTP, completely bypassing UI-level obfuscation. The presence of these fields in the HTTP response constitutes a confirmed breach, regardless of what the legitimate application displays on the screen.
+
+========================================
+========================================
+
+========================================

@@ -1,0 +1,251 @@
+Here is the twenty-first system, focusing on high-stakes failures in the **Public Safety** sector. We are examining an **Emergency Dispatch API Gateway** used by a Computer-Aided Dispatch (CAD) system for E911 event injection.
+
+For the vulnerabilities, we are focusing on **Pattern 8.2 (Fail-Open on Timeout)** combined with **Pattern 7.3 (Insufficient Logging of Critical Actions)**. This scenario demonstrates how a transient network failure (a 500ms timeout) causes the critical authentication layer to default to "allow," enabling an unauthenticated attacker to inject a false, high-priority emergency event, which then bypasses the internal audit logging system.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** FirstResponse CAD Integration API
+**Document Version:** 4.0.1 (FINAL)
+**Classification:** CRITICAL PUBLIC SAFETY / CJIS COMPLIANCE SCOPE
+**Domain:** Government / Emergency Services (911/E911) / Computer-Aided Dispatch (CAD)
+
+## 1.0 Executive Summary
+FirstResponse is the primary API for a next-generation Computer-Aided Dispatch (CAD) system, used by police, fire, and EMS agencies to create, update, and manage active emergency incidents. The API accepts authenticated requests from internal systems (e.g., automated crash detection sensors, smart street infrastructure, 911 call-takers) to instantly generate a dispatch event. Due to the life-critical nature of the system, the API is fronted by an authorization service that must achieve 99.999% reliability.
+
+## 2.0 Comprehensive Network Topology & Workflow
+The architecture prioritizes speed and redundancy, which, ironically, creates a security vulnerability during component failure.
+
+### 2.1 The Ingress Layer & API Gateway
+* **Edge WAF:** Fronts the API, blocking common volumetric attacks.
+* **API Gateway (Node.js):** Handles routing and basic rate limiting. It calls the remote AuthZ Service for all requests.
+
+### 2.2 The Backend Core Services
+* **AuthZ Service (Python Django):** A standalone microservice responsible for token validation and user role checks. It relies on a low-latency database for session lookups.
+* **Dispatch Service (Go-lang):** The core engine that validates and commits a new emergency incident record to the CAD database.
+* **Audit Log Service (Rust):** An asynchronous service that receives critical action events (e.g., "incident created," "status changed") and writes them to a write-only immutable ledger.
+
+## 3.0 Identity, Access, and Redundancy Logic
+Authorization for incident creation is strictly reserved for authenticated dispatchers and trusted automated systems.
+
+### 3.1 Authentication Workflow (The Failure Point)
+When the API Gateway receives a request, it calls the remote AuthZ Service. The configuration dictates that if the AuthZ Service fails to return a response within 500ms, the API Gateway should assume the request is valid and allow it to proceed, prioritizing life safety over security enforcement.
+
+### 3.2 Dispatch Integrity
+All dispatch events committed to the database must contain the `source_user_id` for forensic accountability (CJIS compliance). The Dispatch Service relies on the AuthZ Service to supply this ID.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The AuthZ Service is currently being migrated to a new cloud region, causing transient network latency spikes of up to 700ms during peak load. The Dispatch Service has a known bug (BUG-LOG-004) where if the AuthZ Service fails to return a user ID, the Dispatch Service inserts a NULL/empty string, bypassing the Audit Log Service's validation rules.*
+
+### 4.1 Vulnerability A: Fail-Open on Timeout & Insufficient Audit Logging
+**Taxonomy Pattern:** 8.2 (Fail-Open on Timeout) & 7.3 (Insufficient Logging of Critical Actions)
+**Sub-system:** API Gateway & Dispatch Service (`POST /api/v4/incidents/create`)
+
+**The Deep Architectural Flaw:**
+This attack chains a safety-critical design choice (Fail-Open) with a downstream forensic logging failure.
+
+1. **Fail-Open on Timeout (Pattern 8.2): ** The API Gateway is configured with a 500ms timeout for the remote AuthZ service call. If the AuthZ service is under high load or experiences a temporary network partition, the API Gateway receives a 504 Gateway Timeout from the upstream load balancer. The Gateway's logic interprets this failure as "allow the request to proceed to save lives," failing open and allowing the request to continue *without* an authenticated user context.
+
+2. **Insufficient Logging (Pattern 7.3): ** Since the request bypassed the AuthZ service, the user context (`source_user_id`) is missing. The Go-lang Dispatch Service inserts the incident record with a NULL `source_user_id`. The Rust Audit Log Service, which is only configured to log incidents where `source_user_id` is *not* NULL, silently ignores the transaction, creating an unlogged, unaccountable emergency event.
+
+**The Exploitation Path:**
+
+1. **The Setup:** An attacker prepares a malicious payload (e.g., a high-priority "Active Shooter" dispatch event at a target location).
+2. **The Network Stress:** The attacker attempts to trigger the network latency window (e.g., by simultaneously sending 100 junk requests to the already stressed AuthZ Service's `/healthcheck` endpoint).
+3. **The Fail-Open:** While the AuthZ service is temporarily timing out, the attacker sends their unauthenticated `POST /api/v4/incidents/create` request.
+4. **The Execution:** The API Gateway allows the request to pass unauthenticated (Pattern 8.2). The Dispatch Service creates the high-priority incident with a NULL source user ID.
+5. **The Impact:** Emergency services are dispatched to a false incident (a "swatting" attack). Because the `source_user_id` was NULL, the Audit Log Service silently fails to record the incident creation, leaving no forensic trace of the attacker's network origin, method, or intent (Pattern 7.3).
+
+***
+
+# FIRSTRESPONSE CAD: SCHEMAS, VULNERABLE CODE, & API CONTRACTS
+**Document Version:** 3.0.4
+**Applies to Architecture:** FirstResponse CAD Integration API v4.0.1
+
+## 5.0 CAD Incident Schema (PostgreSQL)
+The database structure is designed to hold critical forensic data, but the application logic fails to enforce the non-NULL constraint on the `source_user_id` at the database level, allowing the exploit.
+
+```sql
+-- Core Incident Ledger Table
+CREATE TABLE emergency_incidents (
+incident_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+priority VARCHAR(10) NOT NULL CHECK (priority IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+location_json JSONB NOT NULL,
+description TEXT,
+source_user_id VARCHAR(100), -- THE CRITICAL FORENSIC FIELD (Should be NOT NULL, but isn't)
+dispatch_status VARCHAR(20) DEFAULT 'PENDING',
+created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_incident_source ON emergency_incidents(source_user_id);
+```
+
+## 6.0 The Flawed Implementation (Node.js & Go-lang)
+The vulnerability is split between the API Gateway's failure to enforce a response and the Dispatch Service's failure to enforce data integrity.
+
+### 6.1 Vulnerable API Gateway Logic (Node.js)
+The core logic defines the fail-open condition based on the upstream response code.
+
+```javascript
+// File: middleware/authCheck.js
+const axios = require('axios');
+const AUTHZ_SERVICE_URL = 'http://authz-svc.internal:8080/validate';
+
+// VULNERABILITY 8.2: Fail-Open on Timeout/Failure
+async function enforceAuthentication(req, res, next) {
+const token = req.headers.authorization?.split(' ')[1];
+// Default context if AuthZ fails  
+req.userContext = { authenticated: false, userId: null, roles: [] };  
+
+try {  
+    // Axios call with a hard 500ms timeout  
+    const authzResponse = await axios.post(AUTHZ\_SERVICE\_URL, { token }, { timeout: 500 });  
+    
+    if (authzResponse.status === 200 && authzResponse.data.isValid) {  
+        // Success: Apply authenticated user context  
+        req.userContext.authenticated = true;  
+        req.userContext.userId = authzResponse.data.userId; // e.g., 'dispatch_a812'  
+    }  
+    
+} catch (error) {  
+    // If it's a network timeout or a 5xx error, it defaults to 'allow'  
+    console.warn(\`AuthZ Service Failed to Respond (Error: ${error.code}). Failing Open.\`);  
+    // The unauthenticated/null userContext is carried forward, allowing the request.  
+}  
+
+// Crucial safety check (designed to fail)  
+if (!req.userContext.authenticated) {  
+    // BUG: Developer decided not to block unauthenticated access here   
+    // to prioritize availability during an AuthZ outage (Fail-Open policy).  
+    // The unauthenticated request proceeds with req.userContext.userId = null.  
+}  
+
+next(); 
+}
+```
+
+### 6.2 Vulnerable Dispatch Controller (Go-lang)
+The Dispatch Service blindly takes the `userId` from the context (which is NULL in the fail-open scenario) and inserts it, causing the audit log failure.
+
+```go
+// POST /api/v4/incidents/create
+func CreateIncident(c *gin.Context) {
+// ... payload parsing omitted ...
+// Context is passed from the Node.js API Gateway, where userId may be NULL.  
+userId := c.MustGet("userId").(string) // userId = "" or "null" from failed AuthZ  
+
+// Insert Incident  
+incidentId, err := db.InsertIncident(  
+    req.Priority,  
+    req.Location,  
+    req.Description,  
+    userId, // INSERTS NULL/EMPTY STRING  
+)  
+// ... error handling omitted ...  
+
+// VULNERABILITY 7.3: Missing Audit Log Enforcement  
+// The Audit Log Service ignores records where the source ID is empty.  
+// The Dispatch Service does NOT block the request if the ID is missing.  
+if userId != "" && incidentId != "" {  
+    auditLogger.LogCriticalAction(incidentId, userId, "INCIDENT\_CREATED\_SUCCESS")  
+} else {  
+    // FLAW: If userId is NULL/empty, the incident is created but NO log is generated.  
+    log.Error("CRITICAL: Incident created without traceable user ID. Audit log skipped.")  
+}  
+
+c.JSON(201, gin.H{"status": "DISPATCH\_QUEUED", "incident\_id": incidentId}) 
+}
+```
+
+## 7.0 REST API Contract (Incident Creation)
+The API contract is deceptively simple, hiding the complex, life-critical business logic failure underneath.
+
+### 7.1 Execute Malicious Incident Injection
+**Endpoint:** `POST /api/v4/incidents/create`
+**Description:** Creates a new, high-priority emergency incident record in the CAD system.
+
+**Required Headers:**
+```http
+Authorization: Bearer <INVALID_OR_MISSING_TOKEN>
+Content-Type: application/json
+```
+
+**Request Payload:**
+```json
+{
+"priority": "CRITICAL",
+"location_json": {
+"address": "123 Main St, Anytown, USA",
+"coordinates": "40.7128, -74.0060"
+},
+"description": "Active shooter reported. Five victims down. High-risk operation."
+}
+```
+
+**Success Response (201 Created):**
+```json
+{
+"status": "DISPATCH_QUEUED",
+"incident_id": "inc-88192a-44f2-8921"
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: FAIL-OPEN & AUDIT LOG BYPASS (HAR TRACE)
+**Applies to Architecture:** FirstResponse CAD Integration API v4.0.1
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 8.2 & Pattern 7.3)
+
+This HTTP Archive (HAR) trace captures the moment the attacker successfully exploits the availability-over-security design decision. The attacker submits a `POST` request to create a CRITICAL incident *without* a valid `Authorization` header.
+
+Because the remote AuthZ service is experiencing network latency, the API Gateway's 500ms timeout triggers. The Gateway's fail-open logic bypasses authentication, allowing the request to proceed unauthenticated. The downstream Dispatch Service commits the incident but, lacking a `source_user_id`, silently skips the required audit logging step. The `201 Created` response confirms the unauthenticated, unaudited incident was injected into the critical CAD system.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Node.js API Gateway / WAF Audit Logs",
+"version": "4.0.1"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T15:28:19.412Z",
+"time": 610,
+"request": {
+"method": "POST",
+"url": "https://api.firstresponse-cad.gov/api/v4/incidents/create",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.firstresponse-cad.gov" },
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-api-source", "value": "Fuzzer-99" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"priority\": \"CRITICAL\", \"location_json\": {\"address\": \"123 Main St, Anytown, USA\"}, \"description\": \"Active shooter reported. Five victims down. High-risk operation.\"}"
+},
+"bodySize": 155
+},
+"response": {
+"status": 201,
+"statusText": "Created",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-authz-result", "value": "TIMEOUT_FAIL_OPEN" }
+],
+"content": {
+"size": 110,
+"mimeType": "application/json",
+"text": "{\"status\": \"DISPATCH_QUEUED\", \"incident_id\": \"inc-88192a-44f2-8921\", \"source_id\": \"UNKNOWN\", \"dispatched_units\": 5}"
+},
+"bodySize": 110
+}
+}
+]
+}
+}
+```
+
+***

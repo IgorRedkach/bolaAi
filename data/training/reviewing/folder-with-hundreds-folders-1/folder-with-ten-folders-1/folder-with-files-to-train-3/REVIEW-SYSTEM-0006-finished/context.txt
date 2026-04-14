@@ -1,0 +1,241 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** PeopleSync HCM (Human Capital Management)
+**Document Version:** 6.1.4 (FINAL)
+**Classification:** INTERNAL / PII & FINANCIAL
+**Domain:** HR / Payroll / Identity Lifecycle
+
+## 1.0 Executive Summary
+PeopleSync HCM is a centralized platform managing the employee lifecycle, from onboarding and benefits enrollment to payroll processing. 
+
+The core system was recently modernized. The web and mobile portals now consume a strict, GraphQL-inspired REST API (v3). However, to support backwards compatibility with legacy on-premise ERPs (Enterprise Resource Planning) and third-party time-clock hardware, the Kong API Gateway continues to route traffic to older v1 REST and legacy SOAP/XML endpoints.
+
+## 2.0 Network Topology & Gateway Routing
+The architecture relies heavily on Kong API Gateway to abstract the complexity of the backend microservices.
+
+### 2.1 Kong API Gateway (Ingress)
+* **Modern Traffic:** Routes starting with `/api/v3/*` are sent to the newly rewritten Go-based microservices, which employ strict schema validation using OpenAPI 3.0 specs.
+* **Legacy Traffic:** Routes starting with `/api/v1/*` or `/soap/` are routed to a monolithic Java EE application running on Apache Tomcat. 
+
+### 2.2 Data Persistence
+Both the modern Go microservices and the legacy Java monolith connect to the same central Oracle Database. This shared persistence layer ensures that updates from either API version are instantly reflected across the entire system.
+
+## 3.0 Identity, Roles, and Authorization
+Identity is managed via Azure Active Directory (Azure AD).
+
+### 3.1 Bearer Tokens & Scopes
+Employees log into the self-service portal and receive a JWT.
+* **Standard Employee:** Token contains the scope `["profile:read", "profile:write_basic"]`.
+* **HR Admin:** Token contains the scope `["hr:admin", "payroll:write"]`.
+
+### 3.2 Endpoint Enforcement
+The v3 microservices strictly enforce these scopes. If a standard employee attempts to modify their salary using the v3 API, the Go service throws a `403 Forbidden` because it checks for the `payroll:write` scope before applying the update.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 Database Schema (Oracle 19c)
+The shared persistence layer contains all employee records. Both the modern v3 microservices and the legacy v1 monolith execute state changes against this exact table.
+
+```sql
+-- Core Employee Table
+CREATE TABLE HR.EMPLOYEES (
+    EMP_ID VARCHAR2(50) PRIMARY KEY,
+    FIRST_NAME VARCHAR2(100) NOT NULL,
+    LAST_NAME VARCHAR2(100) NOT NULL,
+    PHONE_NUMBER VARCHAR2(20),
+    HOME_ADDRESS VARCHAR2(255),
+    EMERGENCY_CONTACT VARCHAR2(100),
+
+    -- Highly Restricted Fields (Should only be modified by HR)
+    DEPARTMENT_CODE VARCHAR2(50) NOT NULL,
+    SALARY_BAND VARCHAR2(50) DEFAULT 'ENTRY_LEVEL',
+    HOURLY_WAGE NUMBER(10,2),
+    MANAGER_APPROVAL_BYPASS NUMBER(1) DEFAULT 0, -- 0=False, 1=True
+    LAST_UPDATED TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+CREATE INDEX IDX_EMP_DEPT ON HR.EMPLOYEES(DEPARTMENT_CODE);
+```
+
+## 6.0 Implementation Notes (Mass Assignment)
+
+### 6.1 SECURE: Modern v3 Go Microservice (Strict DTO)
+The Go service enforces strict unmarshaling. It maps the incoming JSON strictly to the `ProfileUpdateDTO` struct. Any extraneous fields (like `salary_band`) sent by the client are mathematically ignored because they do not exist in the DTO structure.
+
+```go
+// SECURE: Strict Data Transfer Object
+type ProfileUpdateDTO struct {
+    PhoneNumber      string `json:"phone_number"`
+    HomeAddress      string `json:"home_address"`
+    EmergencyContact string `json:"emergency_contact"`
+}
+
+func UpdateProfileV3(w http.ResponseWriter, r *http.Request) {
+    var updateData ProfileUpdateDTO
+    // Unknown fields in the JSON payload are silently discarded here
+    json.NewDecoder(r.Body).Decode(&updateData) 
+
+    // ... Database update logic using ONLY the DTO fields ...
+}
+```
+
+### 6.2 ALTERNATE: Legacy v1 Java Monolith (Auto-Binding)
+The legacy Java code uses an older version of Apache Commons BeanUtils. It dynamically maps every key in the JSON payload to the corresponding setter method on the central `Employee` ORM entity. 
+
+```java
+@RequestMapping(value = "/api/v1/employee/update", method = RequestMethod.POST)
+public ResponseEntity<?> updateEmployeeLegacy(@RequestBody Map<String, Object> payload, 
+                                              @RequestHeader("Authorization") String token) {
+
+    // AuthZ Check: Only verifies the token belongs to the requested employee.
+    String empId = jwtUtils.extractSubject(token);
+    Employee employeeRecord = employeeRepository.findById(empId);
+
+    try {
+        // BeanUtils blindly copies EVERY key from the payload map into the Employee object.
+        // If the payload contains "salary_band", it calls employeeRecord.setSalaryBand()
+        BeanUtils.populate(employeeRecord, payload);
+
+        employeeRepository.save(employeeRecord);
+        return ResponseEntity.ok().build();
+    } catch (Exception e) {
+        return ResponseEntity.status(500).build();
+    }
+}
+```
+
+## 7.0 API Contracts (The Version Downgrade)
+This illustrates how an operator transitions from the secure boundary to the ALTERNATE boundary.
+
+### 7.1 The Modern Endpoint (v3) - Strict Validation
+**Endpoint:** `POST /api/v3/employees/{id}/profile`
+**Behavior:** Expected to be used by the modern React frontend. If a user tries to inject `"salary_band": "EXEC"`, the Go backend safely drops the field and only updates the phone number.
+**Gateway Rule:** Requires valid JWT.
+
+### 7.2 The Legacy Endpoint (v1) - ALTERNATE to Injection
+**Endpoint:** `POST /api/v1/employee/update`
+**Behavior:** Maintained for older terminal clients. Relies entirely on the client to send the "correct" fields. Because it utilizes dynamic mass assignment, it writes whatever keys are provided directly to the Oracle database.
+**Gateway Rule:** Requires valid JWT (Basic Identity check only).
+
+**Expected Legacy Request Payload (Standard Use):**
+```json
+{
+  "phone_number": "555-0199"
+}
+```
+
+```json
+{
+  "phone_number": "555-0199",
+  "salary_band": "EXEC_TIER_1",
+  "manager_approval_bypass": 1
+}
+```
+
+
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing the exact HTTP sequence where the employee captures the modern v3 UI request, alters the URI to v1, injects the restricted fields, and successfully escalates their own payroll status without triggering an administrative alert.
+
+
+
+# SYNTHETIC ARTIFACT: VERSION DOWNGRADE & MASS ASSIGNMENT (HAR TRACE)
+**Applies to Architecture:** PeopleSync HCM v6.1.4
+
+
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Kong API Gateway Telemetry",
+      "version": "3.2.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T10:05:12.441Z",
+        "time": 302,
+        "request": {
+          "method": "POST",
+          "url": "https://api.peoplesync.corp/api/v1/employee/update",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            { "name": "Host", "value": "api.peoplesync.corp" },
+            { "name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJFTVAtMTA5OSIsInNjb3BlcyI6WyJwcm9maWxlOnJlYWQiLCJwcm9maWxlOndyaXRlX2Jhc2ljIl19..." },
+            { "name": "Content-Type", "value": "application/json" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"phone_number\": \"555-0199\", \"salary_band\": \"EXEC_TIER_1\", \"manager_approval_bypass\": 1}"
+          },
+          "bodySize": 90
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Powered-By", "value": "Servlet/3.0; Apache Tomcat/8.5.84" }
+          ],
+          "content": {
+            "size": 23,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"processed\"}"
+          },
+          "bodySize": 23
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T10:05:45.105Z",
+        "time": 85,
+        "request": {
+          "method": "GET",
+          "url": "https://api.peoplesync.corp/api/v3/employees/EMP-1099/profile",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.peoplesync.corp" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJFTVAtMTA5OSIsInNjb3BlcyI6WyJwcm9maWxlOnJlYWQiLCJwcm9maWxlOndyaXRlX2Jhc2ljIl19..." },
+            { "name": "accept", "value": "application/json" }
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-microservice", "value": "go-profile-svc" }
+          ],
+          "content": {
+            "size": 245,
+            "mimeType": "application/json",
+            "text": "{\"emp_id\": \"EMP-1099\", \"first_name\": \"John\", \"last_name\": \"Doe\", \"phone_number\": \"555-0199\", \"department_code\": \"ENG-01\", \"salary_band\": \"EXEC_TIER_1\", \"manager_approval_bypass\": 1, \"last_updated\": \"2026-04-08T10:05:12Z\"}"
+          },
+          "bodySize": 245
+        }
+      }
+    ]
+  }
+}
+```
+
+
+### Why this payload trains your 3B model perfectly:
+
+## 8.0 Operations and Governance Addendum
+### 8.1 Performance and Capacity
+- API and background-processing SLOs are tracked with percentile latency and saturation metrics.
+- Capacity planning includes seasonal traffic profiles and failover headroom.
+- Queue and cache controls protect interactive workflows under burst load.
+
+### 8.2 Observability and Auditability
+- Structured logs include correlation identifiers and actor/request metadata.
+- Dashboards surface error budgets, retry pressure, and downstream dependency health.
+- Audit exports support incident reconstruction and control validation.
+
+### 8.3 Change Management
+- Changes are deployed via staged rollout with rollback criteria and ownership gates.
+- Runbooks define degraded-mode behavior for core dependency failures.
+- Post-release verification confirms contract compatibility and operational baselines.

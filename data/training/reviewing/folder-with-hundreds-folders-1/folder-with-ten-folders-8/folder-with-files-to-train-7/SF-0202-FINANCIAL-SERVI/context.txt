@@ -1,0 +1,116 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** NexaBank Open Finance API (Salesforce-Integrated)
+**Document Version:** 3.1.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Financial Services / Retail Banking
+**Platform:** Salesforce Lightning / Aura Framework
+**Training Example ID:** SF-0202
+
+## 1.0 Executive Summary
+NexaBank Open Finance API is a financial services / retail banking platform built on Salesforce Lightning Experience.
+The front-end uses Aura Components that communicate with Apex Controllers via the Salesforce
+Aura Framework's `c.ControllerName.methodName` call pattern. Authorization is expected to be
+enforced through Salesforce sharing rules (OWD, Role Hierarchy, Sharing Rules) AND explicitly
+in Apex controller code using `WITH SECURITY_ENFORCED` or manual ownership checks.
+
+## 2.0 Architecture Overview
+- **Front-End:** Salesforce Lightning Aura Components (LWC migrated to Aura)
+- **Middle Layer:** Apex Controllers called via Aura Action Framework
+- **Data Layer:** Salesforce Objects with standard and custom fields
+- **Auth:** Salesforce Session ID (Bearer token), OWD = Private on CustomRecord object
+
+## 3.0 Salesforce Object Schema
+```sql
+-- CustomRecord Object (Standard + Custom Fields)
+CustomRecord (
+  Id           VARCHAR(18) PRIMARY KEY,   -- Salesforce record ID
+  Name         VARCHAR(255),
+  OwnerId      VARCHAR(18),               -- Links to User object
+  AccountId    VARCHAR(18),               -- Parent account
+  SensitiveData__c VARCHAR(500),          -- Custom field: sensitive PII/business data
+  InternalNotes__c  TEXT,                 -- Custom field: internal review notes
+  IsDeleted    BOOLEAN DEFAULT FALSE
+)
+```
+
+## 4.0 Apex Controller (Vulnerable Implementation)
+```apex
+public class CustomRecordController {
+    @AuraEnabled
+    public static List<CustomRecord> getCustomRecordDetails(String recordId, List<String> fields) {
+        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
+        // VULNERABILITY: no ownership check on recordId parameter
+        return [CustomRecord]Database.query(
+            'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
+            'FROM CustomRecord ' +
+            'WHERE Id = :' + recordId
+            // Missing: AND OwnerId = UserInfo.getUserId()
+            // Missing: WITH SECURITY_ENFORCED
+        );
+    }
+}
+```
+
+## 5.0 Vulnerability Context
+**Pattern:** 9.2 — SOQL and Salesforce record-level access (Platform)
+
+The Apex controller `c.CustomObjectController.getRecord` accepts a `recordId` parameter from the client-side
+Aura component. The controller runs `without sharing` and does not validate that the
+authenticated user owns or has been granted access to the requested record.
+
+An attacker with a valid Salesforce session can substitute any `recordId` value in the
+Aura framework request payload to access records owned by other users.
+
+## 6.0 HAR Capture (Aura Framework Request)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:44.526668+00:00",
+        "time": 136,
+        "request": {
+          "method": "POST",
+          "url": "https://bd602b4c.lightning.force.com/aura",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer 00DBD602B4C!ARbd602b4c..."},
+            {"name": "Content-Type", "value": "application/x-www-form-urlencoded"},
+            {"name": "X-SFDC-Session", "value": "00DBD602B4C!ARbd602b4c..."}
+          ],
+          "postData": {
+            "mimeType": "application/x-www-form-urlencoded",
+            "params": [
+              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.CustomObjectController.getRecord",       "callingDescriptor": "UNKNOWN",       "params": {         "recordId": "0012B4C",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "aura.token", "value": "undefined"}
+            ]
+          },
+          "bodySize": 487
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{   \"actions\": [     {       \"id\": \"1;a\",       \"state\": \"SUCCESS\",       \"returnValue\": {         \"records\": [           {             \"Id\": \"0012B4C\",             \"Name\": \"Victim CustomRecord Record\",             \"OwnerId\": \"005VICTIM\",             \"InternalNotes__c\": \"CONFIDENTIAL: internal review notes\",             \"SensitiveData__c\": \"SSN: 000-50-6155\"           }         ]       },       \"error\": []     }   ] }"
+          },
+          "bodySize": 704
+        }
+      }
+    ]
+  }
+}
+```
+
+## 7.0 Sharing Rule Configuration
+```
+CustomRecord OWD: Private
+Sharing Rules: Users can access records they own or have been explicitly shared with them.
+Apex Controller Declaration: "public class CustomRecordController" (WITHOUT "with sharing")
+```
+
+## 8.0 Known Risks
+- **RISK-SF-202:** Controller declared without `with sharing`. Sharing rules not enforced.
+- **RISK-SF-203:** No ownership check in SOQL WHERE clause.
+- Client-supplied `recordId` is directly interpolated into SOQL without validation.

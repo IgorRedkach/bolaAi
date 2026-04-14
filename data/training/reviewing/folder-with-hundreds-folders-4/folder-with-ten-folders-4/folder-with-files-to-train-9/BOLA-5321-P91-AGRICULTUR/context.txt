@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** HarvestIQ IoT Platform
+**Document Version:** 3.1.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Agriculture / Precision Farming
+**Architecture:** MQTT + REST + GraphQL analytics
+**Training Example ID:** BOLA-5321
+
+## 1.0 Executive Summary
+HarvestIQ IoT Platform is a agriculture / precision farming platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v2/documents endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 9.1 — GraphQL: single endpoint vulnerabilities
+
+## 3.0 Database Schema
+```sql
+
+-- Document table
+CREATE TABLE documents (
+    document_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_document_tenant ON documents(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 9.1 — GraphQL: single endpoint vulnerabilities (Platform)
+
+The `GET/PATCH/DELETE /api/v2/documents/:id` endpoint accepts a `document_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-4FEF` can access objects owned by `ORG-F8EE`.
+
+_Specific exploitation for Pattern 9.1:_ The `/api/v2/documents` handler does not enforce tenant/owner boundaries for Pattern 9.1.
+
+## 5.0 Artifact (GraphQL HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:27:00.634220+00:00",
+        "time": 214,
+        "request": {
+          "method": "GET",
+          "url": "https://api.harvestiq-iot-p.example.com/api/v2/documents/DOC-7321",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-4FEF"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"DOC-7321\",\"tenantId\":\"ORG-F8EE\",\"ownerId\":\"other-user-4feff8ee\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-F8EE\"}"
+          },
+          "bodySize": 361
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-91-5321:** Pattern 9.1 detected in `/api/v2/documents` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-5421.

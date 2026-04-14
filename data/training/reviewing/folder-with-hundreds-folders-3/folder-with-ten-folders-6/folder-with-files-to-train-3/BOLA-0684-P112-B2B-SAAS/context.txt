@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** PipelinePro Sales API
+**Document Version:** 1.4.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** B2B SaaS / CRM
+**Architecture:** REST + GraphQL + Salesforce integration
+**Training Example ID:** BOLA-0684
+
+## 1.0 Executive Summary
+PipelinePro Sales API is a b2b saas / crm platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v3/items endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 1.12 — Mass assignment via object fields
+
+## 3.0 Database Schema
+```sql
+
+-- Item table
+CREATE TABLE items (
+    item_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_item_tenant ON items(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 1.12 — Mass assignment via object fields (BOLA)
+
+The `GET/PATCH/DELETE /api/v3/items/:id` endpoint accepts a `item_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-3CE8` can access objects owned by `ORG-C09A`.
+
+_Specific exploitation for Pattern 1.12:_ PATCH accepts `ownerId` and `tenantId` in the request body. Mass assignment allows ownership transfer.
+
+## 5.0 Artifact (GraphQL HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:24:03.503100+00:00",
+        "time": 225,
+        "request": {
+          "method": "DELETE",
+          "url": "https://api.pipelinepro-sal.example.com/api/v3/items/ITE-2684",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-3CE8"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"ITE-2684\",\"tenantId\":\"ORG-C09A\",\"ownerId\":\"other-user-3ce8c09a\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-C09A\"}"
+          },
+          "bodySize": 380
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-112-684:** Pattern 1.12 detected in `/api/v3/items` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-784.

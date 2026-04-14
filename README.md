@@ -100,6 +100,42 @@ PYTHONPATH=src python src/training/load_knowledge.py
 # Reads data/knowledge/*.md and data/training/bola_rag_chunks.txt
 ```
 
+From-scratch local model rebuild only (no gradient training):
+
+```bash
+python scripts/retrain_model_from_scratch.py --model-name bola-analyzer --allow-shortcut-rebuild
+```
+
+Refactored adapter-training pipeline (QLoRA + LoRA16 + DPO + eval):
+
+```bash
+python scripts/run_training_refactor_cycle.py --track both
+```
+
+Git-pushable trained model artifacts for image builds:
+
+```bash
+# Produces split parts under models/published/<model>-<ts>/trained_model_bundle.part-*
+# and updates models/published/LATEST for Dockerfile.allinone consumption.
+python scripts/package_trained_model_for_ollama.py --run-dir models/adapters/<run_id> --model-name bola-analyzer
+```
+
+Memory-safe chunked teaching mode:
+
+```bash
+python scripts/run_training_refactor_cycle.py --track both --chunk-size-tokens 512 --chunk-overlap-tokens 64
+```
+
+This cycle runs real training stages (no simulation mode). Install training deps first:
+
+```bash
+pip install -e ".[train]"
+```
+
+Runbook and promotion gates:
+- `docs/TRAINING_RUNBOOK_QLORA_LORA.md`
+- `docs/MODEL_PROMOTION_GATES.md`
+
 **Training data for retraining:** The tool uses a RAG knowledge base (not full LLM weight fine-tuning). To add your own examples and optionally retrain or fine-tune elsewhere:
 
 - **RAG:** Add markdown under `data/knowledge/` and/or append to the output of `generate_data.py`; run `load_knowledge.py` to reload. No weights: all chunks are used for retrieval.

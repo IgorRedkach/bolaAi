@@ -1,0 +1,274 @@
+========================================
+
+Here is the twenty-sixth system, meticulously expanded to meet the request for significantly increased documentation size and depth, delivered in three distinct chunks. We are shifting into the **Banking & Financial Technology (FinTech)** sector, focusing on an **Anti-Money Laundering (AML) Transaction Review Gateway**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** AML Sentinel Transaction Review Gateway
+**Document Version:** 7.0.2 (FINAL)
+**Classification:** CRITICAL FINANCIAL / FDIC, KYC, & BSA COMPLIANCE SCOPE
+**Domain:** Banking / FinTech / Anti-Money Laundering (AML)
+
+## 1.0 Executive Summary and Compliance Mandate
+AML Sentinel is the mandatory internal platform used by a major digital bank to monitor, investigate, and adjudicate high-value and potentially fraudulent transactions. The platform is regulated by the Bank Secrecy Act (BSA) and must adhere to strict Know Your Customer (KYC) and transaction monitoring policies. Any transaction over $$ 10,000$ or flagged by the automated risk engine must immediately enter a review workflow.
+
+The core requirement is that once a transaction is flagged (`STATUS: FLAGGED`), it must be instantly frozen (`IS_FROZEN: TRUE`) to prevent settlement. Only a Level 3 AML Administrator, following a mandatory three-step review process and physical sign-off, is allowed to unfreeze and approve the transaction. A systemic architectural flaw (a concurrency gap) allows a Level 1 Compliance Officer to shortcut this entire workflow.
+
+## 2.0 Comprehensive Network Topology & Workflow Engine
+The architecture is partitioned into high-throughput transaction processing and low-latency compliance review.
+
+### 2.1 The Transaction Core (High Velocity)
+* **Payment Processor API:** Handles the initial request (e.g., ACH, Wire Transfer). All new transactions are immediately created in the ledger with `STATUS: PENDING`.
+* **AML Risk Engine (Fuzzy Logic):** A Python service that scores every transaction. If the score exceeds a threshold (e.g., $9.0$ on a $10.0$ scale), it initiates the freezing process by calling the Gateway.
+
+* **AML Sentinel Gateway (Java/Spring Boot):** The central microservice for human compliance review. It exposes endpoints to modify the transaction status (`FLAG`, `FREEZE`, `APPROVE`) and enforces RBAC based on the user's role.
+* **PostgreSQL Ledger:** The source of truth for all transactions. The primary table includes columns for the transaction state, the freeze flag, and the review metadata.
+
+## 3.0 Identity, Role-Based Access Control (RBAC), and Critical State Management
+Authorization is strictly governed by the hierarchy of roles, and integrity relies on the proper transition of the transaction state machine.
+
+### 3.1 Role Definitions (The Functional Pivot Target)
+| Role | Access Scope | Critical Transaction Operations |
+| :--- | :--- | :--- |
+| TIER_1_SUPPORT | Read-only access to customer data. | None |
+| COMPLIANCE_OFFICER (Low Privilege) | Read/Write status (FLAG/REJECT) and add notes. | `POST /transactions/{id}/flag` |
+| AML_ADMIN (High Privilege) | Unfreeze, Approve, and execute settlement. | `POST /transactions/{id}/approve` |
+
+### 3.2 The Critical State Transition (The Race Condition Window)
+The system mandates the following security-critical sequence for high-risk transactions:
+RISK DETECTED: AML Risk Engine sets `STATUS: FLAGGED` and `IS_FROZEN: FALSE`.
+FREEZE COMMAND (ToC): AML Sentinel Gateway receives the freezing request. It reads the current status.
+FREEZE COMMAND (ToU): The transaction record is updated to `IS_FROZEN: TRUE`.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+Internal Security Engineering Note: The performance team implemented asynchronous messaging for transaction freezing (using Kafka) to prevent the web service from blocking during high-volume periods. This refactoring was done without implementing a row-level database lock, creating the TOCTOU window. Tracked as RISK-AML-019.
+
+**Taxonomy Pattern:** 8.1 (Race Condition / TOCTOU), 2.1 (Functional Pivot), & 8.5 (State Corruption)
+**Sub-system:** AML Sentinel Gateway (`POST /api/v3/transactions/{id}/approve`)
+
+**The Deep Architectural Flaw:**
+This is a three-part critical failure involving concurrency, RBAC, and business logic trust.
+
+1. **Functional Pivot (Pattern 2.1):** The RBAC logic on the `APPROVE` endpoint is incorrectly implemented. Instead of checking `IF user.role == AML_ADMIN`, it checks `IF user.role != TIER_1_SUPPORT AND IS_FROZEN == FALSE`. This faulty logic allows the low-privileged `COMPLIANCE_OFFICER` to attempt the high-privilege `APPROVE` operation, provided the transaction is not frozen.
+
+2. **Race Condition (Pattern 8.1):** When a transaction is automatically flagged, the AML Sentinel Gateway spawns two threads: Thread A (Freezing Logic) and Thread B (Approval Check). The attacker (a Compliance Officer who is monitoring the flow) uses a concurrent request immediately upon seeing the transaction is $F L A G G E D$. The attacker's request (Thread B - Approval) hits the system just before the automated freezing request (Thread A) commits its database change.
+
+3. **TOCTOU Gap:**
+*   Time-of-Check (ToC) by Attacker: Attacker (Thread B) queries DB. Reads `IS_FROZEN: FALSE`. Proceeds to Approval.
+*   Time-of-Use (ToU) by Attacker: Attacker's approval logic runs and commits `STATUS: APPROVED`.
+*   The later-arriving AML Freeze (Thread A) then runs and attempts to set `IS_FROZEN: TRUE`, but the transaction status is now already `APPROVED`, which invalidates the freeze command, locking the transaction in an approved state.
+
+1. **The Setup:** A $$ 500,000$ wire transfer is submitted and is instantly flagged by the AML Risk Engine. It is now `STATUS: FLAGGED`, `IS_FROZEN: FALSE`.
+2. **The Concurrency Strike:** The Compliance Officer (`user_comp_991X`) immediately submits a synchronous, high-priority `POST /transactions/TX-991A/approve` request, exploiting the functional pivot flaw.
+3. **The Collision:** The approval request hits the database and checks `IS_FROZEN`. Since the asynchronous freeze command hasn't executed the database write yet, the approval passes the check.
+4. **The Result:** The attacker's thread commits `STATUS: APPROVED`. The asynchronous AML freeze command arrives microseconds later, sees the transaction is no longer `PENDING` or `FLAGGED` but `APPROVED`, and silently fails its update, or updates the obsolete state. The malicious transaction is permanently settled, bypassing the entire regulatory review workflow.
+
+***
+
+**Document Version:** 4.1.0
+**Applies to Architecture:** AML Sentinel Transaction Review Gateway v7.0.2
+
+## 5.0 Core Transaction Ledger Schema (PostgreSQL)
+
+```sql
+-- 1. Master Transaction Ledger (The Target of State Corruption)
+CREATE TABLE core_transactions (
+transaction_id VARCHAR(50) PRIMARY KEY,
+originating_account_id VARCHAR(50) NOT NULL,
+beneficiary_details JSONB NOT NULL,
+amount DECIMAL(18, 2) NOT NULL,
+status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'FLAGGED', 'APPROVED', 'REJECTED')),  
+is\_frozen BOOLEAN DEFAULT FALSE, -- Must be TRUE if FLAGGED  
+
+aml\_risk\_score DECIMAL(3, 1) DEFAULT 0.0,  
+created\_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT\_TIMESTAMP 
+);
+
+CREATE INDEX idx_status_frozen ON core_transactions(status, is_frozen);
+
+-- 2. User Role Mapping
+CREATE TABLE internal_users (
+user_id VARCHAR(50) PRIMARY KEY,
+role_name VARCHAR(20) NOT NULL CHECK (role_name IN ('TIER_1_SUPPORT', 'COMPLIANCE_OFFICER', 'AML_ADMIN')),
+is_active BOOLEAN DEFAULT TRUE
+);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot)
+
+```java
+package com.amlsentinel.gateway.controllers;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.transaction.annotation.Transactional;
+import javax.servlet.http.HttpServletRequest;
+
+@RestController
+@RequestMapping("/api/v3/transactions")
+public class TransactionController {
+// POST /api/v3/transactions/{id}/approve
+@PostMapping(value = "/{id}/approve")
+@Transactional // Standard transaction isolation (NOT serializable, NO row lock)
+public ResponseEntity<String> approveTransaction(@PathVariable("id") String txId, HttpServletRequest request) {
+    
+    String userId = request.user.getUserId();
+    String userRole = request.user.getRole(); // e.g., 'COMPLIANCE\_OFFICER'
+    
+    // The role check is weak, allowing COMPLIANCE\_OFFICER access to this high-privilege function.
+    if ("TIER\_1\_SUPPORT".equals(userRole)) {
+        return ResponseEntity.status(403).body("{\"error\": \"Role is read-only.\"}");
+    }
+    
+    TransactionRecord record = transactionRepo.findById(txId);
+    
+    if (record == null || "APPROVED".equals(record.getStatus()) || "REJECTED".equals(record.getStatus())) {
+        return ResponseEntity.status(409).body("{\"error\": \"Transaction already finalized.\"}");
+    }
+    
+    // Reads the state WITHOUT 'SELECT FOR UPDATE' database lock. 
+    // In a race, the concurrent AML freeze thread has not yet updated IS\_FROZEN to TRUE.
+    if (record.isFrozen()) {
+        // This check is the primary defense, but it fails in the race window.
+        return ResponseEntity.status(403).body("{\"error\": \"Transaction is currently frozen and requires AML Admin override.\"}");
+    }
+    
+    // Check passes because IS\_FROZEN is still FALSE in the concurrent read.
+    
+    // --- Step 3: Time of Use (ToU) ---
+    // The irreversible state change is committed.
+    record.setStatus("APPROVED"); 
+    record.setApprovedBy(userId);
+    transactionRepo.save(record);
+    
+    // Asynchronous settlement is triggered by the status change event.
+    eventBus.publish(new TransactionApprovedEvent(txId));
+
+    
+    return ResponseEntity.ok("{\"status\": \"APPROVED\", \"txId\": \"" + txId + "\"}");
+}
+}
+```
+
+## 7.0 REST API Contracts (The Concurrent Strike)
+
+### 7.1 Intended Safe Operation (Automated Freeze)
+This request is triggered internally by the AML Risk Engine (Thread A). It is asynchronous to the attacker's thread.
+
+**Target URI:** `POST /api/v3/transactions/TX-991A/freeze`
+**Payload (Internal System):**
+```json
+{
+"reason": "AML_RISK_SCORE_EXCEEDED_9.0"
+}
+```
+Behavior: Executes `UPDATE core_transactions SET is_frozen = TRUE WHERE transaction_id = 'TX-991A'`. The attacker must strike before this query commits.
+
+### 7.2 The Malicious Concurrent Operation (Attacker - Thread B)
+The low-privilege Compliance Officer executes the high-privilege `approve` endpoint concurrently, leveraging the Functional Pivot.
+
+**Target URI:** `POST /api/v3/transactions/TX-991A/approve`
+**Malicious Request Context:**
+* **Attacker Identity:** `user_comp_991X` (Role: `COMPLIANCE_OFFICER`)
+* **Payload:** Empty body (no parameters required for approval).
+
+The immediate success response confirms the attacker's thread won the race, committing the approval before the official freeze could lock the transaction.
+```json
+{
+"status": "APPROVED",
+"txId": "TX-991A"
+}
+```
+
+
+**Applies to Architecture:** AML Sentinel Transaction Review Gateway v7.0.2
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 8.1, 2.1, & 8.5)
+
+This HTTP Archive (HAR) trace captures the moment the concurrent attack successfully corrupts the financial state machine. The trace simulates the critical collision between the AML system's automated freezing command and the low-privileged attacker's approval request.
+
+The attacker (`user_comp_991X`) sends a request to the high-privilege `/approve` endpoint, exploiting the flawed RBAC check (Functional Pivot, Pattern 2.1). Concurrently, the internal AML Risk Engine attempts to execute the necessary freeze command.
+
+The transaction log shows that the attacker's thread (Thread B) successfully executed and returned a `200 OK` in $125 \mathrm{~ms}$. This low latency proves the thread read the status before the higher-latency, asynchronous freezing command (Thread A) could commit the `is_frozen: TRUE` update. The resulting immutable audit log record confirms the highly suspicious transaction (`TX-991A`) was permanently approved by an unauthorized, low-privilege user, bypassing the mandatory security control (Pattern 8.1).
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Spring Boot APM Logs / PostgreSQL Transaction Traces",
+"version": "7.0.2"
+},
+"entries": [
+{
+"comment": "1. AUTOMATED: AML Risk Engine attempts to FREEZE (Thread A, Asynchronous)",
+"startedDateTime": "2026-04-09 T11:05:00.010Z",
+"time": 250,
+"dbTrace": "UPDATE core_transactions SET is_frozen = TRUE WHERE transaction_id = 'TX-991A' AND status != 'APPROVED'",
+"status": "DB_COMMIT_OK"
+},
+{
+"comment": "2. ATTACKER: Compliance Officer attempts APPROVAL (Thread B, Synchronous)",
+"startedDateTime": "2026-04-09 T11:05:00.012Z",
+"time": 125,
+"request": {
+"method": "POST",
+"url": "https://api.aml-sentinel.bank/api/v3/transactions/TX-991A/approve",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoidXNlcl9jb21wXzk5MVgiLCJyb2xlIjoiQ09NUExJQU5DRV9PRkZJQ0VSIn0..." },
+{ "name": "x-compliance-override", "value": "false" }
+],
+"postData": { "mimeType": "application/json", "text": "{}" },
+"bodySize": 2
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" }
+],
+"content": {
+"size": 52,
+"mimeType": "application/json",
+"text": "{\"status\": \"APPROVED\", \"txId\": \"TX-991A\", \"settlement_event\": true}"
+},
+"bodySize": 52
+}
+},
+{
+"comment": "3. AUDIT: Final State of Transaction TX-991A (Corrupted State)",
+"startedDateTime": "2026-04-09 T11:05:00.300Z",
+"time": 5,
+"dbTrace": "SELECT status, is_frozen FROM core_transactions WHERE transaction_id = 'TX-991A'",
+"dbResult": {
+"status": "APPROVED",
+"is_frozen": false
+}
+}
+]
+}
+}
+```
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+1. **TOCTOU Concurrency Signature (Pattern 8.1):**
+* **Temporal Proof:** The AI must note the start times: the automated freeze process starts at `...0.010Z`, and the attacker's synchronous approval request starts just $2 \mathrm{~ms}$ later at `...0.012Z`. This near-simultaneous execution proves the attacker intentionally used parallelism to force a database collision.
+* **Corrupted Final State (Pattern 8.5):** The most critical piece is the final database trace: `status: APPROVED` but `is_frozen: false`. This is an invalid state according to business logic (a high-risk transaction should never be both unfrozen and approved). This state divergence confirms the race condition caused severe data integrity corruption.
+
+* **Role vs Action Mismatch:** The authenticated role is `COMPLIANCE_OFFICER`, yet the successful action is `APPROVE`, which is restricted to `AML_ADMIN`. The successful `200 OK` response proves the Functional Pivot worked, allowing a low-privilege user access to a high-privilege path.
+
+3. **Forensic and Audit Gaps:**
+* **Logging Issue:** The final state of `is_frozen: false` indicates that the system's primary security measure was bypassed. The subsequent audit trail will show the transaction was approved by a Compliance Officer before it was officially frozen, obscuring the fact that the freeze command was never permitted to finalize its state, which is a major forensic failure.
+
+4. **Financial and Regulatory Blast Radius:**
+* The model learns that race conditions in financial state machines are catastrophic, leading to immediate regulatory non-compliance (BSA violation) and facilitating potential money laundering by settling a high-risk transaction that should have been held for review.
+
+========================================
+========================================
+
+========================================
+========================================
+
+========================================

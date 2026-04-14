@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** FreightLens Tracking API
+**Document Version:** 1.0.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Logistics / Supply Chain
+**Architecture:** REST + Kafka + GraphQL dashboard
+**Training Example ID:** BOLA-6712
+
+## 1.0 Executive Summary
+FreightLens Tracking API is a logistics / supply chain platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v2/records endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 4.4 — IaC state file exposure
+
+## 3.0 Database Schema
+```sql
+
+-- Record table
+CREATE TABLE records (
+    record_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_record_tenant ON records(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 4.4 — IaC state file exposure (Integrity)
+
+The `GET/PATCH/DELETE /api/v2/records/:id` endpoint accepts a `record_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-71ED` can access objects owned by `ORG-CED8`.
+
+_Specific exploitation for Pattern 4.4:_ The `/api/v2/records` handler does not enforce tenant/owner boundaries for Pattern 4.4.
+
+## 5.0 Artifact (schema)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:32:21.007155+00:00",
+        "time": 176,
+        "request": {
+          "method": "DELETE",
+          "url": "https://api.freightlens-tra.example.com/api/v2/records/REC-8712",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-71ED"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"REC-8712\",\"tenantId\":\"ORG-CED8\",\"ownerId\":\"other-user-71edced8\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-CED8\"}"
+          },
+          "bodySize": 244
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-44-6712:** Pattern 4.4 detected in `/api/v2/records` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-6812.

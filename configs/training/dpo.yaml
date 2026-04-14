@@ -1,0 +1,16 @@
+run_name: dpo_default
+mode: dpo
+base_model: Qwen/Qwen2.5-Coder-3B-Instruct
+dataset:
+  dpo_train: data/training/dpo/train.jsonl
+  dpo_valid: data/training/dpo/valid.jsonl
+training:
+  beta: 0.1
+  learning_rate: 0.00005
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  num_train_epochs: 1
+  max_steps: 0
+  max_seq_length: 4096
+outputs:
+  adapters_dir: models/adapters

@@ -1,0 +1,202 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** InfraBuild CloudOps
+**Document Version:** 2.2.0 (FINAL)
+**Classification:** INTERNAL / INFRASTRUCTURE SECRETS
+**Domain:** DevOps / Infrastructure-as-Code (IaC) / CI-CD
+
+## 1.0 Executive Summary
+InfraBuild CloudOps is an internal developer portal that wraps Terraform CLI operations to standardize cloud deployments across the organization. Instead of developers running `terraform apply` on their local machines, they trigger deployments via the InfraBuild web dashboard.
+
+To track the current state of the deployed AWS infrastructure, Terraform requires a state file (`.tfstate`). Because state files contain a complete map of the cloud environment—including raw, unencrypted database master passwords, API keys, and private subnets—they are stored in a centralized, highly restricted Amazon S3 bucket (`s3://infrabuild-tf-state-prod`).
+
+## 2.0 Network Topology & Storage Architecture
+The system acts as a middleware broker between developers and the AWS cloud environment.
+
+### 2.1 The Control Plane (API Gateway & Backend)
+* **Ingress:** API Gateway handling requests from the React frontend.
+* **Backend:** A Node.js microservice (`WorkspaceService`) that manages project configurations, environment variables, and AWS role assumptions.
+* **Worker Nodes:** Ephemeral containers that pull down the Terraform code, download the state from S3, execute the deployment, and push the updated state back to S3.
+
+### 2.2 The Storage Backend (S3 & DynamoDB)
+* **S3 Bucket:** Stores the actual `terraform.tfstate` JSON files. Segmented by project folders.
+* **DynamoDB:** Used for state locking (to prevent concurrent deployments from corrupting the state file).
+
+## 3.0 Identity, Projects, and Authorization
+Access to infrastructure is strictly compartmentalized by Project Teams.
+
+### 3.1 Developer Authentication
+Developers authenticate using GitHub Enterprise SSO, receiving a JWT.
+
+### 3.2 Workspace Authorization (RBAC)
+Every infrastructure environment is mapped to a `workspace_id`. The Node.js backend maintains a mapping in PostgreSQL of which developers belong to which workspaces.
+* **Example:** User `dev_77` is assigned to `workspace_frontend_dev`. They are strictly prohibited from viewing or triggering deployments for `workspace_core_db_prod`.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 PostgreSQL RBAC Schema (The Intended AuthZ)
+
+```sql
+-- 1. Workspaces Table
+CREATE TABLE workspaces (
+    workspace_id VARCHAR(100) PRIMARY KEY, -- e.g., 'workspace_core_db_prod'
+    environment VARCHAR(20) NOT NULL,
+    aws_account_id VARCHAR(12) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. Workspace Memberships (The Access Control List)
+CREATE TABLE workspace_members (
+    workspace_id VARCHAR(100) REFERENCES workspaces(workspace_id),
+    user_id VARCHAR(50) NOT NULL, -- Extracted from GitHub SSO JWT
+    role VARCHAR(20) DEFAULT 'viewer',
+    PRIMARY KEY (workspace_id, user_id)
+);
+```
+
+## 6.0 Implementation Notes (Node.js / Express)
+
+### 6.1 ALTERNATE Storage API Route
+```javascript
+const AWS = require('aws-sdk');
+const s3 = new AWS.S3();
+
+// GET /api/v2/workspaces/:workspace_id/state
+app.get('/api/v2/workspaces/:workspace_id/state', requireAuth, async (req, res) => {
+
+    // 1. The user provides the target workspace in the URL path
+    const targetWorkspace = req.params.workspace_id;
+    const userId = req.user.id; // e.g., 'dev_77'
+
+    // The code FAILS to query the PostgreSQL `workspace_members` table.
+    // It should execute: SELECT * FROM workspace_members WHERE user_id = userId AND workspace_id = targetWorkspace;
+
+    // 2. Blindly construct the S3 Path based on user input
+    const params = {
+        Bucket: 'infrabuild-tf-state-prod',
+        Key: `${targetWorkspace}/terraform.tfstate`
+    };
+
+    try {
+        // 3. Fetch from S3 using the Backend's IAM Role
+        const data = await s3.getObject(params).promise();
+
+        // 4. Return the highly sensitive JSON state file to the user
+        res.setHeader('Content-Type', 'application/json');
+        res.send(data.Body.toString('utf-8'));
+    } catch (err) {
+        res.status(404).send({ error: "State file not found" });
+    }
+});
+```
+
+## 7.0 The Impact: Exposed `.tfstate` File (JSON Snippet)
+
+**Snippet of the returned `terraform.tfstate` for `workspace_core_db_prod`:**
+```json
+{
+  "version": 4,
+  "terraform_version": "1.5.0",
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "core_transaction_db",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 1,
+          "attributes": {
+            "address": "core-db-prod-v2.cluster-c9xyz.us-east-1.rds.amazonaws.com",
+            "arn": "arn:aws:rds:us-east-1:123456789012:db:core-db-prod-v2",
+            "engine": "postgres",
+            "engine_version": "15.3",
+            "id": "core-db-prod-v2",
+            "port": 5432,
+            "username": "sysadmin_master",
+            "password": "SuperSecretProdPassword9921!!", 
+            "publicly_accessible": false,
+            "vpc_security_group_ids": ["sg-08a192b3c4d5e"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+*Security Note: The operator now possesses the absolute master `username`, `password`, and `address` of the production database. If they can route into the VPC (e.g., via a compromised developer VPN), the database is completely compromised.*
+
+
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing the junior frontend developer swapping the URL path to target the `workspace_core_db_prod` and successfully extracting the plaintext state file containing the AWS credentials.
+
+
+
+# SYNTHETIC ARTIFACT: STORAGE API object-scope & TFSTATE EXPOSURE (HAR TRACE)
+**Applies to Architecture:** InfraBuild CloudOps v2.2.0
+
+
+The response body clearly shows the extraction of the production RDS database credentials.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Envoy Ingress Proxy / Audit Logs",
+      "version": "1.24.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T19:16:48.112Z",
+        "time": 305,
+        "request": {
+          "method": "GET",
+          "url": "https://api.infrabuild.internal/api/v2/workspaces/workspace_core_db_prod/state",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.infrabuild.internal" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZXZfNzciLCJyb2xlIjoiZnJvbnRlbmRfZGV2ZWxvcGVyIn0..." },
+            { "name": "accept", "value": "application/json" }
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-s3-proxy-latency", "value": "290ms" }
+          ],
+          "content": {
+            "size": 412,
+            "mimeType": "application/json",
+            "text": "{\"version\": 4, \"terraform_version\": \"1.5.0\", \"resources\": [{\"mode\": \"managed\", \"type\": \"aws_db_instance\", \"name\": \"core_transaction_db\", \"instances\": [{\"attributes\": {\"address\": \"core-db-prod-v2.cluster-c9xyz.us-east-1.rds.amazonaws.com\", \"username\": \"sysadmin_master\", \"password\": \"SuperSecretProdPassword9921!!\"}}]}]}"
+          },
+          "bodySize": 412
+        }
+      }
+    ]
+  }
+}
+```
+
+
+3. **Internal Threat Identification:** This trace simulates an insider threat. The `authorization` header proves the user is authenticated on the internal network (`api.infrabuild.internal`). The model learns that zero-trust must apply internally, not just at the public edge.
+
+## 8.0 Platform Operations Addendum
+### 8.1 Pipeline Reliability Objectives
+- Build-to-deploy target tracks end-to-end duration for standard release classes.
+- Queue depth and worker saturation metrics control autoscaling for CI workloads.
+- Artifact integrity checks run before deploy-stage promotion.
+
+### 8.2 Runtime Telemetry
+- Control-plane APIs expose latency, error-rate, and transition-rate dashboards.
+- Webhook intake includes replay detection and source-identity trace correlation.
+- On-call views correlate release events with production SLO deviations.
+
+### 8.3 Release Discipline
+- High-risk flow changes require staged rollout and rollback simulation evidence.
+- Change windows are aligned with dependency maintenance calendars.
+- Release notes include operational guardrails and post-release verification tasks.

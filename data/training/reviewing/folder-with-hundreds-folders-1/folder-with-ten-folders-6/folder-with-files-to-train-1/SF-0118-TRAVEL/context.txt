@@ -1,0 +1,116 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SkyPort Global Distribution (Salesforce-Integrated)
+**Document Version:** 2.2.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Travel / GDS
+**Platform:** Salesforce Lightning / Aura Framework
+**Training Example ID:** SF-0118
+
+## 1.0 Executive Summary
+SkyPort Global Distribution is a travel / gds platform built on Salesforce Lightning Experience.
+The front-end uses Aura Components that communicate with Apex Controllers via the Salesforce
+Aura Framework's `c.ControllerName.methodName` call pattern. Authorization is expected to be
+enforced through Salesforce sharing rules (OWD, Role Hierarchy, Sharing Rules) AND explicitly
+in Apex controller code using `WITH SECURITY_ENFORCED` or manual ownership checks.
+
+## 2.0 Architecture Overview
+- **Front-End:** Salesforce Lightning Aura Components (LWC migrated to Aura)
+- **Middle Layer:** Apex Controllers called via Aura Action Framework
+- **Data Layer:** Salesforce Objects with standard and custom fields
+- **Auth:** Salesforce Session ID (Bearer token), OWD = Private on Contract object
+
+## 3.0 Salesforce Object Schema
+```sql
+-- Contract Object (Standard + Custom Fields)
+Contract (
+  Id           VARCHAR(18) PRIMARY KEY,   -- Salesforce record ID
+  Name         VARCHAR(255),
+  OwnerId      VARCHAR(18),               -- Links to User object
+  AccountId    VARCHAR(18),               -- Parent account
+  SensitiveData__c VARCHAR(500),          -- Custom field: sensitive PII/business data
+  InternalNotes__c  TEXT,                 -- Custom field: internal review notes
+  IsDeleted    BOOLEAN DEFAULT FALSE
+)
+```
+
+## 4.0 Apex Controller (Vulnerable Implementation)
+```apex
+public class ContractController {
+    @AuraEnabled
+    public static List<Contract> getContractDetails(String contractId, List<String> fields) {
+        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
+        // VULNERABILITY: no ownership check on contractId parameter
+        return [Contract]Database.query(
+            'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
+            'FROM Contract ' +
+            'WHERE Id = :' + contractId
+            // Missing: AND OwnerId = UserInfo.getUserId()
+            // Missing: WITH SECURITY_ENFORCED
+        );
+    }
+}
+```
+
+## 5.0 Vulnerability Context
+**Pattern:** 9.2 — SOQL and Salesforce record-level access (Platform)
+
+The Apex controller `c.ContractController.approveContract` accepts a `contractId` parameter from the client-side
+Aura component. The controller runs `without sharing` and does not validate that the
+authenticated user owns or has been granted access to the requested record.
+
+An attacker with a valid Salesforce session can substitute any `contractId` value in the
+Aura framework request payload to access records owned by other users.
+
+## 6.0 HAR Capture (Aura Framework Request)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:40.169445+00:00",
+        "time": 173,
+        "request": {
+          "method": "POST",
+          "url": "https://a7fa36be.lightning.force.com/aura",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer 00DA7FA36BE!ARa7fa36be..."},
+            {"name": "Content-Type", "value": "application/x-www-form-urlencoded"},
+            {"name": "X-SFDC-Session", "value": "00DA7FA36BE!ARa7fa36be..."}
+          ],
+          "postData": {
+            "mimeType": "application/x-www-form-urlencoded",
+            "params": [
+              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.ContractController.approveContract",       "callingDescriptor": "UNKNOWN",       "params": {         "contractId": "00136BE",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "aura.token", "value": "undefined"}
+            ]
+          },
+          "bodySize": 459
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{   \"actions\": [     {       \"id\": \"1;a\",       \"state\": \"SUCCESS\",       \"returnValue\": {         \"records\": [           {             \"Id\": \"00136BE\",             \"Name\": \"Victim Contract Record\",             \"OwnerId\": \"005VICTIM\",             \"InternalNotes__c\": \"CONFIDENTIAL: internal review notes\",             \"SensitiveData__c\": \"SSN: 000-62-8515\"           }         ]       },       \"error\": []     }   ] }"
+          },
+          "bodySize": 539
+        }
+      }
+    ]
+  }
+}
+```
+
+## 7.0 Sharing Rule Configuration
+```
+Contract OWD: Private
+Sharing Rules: Users can access records they own or have been explicitly shared with them.
+Apex Controller Declaration: "public class ContractController" (WITHOUT "with sharing")
+```
+
+## 8.0 Known Risks
+- **RISK-SF-118:** Controller declared without `with sharing`. Sharing rules not enforced.
+- **RISK-SF-119:** No ownership check in SOQL WHERE clause.
+- Client-supplied `contractId` is directly interpolated into SOQL without validation.

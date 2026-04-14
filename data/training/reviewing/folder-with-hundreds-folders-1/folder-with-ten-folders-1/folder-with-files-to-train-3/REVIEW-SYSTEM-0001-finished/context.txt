@@ -1,0 +1,241 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** MetroPulse Smart Transit Grid
+**Document Version:** 3.2.0 (FINAL)
+**Classification:** SENSITIVE - MUNICIPAL INFRASTRUCTURE
+**Domain:** Smart Cities / Intelligent Transportation Systems (ITS)
+
+## 1.0 Executive Summary
+MetroPulse is a municipal traffic orchestration platform deployed across 4,500 interconnected intersections. It ingests real-time telemetry from edge sensors (induction loops, pedestrian cameras, LiDAR) to optimize traffic light timing, reduce congestion, and prioritize emergency vehicle routing (EVR). 
+
+The system bridges low-latency edge computing (MQTT) with a cloud-native command plane. Traffic flow and spatial relationships are mapped dynamically using a Neo4j Graph Database, allowing the system to calculate cascading congestion effects in real-time.
+
+## 2.0 Network Topology & Edge Boundaries
+The architecture is divided into the Physical Edge, the Ingress Broker, and the Cloud Command Plane.
+
+### 2.1 The Physical Edge (Intersections)
+* **Hardware:** Each intersection is controlled by a hardened Edge Node (NEMA TS2 compliant controller).
+* **Communication:** Nodes communicate with the cloud over dedicated 5G APNs (Access Point Names) provided by a major telecom carrier, isolating the traffic from the public internet.
+* **Protocol:** Devices publish state and subscribe to commands via MQTT over TLS 1.2.
+
+### 2.2 Cloud Ingress (AWS IoT Core)
+* **MQTT Broker:** AWS IoT Core acts as the centralized message broker. It handles millions of pub/sub messages per minute.
+* **Stream Processing:** Inbound telemetry is pushed to Amazon Kinesis Data Streams for real-time aggregation before being written to the Graph Database.
+
+### 2.3 Cloud Command Plane & Web Portal
+* **Microservices:** Kubernetes (EKS) cluster running Go microservices for traffic logic and Node.js for the GraphQL/REST API Backend-for-Frontend (BFF).
+* **Graph Database:** A Neo4j Enterprise cluster models the physical city grid. Nodes represent intersections; Edges represent road segments with weights based on current congestion.
+* **Human-Machine Interface (HMI):** A React-based web dashboard used by municipal traffic engineers at the Department of Transportation (DoT) control center.
+
+## 3.0 Identity, Tenancy, and Authorization
+Authorization is physically divided by municipal "Districts" (e.g., North District, South District).
+
+### 3.1 Edge Node Identity (mTLS)
+Every physical traffic controller is provisioned with an X.509 certificate linked to its unique hardware serial number (e.g., `node-hw-8819a`). AWS IoT Core strictly authenticates connections using Mutual TLS (mTLS).
+
+### 3.2 Operator Identity (OAuth2 / OIDC)
+Traffic engineers authenticate to the Web HMI via Auth0. The resulting JSON Web Token (JWT) contains their specific district assignments.
+* **Example Claim:** `"districts_authorized": ["D-NORTH", "D-WEST"]`
+
+### 3.3 The Authorization Model
+When an operator issues a manual override (e.g., holding a light green for a parade), the API must verify that the target Intersection Node belongs to a district listed in the operator's `districts_authorized` JWT claim.
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 Graph Database Model (Neo4j Cypher)
+MetroPulse relies on a graph data model rather than a relational database to calculate traffic routing and congestion cascades. 
+
+### 5.1 Node and Relationship Definitions
+The following Cypher queries represent the creation of the core entities and their physical relationships.
+
+```cypher
+// 1. Create Municipal Districts (The Authorization Boundary)
+CREATE (dNorth:District {district_id: 'D-NORTH', name: 'North Metro', manager_id: 'usr_admin_11'})
+CREATE (dSouth:District {district_id: 'D-SOUTH', name: 'South Metro', manager_id: 'usr_admin_12'})
+
+// 2. Create Intersection Nodes (Predictable Integer IDs per the V3 API migration)
+CREATE (i1:Intersection {node_id: 45012, hw_serial: 'node-hw-8819a', status: 'ONLINE', lat: 35.779, lon: -78.638})
+CREATE (i2:Intersection {node_id: 45013, hw_serial: 'node-hw-8822b', status: 'ONLINE', lat: 35.772, lon: -78.641})
+
+// 3. Define the physical Location mapping (Crucial for AuthZ)
+// IMPLEMENTATION NOTE: The Node Command Service currently bypasses checking this relationship.
+MATCH (i:Intersection {node_id: 45012}), (d:District {district_id: 'D-NORTH'})
+CREATE (i)-[:LOCATED_IN]->(d)
+
+MATCH (i:Intersection {node_id: 45013}), (d:District {district_id: 'D-SOUTH'})
+CREATE (i)-[:LOCATED_IN]->(d)
+
+// 4. Define physical road connections and real-time congestion weights
+MATCH (i1:Intersection {node_id: 45012}), (i2:Intersection {node_id: 45013})
+CREATE (i1)-[:CONNECTS_TO {road_name: 'Main St', distance_meters: 850, current_congestion_factor: 1.2}]->(i2)
+```
+
+## 6.0 Edge IoT Contracts (MQTT Payloads)
+When a cloud command is issued, it is pushed to the physical traffic controller via AWS IoT Core over MQTT.
+
+### 6.1 Downstream Command Payload (Cloud to Edge)
+* **MQTT Topic:** `metropulse/cmd/intersection/node-hw-8819a`
+* **QoS (Quality of Service):** 1 (At least once delivery)
+
+```json
+{
+  "command_id": "cmd_991827b_11a",
+  "target_hw_serial": "node-hw-8819a",
+  "instruction": "MANUAL_OVERRIDE",
+  "parameters": {
+    "target_phase": "GREEN_N_S",
+    "duration_seconds": 120,
+    "flash_pedestrian_warning": true
+  },
+  "issued_by": "usr_operator_jdoe",
+  "timestamp": "2026-04-08T18:30:12Z",
+  "cryptographic_signature": "sha256-rsa-sig-from-cloud-hsm"
+}
+```
+*Note: The edge device does not care about user roles or JWTs. It only verifies the `cryptographic_signature` signed by the Cloud AWS KMS. Therefore, the cloud API MUST be the perfect gatekeeper.*
+
+## 7.0 REST API Contract (HMI to Cloud)
+The web dashboard used by traffic engineers communicates with the Node Command microservice using a standard REST/JSON interface.
+
+### 7.1 Issue Manual Signal Override
+**Endpoint:** `POST /api/v3/nodes/{node_id}/override`
+**Description:** Forces a traffic light into a specific phase, overriding the localized ML-driven timing cycle.
+**Authorization Verification (Theoretical):** 1. BFF validates Auth0 JWT. 
+2. BFF extracts `districts_authorized` array.
+3. Backend *should* execute a Cypher query: `MATCH (i:Intersection {node_id: $req_id})-[:LOCATED_IN]->(d:District) RETURN d.district_id` and ensure it matches the JWT array. 
+
+**Required Headers:**
+```http
+Authorization: Bearer <Valid Auth0 JWT>
+Content-Type: application/json
+X-Correlation-ID: <UUID>
+```
+
+**Expected Request Payload:**
+```json
+{
+  "override_phase": "GREEN_N_S",
+  "duration_seconds": 120,
+  "reason_code": "EMERGENCY_VEHICLE_ROUTING"
+}
+```
+
+**Success Response (HTTP 202 Accepted):**
+```json
+{
+  "status": "QUEUED",
+  "node_id": 45012,
+  "estimated_execution_ms": 150
+}
+```
+
+
+
+
+
+
+# SYNTHETIC ARTIFACT: IOT NODE MANIPULATION (HAR TRACE)
+**Applies to Architecture:** MetroPulse Smart Transit Grid v3.2.0
+
+This HTTP Archive (HAR) trace captures the moment a North District operator (`usr_operator_09`) successfully commands an intersection in their own district, realizes the IDs are predictable integers, and simply increments the ID to control a traffic light in the South District. 
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Kubernetes Ingress NGINX",
+      "version": "1.8.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T18:30:10.115Z",
+        "time": 240,
+        "request": {
+          "method": "POST",
+          "url": "https://api.metropulse.city/api/v3/nodes/45012/override",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.metropulse.city" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfb3BlcmF0b3JfMDkiLCJkaXN0cmljdHNfYXV0aG9yaXplZCI6WyJELU5PUlRIIl19..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-correlation-id", "value": "corr-1122a-3344b" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"override_phase\": \"GREEN_N_S\", \"duration_seconds\": 120, \"reason_code\": \"EMERGENCY_VEHICLE_ROUTING\"}"
+          },
+          "bodySize": 102
+        },
+        "response": {
+          "status": 202,
+          "statusText": "Accepted",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 86,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"QUEUED\", \"node_id\": 45012, \"estimated_execution_ms\": 145}"
+          },
+          "bodySize": 86
+        }
+      },
+      {
+        "startedDateTime": "2026-04-08T18:31:45.881Z",
+        "time": 210,
+        "request": {
+          "method": "POST",
+          "url": "https://api.metropulse.city/api/v3/nodes/45013/override",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.metropulse.city" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfb3BlcmF0b3JfMDkiLCJkaXN0cmljdHNfYXV0aG9yaXplZCI6WyJELU5PUlRIIl19..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-correlation-id", "value": "corr-5566c-7788d" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"override_phase\": \"RED_ALL\", \"duration_seconds\": 300, \"reason_code\": \"MANUAL_TEST\"}"
+          },
+          "bodySize": 88
+        },
+        "response": {
+          "status": 202,
+          "statusText": "Accepted",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 86,
+            "mimeType": "application/json",
+            "text": "{\"status\": \"QUEUED\", \"node_id\": 45013, \"estimated_execution_ms\": 152}"
+          },
+          "bodySize": 86
+        }
+      }
+    ]
+  }
+}
+```
+
+
+### Why this payload trains your 3B model perfectly:
+
+## 8.0 Municipal Operations Addendum
+### 8.1 Service-Level Objectives
+- Intersection command propagation target: p95 under 250 ms across metro zones.
+- Emergency-routing workflows reserve dedicated capacity under incident mode.
+- Peak-event operation plans cover stadium and transit-hub congestion patterns.
+
+### 8.2 Control Center Telemetry
+- Dashboards track command queue depth, ack latency, and offline-node rates.
+- District-level trend views correlate congestion metrics with signal-phase overrides.
+- Daily integrity scans verify topology consistency between field inventory and graph state.
+
+### 8.3 Maintenance and Lifecycle
+- Controller firmware updates follow staged district rollout with rollback checkpoints.
+- Certificate rotation schedules are coordinated with field maintenance windows.
+- Cross-team drills validate continuity for broker, graph, and dashboard outages.

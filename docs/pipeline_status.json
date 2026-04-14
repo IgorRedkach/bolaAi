@@ -1,0 +1,85 @@
+{
+  "pipeline_start": "2026-04-10T13:19:15.575680+00:00",
+  "base_model": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+  "stages": {
+    "combine_data": {
+      "stage": "combine_data",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 0.020034313201904297,
+      "retries": 0,
+      "notes": ""
+    },
+    "build_splits": {
+      "stage": "build_splits",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 0.04763984680175781,
+      "retries": 0,
+      "notes": ""
+    },
+    "gradient_train": {
+      "stage": "gradient_train",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 1114.6276392936707,
+      "retries": 0,
+      "notes": ""
+    },
+    "package_ollama": {
+      "stage": "package_ollama",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 25.981260776519775,
+      "retries": 0,
+      "notes": ""
+    },
+    "reload_rag": {
+      "stage": "reload_rag",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 17.794511556625366,
+      "retries": 0,
+      "notes": ""
+    },
+    "eval_holdout": {
+      "stage": "eval_holdout",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 0.05366086959838867,
+      "retries": 0,
+      "notes": ""
+    },
+    "e2e_tests": {
+      "stage": "e2e_tests",
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 42.32353329658508,
+      "retries": 0,
+      "notes": ""
+    },
+    "docker_build": {
+      "stage": "docker_build",
+      "ok": false,
+      "rc": 1,
+      "elapsed_sec": 188.8949236869812,
+      "retries": 0,
+      "notes": ""
+    },
+    "docker_push": {
+      "stage": "docker_push",
+      "ok": false,
+      "rc": 0,
+      "elapsed_sec": 0,
+      "retries": 0,
+      "notes": "skipped by flag"
+    }
+  },
+  "done": true,
+  "success": true,
+  "updated_at": "2026-04-10T13:42:28.271241+00:00",
+  "elapsed_sec": 1392.7,
+  "e2e_ok": true,
+  "docker_built": false,
+  "push_ok": false
+}

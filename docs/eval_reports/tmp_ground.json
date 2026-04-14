@@ -1,0 +1,9 @@
+{
+  "requested_examples": 1,
+  "written_examples": 0,
+  "attempts": 3,
+  "repaired_examples": 0,
+  "dropped_examples": 3,
+  "output_path": "/home/iredkach/Downloads/bola/bolaAi/data/training/tmp_one.jsonl",
+  "coverage_report_path": "/home/iredkach/Downloads/bola/bolaAi/docs/eval_reports/tmp_cov.json"
+}

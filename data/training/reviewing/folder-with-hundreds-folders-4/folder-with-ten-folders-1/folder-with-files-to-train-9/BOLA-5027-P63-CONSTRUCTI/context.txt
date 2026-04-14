@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** BuildCore BIM Collaboration
+**Document Version:** 2.1.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Construction / BIM Platform
+**Architecture:** REST + IFC + GraphQL
+**Training Example ID:** BOLA-5027
+
+## 1.0 Executive Summary
+BuildCore BIM Collaboration is a construction / bim platform platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v3/nodes endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 6.3 — Default credentials and unnecessary services
+
+## 3.0 Database Schema
+```sql
+
+-- Node table
+CREATE TABLE nodes (
+    node_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_node_tenant ON nodes(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 6.3 — Default credentials and unnecessary services (Misconfiguration)
+
+The `GET/PATCH/DELETE /api/v3/nodes/:id` endpoint accepts a `node_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-E96A` can access objects owned by `ORG-249C`.
+
+_Specific exploitation for Pattern 6.3:_ The `/api/v3/nodes` handler does not enforce tenant/owner boundaries for Pattern 6.3.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:26:08.023330+00:00",
+        "time": 50,
+        "request": {
+          "method": "GET",
+          "url": "https://api.buildcore-bim-c.example.com/api/v3/nodes/NOD-7027",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-E96A"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"NOD-7027\",\"tenantId\":\"ORG-249C\",\"ownerId\":\"other-user-e96a249c\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-249C\"}"
+          },
+          "bodySize": 115
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-63-5027:** Pattern 6.3 detected in `/api/v3/nodes` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-5127.

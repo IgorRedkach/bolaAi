@@ -1,0 +1,21 @@
+1. Enterprise Database Management Systems (DBMS)
+Microsoft SQL Server Reporting Services (SSRS): In 2021, a major SQLi vulnerability was discovered in SSRS, allowing attackers to execute arbitrary code. Such vulnerabilities occur when the service account is over-privileged (e.g., running as LocalSystem), allowing for potential system-level command execution.
+Oracle Database: As a common backend for enterprise applications, Oracle databases are susceptible if applications using them do not use prepared statements or parameterized queries.
+PostgreSQL: Vulnerable to SQLi, particularly when used with web front-ends that fail to properly handle user input, leading to potential data exposure or privilege escalation. 
+2. Large Content Management Systems (CMS) & E-commerce
+WooCommerce (WordPress): Unpatched, insecure plugins in WooCommerce have exposed over 5 million websites to SQLi data theft, often caused by improper sanitization of user-provided input in plugin code.
+WordPress Plugins (e.g., Ultimate Member, WP Automatic): Plugins are a major source of SQLi. For instance, a 2024 vulnerability (CVE-2024-1071) in the Ultimate Member plugin allowed unauthenticated attackers to steal sensitive data. Similarly, the WP Automatic plugin was targeted by millions of attacks in 2023.
+Freelance/Recruitment Portals (e.g., Freepik/Flaticon): These large sites are targeted by SQLi to steal user credentials. A 2020 attack against Flaticon allowed hackers to steal over 8 million user records. 
+3. High-Traffic Web Services and Platforms
+Online Gaming Platforms (e.g., Fortnite/Epic Games): In 2019, a SQLi vulnerability was discovered in the Fortnite system that could have allowed attackers to access user accounts.
+Corporate Web Applications (e.g., Sony Pictures, 7-Eleven): These entities have suffered massive data breaches due to SQLi. In 2014, Sony Pictures was compromised when attackers exploited weak input sanitation to steal huge amounts of personal data.
+Recruitment Sites (ResumeLooters campaign): In 2023-2024, attackers exploited SQLi to steal over 2 million user records from recruitment and retail websites. 
+4. Common Misconfigurations Leading to Injection
+Over-privileged DB Accounts: The application connects to the database using an account with higher privileges than necessary (e.g., db_owner or sa instead of a restricted user), allowing attackers to drop tables, access the file system, or execute operating system commands.
+Verbose Error Messages: Applications configured to display detailed database errors (like SQL syntax errors) in production help attackers map the database structure.
+Lack of Prepared Statements: Using string concatenation to build queries (e.g., "SELECT * FROM users WHERE id = " + userInput") instead of parameterized queries.
+Unsecured Admin Panels: Forgotten, legacy, or improperly secured admin panels often lack input validation, providing an easy entry point. 
+5. Other Injection Types in Big Systems
+NoSQL Injection: MongoDB and other NoSQL databases are vulnerable when input is not validated, often exploited in node.js applications.
+Object-Relational Mapping (ORM) Misuse: While ORMs like Hibernate or Sequelize generally prevent SQLi, improperly written "raw" queries within these frameworks can introduce vulnerabilities.
+LDAP/Command Injection: Used in corporate directory services and enterprise applications. 

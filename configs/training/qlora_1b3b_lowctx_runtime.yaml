@@ -1,0 +1,35 @@
+run_name: qlora_1b3b_default
+mode: qlora
+base_model: Qwen/Qwen2.5-Coder-3B-Instruct
+dataset:
+  sft_train: data/training/sft/train.jsonl
+  sft_valid: data/training/sft/valid.jsonl
+quantization:
+  load_in_4bit: true
+  quant_type: nf4
+  compute_dtype: bfloat16
+lora:
+  r: 16
+  alpha: 16
+  dropout: 0.05
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 0.0002
+  num_train_epochs: 1
+  max_steps: 0
+  gradient_checkpointing: true
+  optimizer: adamw_torch
+  max_seq_length: 512
+  sample_packing: true
+outputs:
+  adapters_dir: models/adapters
+  merged_dir: models/merged

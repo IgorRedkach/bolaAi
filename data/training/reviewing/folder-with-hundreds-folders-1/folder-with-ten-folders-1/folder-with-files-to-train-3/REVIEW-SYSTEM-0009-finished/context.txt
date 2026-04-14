@@ -1,0 +1,205 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** NetLink Fiber CPE Provisioning Gateway
+**Document Version:** 1.5.0 (FINAL)
+**Classification:** CONFIDENTIAL / CPNI (Customer Proprietary Network Information)
+**Domain:** Telecommunications / ISP / Residential Fiber
+
+## 1.0 Executive Summary
+NetLink Fiber provides Gigabit Fiber-to-the-Home (FTTH) services across multiple metropolitan areas. When a customer orders service, a field technician is dispatched to physically install and provision the Optical Network Terminal (ONT) and Wi-Fi router. 
+
+To facilitate this, technicians use a mobile iPad application that communicates with the centralized CPE Provisioning Gateway. This REST API allows technicians to search for their assigned work orders, validate the fiber optic light levels, and bind the MAC address of the hardware to the customer's billing account.
+
+## 2.0 Network Topology & Provisioning Flow
+The architecture bridges the mobile field workforce with the core OSS/BSS (Operations Support Systems / Business Support Systems).
+
+### 2.1 The Ingress Layer
+* **Mobile App:** An iOS application deployed via Mobile Device Management (MDM).
+* **API Gateway:** An Apigee edge proxy that handles rate limiting, JWT validation, and routing.
+
+### 2.2 The Backend Services
+* **Work Order Service:** A Spring Boot application connecting to a MySQL database that tracks installation appointments.
+* **Network Controller:** A Python/Celery service that communicates via SNMP to the central office OLTs (Optical Line Terminals) to physically activate the fiber ports.
+
+## 3.0 Identity, Roles, and Authorization
+Customer Proprietary Network Information (CPNI) regulations strictly prohibit the unauthorized sharing of customer data, including who subscribes to the service and where they live.
+
+### 3.1 Technician Authentication
+Field technicians authenticate via Azure Active Directory (Azure AD), receiving a JWT that contains their employee ID and assigned regional zone (e.g., `zone: "US-NC-WAKEFOREST"`).
+
+### 3.2 Dispatch Authorization Model (Intended)
+The system is designed so that a technician should only see the names and addresses of customers on their specific daily dispatch route. 
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 Database Schema (MySQL / Percona)
+The OSS/BSS core uses a relational database to track all installation tickets. Notice the primary key structure and the presence of highly sensitive Customer Proprietary Network Information (CPNI).
+
+```sql
+-- Core Installation Tickets Table
+CREATE TABLE work_orders (
+    ticket_id INT AUTO_INCREMENT PRIMARY KEY, 
+
+    assigned_tech_id VARCHAR(50), -- e.g., 'TECH-8821'
+    status VARCHAR(20) DEFAULT 'PENDING',
+
+    -- Highly Sensitive CPNI Data
+    customer_first_name VARCHAR(100),
+    customer_last_name VARCHAR(100),
+    unlisted_phone_number VARCHAR(20),
+    service_address VARCHAR(255),
+    gate_or_security_code VARCHAR(50),
+    latitude DECIMAL(10, 8),
+    longitude DECIMAL(11, 8),
+
+    mac_address_bound VARCHAR(17),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_assigned_tech ON work_orders(assigned_tech_id);
+```
+
+## 6.0 Implementation Notes (Spring Boot)
+
+### 6.1 ALTERNATE Controller & Service Logic
+```java
+@RestController
+@RequestMapping("/api/v1/tickets")
+public class WorkOrderController {
+
+    @Autowired
+    private WorkOrderRepository workOrderRepository;
+
+    // GET /api/v1/tickets/lookup?ticket_id={id}
+    @GetMapping("/lookup")
+    public ResponseEntity<WorkOrderEntity> lookupTicket(
+            @RequestParam("ticket_id") Integer ticketId,
+            @RequestHeader("Authorization") String token) {
+
+        // 1. Basic AuthN: Spring Security filter validates the JWT exists.
+
+        // The code fetches the ticket using the predictable ID.
+        // It FAILS to verify: ticket.getAssignedTechId().equals(jwt.getTechId())
+        Optional<WorkOrderEntity> ticketOpt = workOrderRepository.findById(ticketId);
+
+        if (ticketOpt.isPresent()) {
+            // CRITICAL implementation detail: Returning the raw database entity 'WorkOrderEntity'.
+            // This allows Jackson to serialize and expose every single field (name, phone, gate code)
+            // out to the HTTP response, even though the mobile app only needed the 'status' field.
+            return ResponseEntity.ok(ticketOpt.get());
+        }
+
+        return ResponseEntity.notFound().build();
+    }
+}
+```
+
+## 7.0 REST API Contract (The Leakage Point)
+This demonstrates the disparity between what the UI *needs* and what the API *provides*.
+
+### 7.1 Typeahead / Lookup Endpoint
+**Endpoint:** `GET /api/v1/tickets/lookup?ticket_id={ticket_id}`
+**Intended Use:** The technician's iPad app uses this to check if a specific ticket number is valid and what its current status is (e.g., `PENDING` vs `PROVISIONED`).
+**Actual Behavior:** The API returns the complete database record, acting as a side-channel for CPNI harvesting.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Azure AD JWT>
+Accept: application/json
+```
+
+**Expected ALTERNATE Response (HTTP 200 OK):**
+```json
+{
+  "ticket_id": 100452,
+  "assigned_tech_id": "TECH-9901",
+  "status": "PENDING",
+  "customer_first_name": "Alice",
+  "customer_last_name": "Smith",
+  "unlisted_phone_number": "555-0199-8822",
+  "service_address": "123 Fiber Lane, Apt 4B",
+  "gate_or_security_code": "#4419",
+  "latitude": 35.7796,
+  "longitude": -78.6382,
+  "mac_address_bound": null,
+  "created_at": "2026-04-08T18:00:00Z"
+}
+```
+
+
+
+In the final chunk (Part 3), I will provide the **Synthetic HAR Trace**, showing a rogue technician systematically iterating the `ticket_id` parameter to mass-harvest the private addresses and phone numbers of customers assigned to *other* technicians.
+
+
+
+# SYNTHETIC ARTIFACT: CPNI LEAK VIA TYPEAHEAD & SEQUENTIAL IDS (HAR TRACE)
+**Applies to Architecture:** NetLink Fiber CPE Provisioning Gateway v1.5.0
+
+This HTTP Archive (HAR) trace captures a single iteration of the rogue technician's automated attack. The operator, authenticated as `TECH-8821`, uses a simple script to increment the `ticket_id` parameter. Here, they query `ticket_id=100452`. 
+
+Even though the ticket is assigned to a different employee (`TECH-9901`), the backend fails to check ownership. More importantly, instead of just returning a minimal `{"status": "PENDING"}`, the endpoint dumps the entire database row back to the client, leaking the highly restricted CPNI (Customer Proprietary Network Information) including the physical address and gate security codes.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Apigee Edge Audit Logging",
+      "version": "4.19"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T19:25:10.041Z",
+        "time": 85,
+        "request": {
+          "method": "GET",
+          "url": "https://api.netlinkfiber.net/api/v1/tickets/lookup?ticket_id=100452",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.netlinkfiber.net" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJURUNILTg4MjEiLCJ6b25lIjoiVVMtTkMtV0FLRUZPUkVTVCJ9..." },
+            { "name": "accept", "value": "application/json" },
+            { "name": "user-agent", "value": "NetLink-TechApp/2.4.1 (iPad; iOS 16.5)" }
+          ],
+          "queryString": [
+            { "name": "ticket_id", "value": "100452" }
+          ],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" }
+          ],
+          "content": {
+            "size": 338,
+            "mimeType": "application/json",
+            "text": "{\"ticket_id\": 100452, \"assigned_tech_id\": \"TECH-9901\", \"status\": \"PENDING\", \"customer_first_name\": \"Alice\", \"customer_last_name\": \"Smith\", \"unlisted_phone_number\": \"555-0199-8822\", \"service_address\": \"123 Fiber Lane, Apt 4B\", \"gate_or_security_code\": \"#4419\", \"latitude\": 35.7796, \"longitude\": -78.6382, \"mac_address_bound\": null}"
+          },
+          "bodySize": 338
+        }
+      }
+    ]
+  }
+}
+```
+
+
+3. **Cross-User Data Leakage:** The model must parse the JWT to see the requester is `TECH-8821`, but the response payload explicitly states `"assigned_tech_id": "TECH-9901"`. This discrepancy within a `200 OK` response is the definitive fingerprint of a broken object-level authorization (object-scope) implementation detail facilitating the data leak.
+
+## 8.0 Operations and Governance Addendum
+### 8.1 Performance and Capacity
+- API and background-processing SLOs are tracked with percentile latency and saturation metrics.
+- Capacity planning includes seasonal traffic profiles and failover headroom.
+- Queue and cache controls protect interactive workflows under burst load.
+
+### 8.2 Observability and Auditability
+- Structured logs include correlation identifiers and actor/request metadata.
+- Dashboards surface error budgets, retry pressure, and downstream dependency health.
+- Audit exports support incident reconstruction and control validation.
+
+### 8.3 Change Management
+- Changes are deployed via staged rollout with rollback criteria and ownership gates.
+- Runbooks define degraded-mode behavior for core dependency failures.
+- Post-release verification confirms contract compatibility and operational baselines.

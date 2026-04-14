@@ -1,0 +1,120 @@
+{
+  "created_at": "20260410T133753Z",
+  "run_dir": "/home/iredkach/Downloads/bola/bolaAi/models/adapters/qlora_20260410T131918Z",
+  "base_model": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+  "merged_dir": "/home/iredkach/Downloads/bola/bolaAi/models/merged/qlora_20260410T131918Z-merged-20260410T133753Z",
+  "model_name": "bola-analyzer",
+  "modelfile": "/home/iredkach/Downloads/bola/bolaAi/models/packaged/bola-analyzer-20260410T133753Z/Modelfile",
+  "runtime": "container:bola-ollama",
+  "ollama_created": true,
+  "git_bundle": {
+    "model_name": "bola-analyzer",
+    "created_at": "20260410T133753Z",
+    "bundle_dir": "/home/iredkach/Downloads/bola/bolaAi/models/published/bola-analyzer-20260410T133753Z",
+    "tar_uncompressed_bytes": 1987614720,
+    "part_size_bytes": 99614720,
+    "parts": [
+      {
+        "name": "trained_model_bundle.part-0001",
+        "bytes": 99614720,
+        "sha256": "7bd8b07d2983a474ffc82542b970631a199162221706e608182dbaec114b5cf3"
+      },
+      {
+        "name": "trained_model_bundle.part-0002",
+        "bytes": 99614720,
+        "sha256": "1a017b2edf04fe4f6f9e867f3316258fc38fb0545f36d8614bff9d860e57b2e4"
+      },
+      {
+        "name": "trained_model_bundle.part-0003",
+        "bytes": 99614720,
+        "sha256": "0a17a99841645008eff6c7d96f9e5748488765f64a3f07b1f4b3525590c5b5a9"
+      },
+      {
+        "name": "trained_model_bundle.part-0004",
+        "bytes": 99614720,
+        "sha256": "7521b4a531f93279344adc5870d7fff5192f766d361e1f0a1fe2c4b3301fbf9e"
+      },
+      {
+        "name": "trained_model_bundle.part-0005",
+        "bytes": 99614720,
+        "sha256": "831f6b93641c88f14638cdf8c2c29fa8430235e841e86ce5b867d7b00946a5b5"
+      },
+      {
+        "name": "trained_model_bundle.part-0006",
+        "bytes": 99614720,
+        "sha256": "451475a70c0bb6a906ea3e828e09a7bd893780de8e8eb24faf6c03e41666159c"
+      },
+      {
+        "name": "trained_model_bundle.part-0007",
+        "bytes": 99614720,
+        "sha256": "f0cc318f60319149ba631aea7f4aa4a715f57736f3d0181eefcb526fa19f9319"
+      },
+      {
+        "name": "trained_model_bundle.part-0008",
+        "bytes": 99614720,
+        "sha256": "233ff447b48b6c6acbf4f42b14da4951b87155e2fc201c8f02f3e9197474d1f6"
+      },
+      {
+        "name": "trained_model_bundle.part-0009",
+        "bytes": 99614720,
+        "sha256": "406b012f68fb2dc47a11378dfe4eeeb4d260be4c8cf6503a8b9e2fe61cef17de"
+      },
+      {
+        "name": "trained_model_bundle.part-0010",
+        "bytes": 99614720,
+        "sha256": "a3d333cfcb72e28b1c0fdc7968ce16e59c97e0a87b8a68f1305e77029ec0db44"
+      },
+      {
+        "name": "trained_model_bundle.part-0011",
+        "bytes": 99614720,
+        "sha256": "bcbc7de5dcfbe772289a76d029a0681185bf74b739711b1264e55a7966554228"
+      },
+      {
+        "name": "trained_model_bundle.part-0012",
+        "bytes": 99614720,
+        "sha256": "ef4524890a8518801eb2b1e0ecb28e01c362e40af5d150ab134ad348d114d29f"
+      },
+      {
+        "name": "trained_model_bundle.part-0013",
+        "bytes": 99614720,
+        "sha256": "29ed0e1161143d3f5b7c3c8cbe48de965dc9962a24ffa2086045b7f1b59c78a9"
+      },
+      {
+        "name": "trained_model_bundle.part-0014",
+        "bytes": 99614720,
+        "sha256": "3f405cbd55de2378ba79fdc81d0b237dec6d22cae2cf502d1517c569237c9d8a"
+      },
+      {
+        "name": "trained_model_bundle.part-0015",
+        "bytes": 99614720,
+        "sha256": "ad011d4ba8b6fdf09fbfe1dac9b8f2adabd3e5e9ff67ad37b23d6b3325c86114"
+      },
+      {
+        "name": "trained_model_bundle.part-0016",
+        "bytes": 99614720,
+        "sha256": "1fa2394543588e0fe0af1476e641111af753cf4d699aa5cffc92c911422a71b5"
+      },
+      {
+        "name": "trained_model_bundle.part-0017",
+        "bytes": 99614720,
+        "sha256": "97a894c07b04a6e4a18e5858e0960949b6b70eae1388edee301fc9ef5235939a"
+      },
+      {
+        "name": "trained_model_bundle.part-0018",
+        "bytes": 99614720,
+        "sha256": "7381801d3f3e79364ac2abdaf3d7f0bd3eda4eaa951d2c99c55d5c890e896125"
+      },
+      {
+        "name": "trained_model_bundle.part-0019",
+        "bytes": 99614720,
+        "sha256": "dd5701678c44e68402ea6d2604c5d70395cabffe14cfd2bc274d512f2582b44d"
+      },
+      {
+        "name": "trained_model_bundle.part-0020",
+        "bytes": 94935040,
+        "sha256": "f3929a5d21e97662dade685350840604867cf65dc6f5f147499d4d863f1018cb"
+      }
+    ],
+    "latest_marker": "/home/iredkach/Downloads/bola/bolaAi/models/published/LATEST"
+  }
+}

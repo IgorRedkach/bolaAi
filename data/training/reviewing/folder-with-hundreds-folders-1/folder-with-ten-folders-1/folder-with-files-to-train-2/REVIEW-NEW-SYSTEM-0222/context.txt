@@ -1,0 +1,218 @@
+========================================
+
+Here is the twenty-second system, continuing the deep-dive architectural series. We are shifting into the **Social Media & Trust/Safety** sector, focusing on a **Content Moderation and Abuse API Gateway**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SocialLoop Trust & Safety Gateway
+**Document Version:** 4.0.0 (FINAL)
+**Classification:** PLATFORM CRITICAL / AUDIT & LEGAL SCOPE
+**Domain:** Social Media / Content Moderation / Abuse Reporting
+
+## 1.0 Executive Summary
+SocialLoop is a large, public social network. The Trust & Safety Gateway manages the entire lifecycle of abuse reports, content takedowns, and user bans. Due to massive scale (millions of posts per hour), the post deletion process is handled by a dedicated, highly privileged microservice that is only meant to be called by the internal moderation queue.
+
+
+## 2.0 Comprehensive Network Topology & Workflow Core
+The system is built as a complex, multi-stage workflow to separate the human review process from the final, irreversible database deletion.
+
+### 2.1 The Edge & Ingress Layer
+* **Edge Proxy (Envoy):** Handles TLS termination and basic rate limiting.
+
+### 2.2 The Internal Workflow & Identity Mesh
+* **Moderation Service:** A Python/Django service that manages the queue of flagged content and requires explicit human approval before deletion.
+* **Final Deletion Service:** A highly restricted Java microservice that executes the final SQL `DELETE` command against the production database. It has an internal endpoint, `/internal/v1/posts/{id}/force-delete`, which is **only** intended to be called by the Moderation Service. It uses a simplistic identity propagation model.
+
+## 3.0 Identity, Trust, and Workflow Authorization
+The security flaw resides in the assumption that the source of an internal request can be trusted.
+
+### 3.1 External Identity (OAuth 2.0)
+
+### 3.2 Internal Identity Drift (The Flaw)
+The Final Deletion Service uses an internal `X-Internal-User-ID` header for audit logging (Pattern 1.10). Crucially, it **also uses the presence of this header as a proxy for authorization**. If the request comes from within the Service Mesh and contains a valid internal token (which is easily guessable or found in debug logs), the service assumes the request is legitimate and executes the deletion without re-verifying if the post owner is the current caller.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The `force-delete` endpoint was created to handle mass cleanup after a platform outage. It uses an internal system token that was never rotated. Tracked as RISK-TS-500.*
+
+**Taxonomy Pattern:** 3.2 (Workflow Decoupling) & 1.10 (Identity Propagation Drift)
+**Sub-system:** Final Deletion Service (`/api/v1/posts/{id}/delete`)
+
+**The Deep Architectural Flaw:**
+This attack chains a lack of workflow integrity with a spoofable internal identity context.
+
+
+2. **Identity Propagation Drift (Pattern 1.10):** The Final Deletion Service requires two security elements to execute: a known, internal `X-Service-Token` (which the attacker discovers) and an `X-Internal-User-ID` header for auditing. The service blindly trusts the `X-Internal-User-ID` header as the deletion initiator. The attacker simply sets this to their own user ID, bypassing the need to verify ownership of the content ID passed in the URI.
+
+
+1. **Reconnaissance:** An attacker (`user_8819X`) finds a low-traffic API endpoint that reflects a successful post ID (`post_target_A`) belonging to a high-profile user (`user_991B`). They also discover the internal `X-Service-Token` (e.g., `trust-service-a1b2c3d4e5f6`) via a verbose error message on another endpoint.
+
+
+3. **The Execution:** The request hits the Final Deletion Service. Because the service sees the required `X-Service-Token`, it assumes the request originated from the trusted Moderation Queue (bypassing Step 2 of the workflow). The service executes the SQL `DELETE` based on the post ID in the URI.
+
+4. **The Impact:** The attacker, a standard user, successfully deletes a post belonging to any other user on the entire platform. The audit trail simply logs: `Post post_target_A deleted by user_8819X`.
+
+***
+
+**Document Version:** 3.1.0
+**Applies to Architecture:** SocialLoop Trust & Safety Gateway v4.0.0
+
+## 5.0 Core Content Database Schema (PostgreSQL)
+The core content database stores all user-submitted posts. Deletion must be strictly audited.
+
+```sql
+-- Core User Content Table
+CREATE TABLE user_posts (
+post_id VARCHAR(50) PRIMARY KEY, -- The URI Path variable
+content_text TEXT NOT NULL,
+status VARCHAR(20) DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DELETED', 'PENDING_REVIEW')),
+created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_author_lookup ON user_posts(author_user_id);
+
+-- Audit Log for Takedowns
+CREATE TABLE deletion_audit (
+audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+post_id VARCHAR(50) REFERENCES user_posts(post_id),
+initiating_service VARCHAR(50) NOT NULL, -- e.g., 'MODERATION_SERVICE'
+initiating_user_id VARCHAR(100) NOT NULL, -- The user ID from the header (THE SPOOF TARGET)
+executed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot)
+
+```java
+package com.socialloop.deletion.controllers;
+
+import org.springframework.web.bind.annotation.*;
+import javax.servlet.http.HttpServletRequest;
+
+@RestController
+@RequestMapping("/api/v1/posts")
+public class DeletionController {
+// DELETE /api/v1/posts/{id}  
+@DeleteMapping(value = "/{id}")  
+public ResponseEntity<String> deletePost(@PathVariable("id") String postId, HttpServletRequest request) {  
+    
+    String internalToken = request.getHeader("X-Service-Token");  
+    if (!"trust-service-a1b2c3d4e5f6".equals(internalToken)) {  
+        // The service assumes ONLY the Moderation Service will have this token.  
+        return ResponseEntity.status(401).body("{\"error\": \"Unauthorized Service Token\"}");  
+    }  
+    
+    // Attacker-controlled header is used for logging and assumed to be the deletion authority.  
+    String internalUserID = request.getHeader("X-Internal-User-ID");  
+    
+    if (internalUserID == null) {  
+        return ResponseEntity.badRequest().body("{\"error\": \"Missing audit context\"}");  
+    }  
+    
+    // The code should verify if internalUserID owns 'postId' before deletion.  
+    // Instead, it relies on the presence of the internal token as a proxy for authority.  
+    if (db.deletePost(postId, internalUserID)) {  // Executes DELETE FROM user\_posts WHERE post\_id = postId
+        // Log the action using the spoofed ID
+        auditLog.logDeletion("DELETION\_SERVICE", postId, internalUserID);
+        return ResponseEntity.ok("{\"status\": \"Post deleted successfully\"}");
+    } else {
+        return ResponseEntity.status(404).body("{\"error\": \"Post not found or already deleted\"}");
+    }
+} 
+}
+```
+
+This contract illustrates how the attacker forces a low-privileged request to be treated as a highly privileged, internal system action by injecting the required internal headers.
+
+### 7.1 Execute Arbitrary Post Deletion
+**Endpoint:** `DELETE /api/v1/posts/{id}`
+**Security Level:** HIGH (Irreversible content loss, reputational damage).
+
+**Required Headers (Spoofed):**
+```http
+Authorization: Bearer <Attacker_JWT_Token>
+X-Service-Token: trust-service-a1b2c3d4e5f6
+X-Internal-User-ID: user_8819X
+```
+
+**Malicious Request Context:**
+* **Attacker Identity:** `user_8819X` (Low-privileged member)
+* **Target URI:** `/api/v1/posts/post_target_A` (Post owned by `user_991B`)
+
+```json
+{
+"status": "Post deleted successfully"
+}
+```
+
+***
+
+**Applies to Architecture:** SocialLoop Trust & Safety Gateway v4.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 3.2 & Pattern 1.10)
+
+This HTTP Archive (HAR) trace captures the attacker's successful arbitrary content deletion. The attacker sends a `DELETE` request targeting a post (`post_target_A`) that they do not own. Crucially, the request includes the highly sensitive `X-Service-Token` header, which the service assumes only the internal moderation queue would possess.
+
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Envoy / API Gateway Access Logs",
+"version": "2026.4.1"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T19:05:12.441Z",
+"time": 78,
+"request": {
+"method": "DELETE",
+"url": "https://api.socialloop.com/api/v1/posts/post_target_A",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.socialloop.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfODgxOVgiLCJyb2xlIjoiTUVNQkVSIn0..." },
+{ "name": "x-service-token", "value": "trust-service-a1b2c3d4e5f6" },
+{ "name": "x-internal-user-id", "value": "user_8819X" }
+],
+"queryString": [],
+"bodySize": 0
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-deletion-time-ms", "value": "21" }
+],
+"content": {
+"size": 52,
+"mimeType": "application/json",
+"text": "{\"status\": \"Post deleted successfully\", \"post_id\": \"post_target_A\"}"
+},
+"bodySize": 52
+}
+}
+]
+}
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+1. **Workflow Decoupling (Pattern 3.2):**
+
+2. **Identity Propagation Drift (Pattern 1.10):**
+* **Spoofed Context Header:** The AI must recognize the extreme sensitivity of the `X-Service-Token` and `X-Internal-User-ID` headers. The fact that these internal-only headers are accepted on the public internet-facing endpoint is a failure of the API Gateway configuration (which should strip or ignore them). The model learns that attackers can spoof internal identity context when authorization logic is delegated to easily manipulated HTTP headers instead of strong JWT claims.
+
+3. **Irreversible State Change:**
+
+========================================
+========================================
+========================================
+========================================
+
+========================================

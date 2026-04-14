@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** TraceOrigin Supply API
+**Document Version:** 2.2.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Food & Beverage / FMCG
+**Architecture:** REST + Blockchain + GraphQL
+**Training Example ID:** BOLA-0079
+
+## 1.0 Executive Summary
+TraceOrigin Supply API is a food & beverage / fmcg platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v3/records endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 3.5 — Unsecured multi-step critical workflows
+
+## 3.0 Database Schema
+```sql
+
+-- Record table
+CREATE TABLE records (
+    record_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_record_tenant ON records(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 3.5 — Unsecured multi-step critical workflows (Insecure Design)
+
+The `GET/PATCH/DELETE /api/v3/records/:id` endpoint accepts a `record_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-8741` can access objects owned by `ORG-C4C4`.
+
+_Specific exploitation for Pattern 3.5:_ The `/api/v3/records` handler does not enforce tenant/owner boundaries for Pattern 3.5.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:47.747179+00:00",
+        "time": 176,
+        "request": {
+          "method": "PATCH",
+          "url": "https://api.traceorigin-sup.example.com/api/v3/records/REC-2079",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-8741"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"REC-2079\",\"tenantId\":\"ORG-C4C4\",\"ownerId\":\"other-user-8741c4c4\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-C4C4\"}"
+          },
+          "bodySize": 318
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-35-079:** Pattern 3.5 detected in `/api/v3/records` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-179.

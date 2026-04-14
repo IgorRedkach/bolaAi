@@ -4,10 +4,10 @@
 # Users run: docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
 FROM python:3.11-slim AS base
 
-# Install ollama binary
+# Install ollama binary (keep curl and ca-certificates; skip autoremove to preserve /bin/sh)
 RUN apt-get update && apt-get install -y --no-install-recommends curl zstd ca-certificates && \
     curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst | tar x --zstd -C /usr && \
-    apt-get purge -y zstd && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*
 
 # App dependencies
 WORKDIR /app
@@ -17,23 +17,15 @@ RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic chroma
 COPY pyproject.toml ./
 COPY src/ ./src/
 COPY data/ /app/data/
+COPY models/published/ /app/models/published/
 
 # Bake Modelfile into image (includes 15 few-shot teaching examples)
 COPY docker/Modelfile /app/Modelfile
 
-# --- Stage 1: Pre-bake the LLM model during build ---
-# Start Ollama, pull the 3B model, create bola-analyzer with few-shot examples, stop Ollama.
-# Model weights are stored in /root/.ollama/models/ inside the image.
-RUN ollama serve & \
-    OLLAMA_PID=$! && \
-    sleep 5 && \
-    for i in $(seq 1 30); do ollama list >/dev/null 2>&1 && break || sleep 1; done && \
-    echo "[build] Pulling qwen2.5-coder:3b ..." && \
-    ollama pull qwen2.5-coder:3b && \
-    echo "[build] Creating bola-analyzer model (with 15 few-shot examples)..." && \
-    ollama create bola-analyzer -f /app/Modelfile && \
-    echo "[build] Model baked successfully." && \
-    kill $OLLAMA_PID && sleep 2 || true
+# --- Stage 1: Model setup is deferred to first-run entrypoint ---
+# The trained model bundle in /app/models/published/ will be imported on first container start.
+# On first run: bundle is extracted → ollama create bola-analyzer from merged 0.5B weights.
+# Fallback: if bundle import fails and BOLA_AI_ALLOW_MODEL_PULL=1, pulls qwen2.5-coder:3b.
 
 # --- Stage 2: Pre-load RAG knowledge base during build ---
 # Loads all 215 BOLA training examples + knowledge patterns into ChromaDB.

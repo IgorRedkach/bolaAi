@@ -1,0 +1,220 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** FreightNode Telematics Platform
+**Document Version:** 1.1.0 (FINAL)
+**Classification:** CONFIDENTIAL - B2B COMMERCE
+**Domain:** Logistics / Fleet Management / Spatial Tracking
+
+## 1.0 Executive Summary
+FreightNode is a multi-tenant B2B SaaS platform used by commercial trucking companies to track their fleets in real-time. The system ingests high-frequency telemetry (GPS coordinates, engine RPM, fuel levels, and Hours of Service) directly from OBD-II cellular modems installed in the trucks.
+
+To support live map dashboards monitoring hundreds of trucks simultaneously, the platform heavily utilizes batch processing and spatial databases (PostgreSQL with PostGIS) to serve bulk telemetry data efficiently to web and mobile dispatch clients.
+
+## 2.0 Network Topology & Data Flow
+The architecture is split between high-velocity device ingestion and stateful API querying.
+
+### 2.1 Device Ingestion Edge
+* **Protocol Listeners:** A fleet of lightweight Go microservices listening on raw UDP/TCP ports to receive proprietary binary payloads from IoT vehicle trackers.
+* **Stream Buffer:** Payloads are decoded into JSON and published to Apache Kafka topics for asynchronous processing.
+
+### 2.2 Core API & Data Plane
+* **Relational/Spatial Database:** Amazon Aurora PostgreSQL running the PostGIS extension handles all spatial queries (e.g., "Which trucks are inside this geofence?").
+* **REST API Layer:** Java Spring Boot microservices expose endpoints to the frontend dispatch dashboards. 
+
+## 3.0 Identity, Tenancy, and Authorization
+FreightNode enforces a strict multi-tenant data model where trucking companies (Tenants) must never be able to see competitor fleets.
+
+### 3.1 Authentication
+Dispatchers authenticate via Microsoft Entra ID (formerly Azure AD) via OAuth 2.0. 
+* **Tenant Claim:** The resulting JWT explicitly contains the user's Organization ID (e.g., `tenant_id: "org_logistics_alpha"`).
+
+### 3.2 Authorization Model
+The Java Spring Boot API utilizes a centralized Data Access Object (DAO) pattern. Every SQL query querying vehicle data is supposed to append an `AND tenant_id = :tenant_id` clause, extracting the `tenant_id` from the Spring Security Context (populated by the JWT).
+
+## 4.0 Service Behavior Notes
+System behavior, data contracts, and operational sequencing are described in subsequent sections.
+
+## 5.0 Database Schema (PostgreSQL / PostGIS)
+The primary relational database utilizes PostGIS to store and query spatial data. Notice that every table includes a `tenant_id` column to enforce strict multi-tenancy at the data layer.
+
+```sql
+-- 1. Vehicles Table
+CREATE TABLE vehicles (
+    id VARCHAR(50) PRIMARY KEY, -- e.g., 'TRK-1129'
+    tenant_id VARCHAR(100) NOT NULL, -- e.g., 'org_logistics_alpha'
+    license_plate VARCHAR(20) NOT NULL,
+    vin VARCHAR(17) UNIQUE NOT NULL,
+    vehicle_class VARCHAR(50)
+);
+CREATE INDEX idx_vehicles_tenant ON vehicles(tenant_id);
+
+-- 2. Telemetry State Table (Updated continuously via Kafka workers)
+CREATE TABLE vehicle_telemetry (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    vehicle_id VARCHAR(50) REFERENCES vehicles(id),
+    tenant_id VARCHAR(100) NOT NULL,
+    location GEOMETRY(Point, 4326) NOT NULL, -- PostGIS spatial column
+    speed_kmh INTEGER,
+    heading_degrees INTEGER,
+    engine_rpm INTEGER,
+    last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_telemetry_tenant ON vehicle_telemetry(tenant_id);
+CREATE INDEX idx_telemetry_spatial ON vehicle_telemetry USING GIST(location);
+```
+
+## 6.0 Implementation Notes (Java Spring Boot)
+
+### 6.1 ALTERNATE JPA Repository Snippet
+```java
+@Repository
+public interface TelemetryRepository extends JpaRepository<VehicleTelemetry, UUID> {
+
+    // PRIMARY (Standard Implementation used elsewhere)
+    @Query("SELECT t FROM VehicleTelemetry t WHERE t.vehicleId = :vehicleId AND t.tenantId = :tenantId")
+    Optional<VehicleTelemetry> findSecureByVehicleId(@Param("vehicleId") String vehicleId, @Param("tenantId") String tenantId);
+
+    @Query("SELECT t FROM VehicleTelemetry t WHERE t.vehicleId IN :vehicleIds")
+    List<VehicleTelemetry> findBulkLocationsbatch(@Param("vehicleIds") List<String> vehicleIds);
+}
+```
+
+### 6.2 The Controller Service
+The Spring REST controller validates that the user is authenticated, but passes the user-provided array to the ALTERNATE repository method.
+
+```java
+@PostMapping("/batch-locate")
+public ResponseEntity<List<TelemetryDTO>> getBatchLocations(
+    @RequestBody BatchLocateRequest request, 
+    JwtAuthenticationToken principal) {
+
+    // AuthN check passes via Spring Security filter chain.
+    // However, 'tenantId' is extracted from JWT but NEVER USED in the query.
+    String userTenantId = (String) principal.getTokenAttributes().get("tenant_id"); 
+
+    // Calls the ALTERNATE query
+    List<VehicleTelemetry> rawData = telemetryRepository.findBulkLocationsbatch(request.getVehicleIds());
+
+    return ResponseEntity.ok(mapper.toDtoList(rawData));
+}
+```
+
+## 7.0 REST API Contract (Dashboard to Cloud)
+This is the HTTP contract the React-based map dashboard uses to poll for truck locations every 5 seconds.
+
+### 7.1 Batch Location Polling
+**Endpoint:** `POST /api/v1/telematics/batch-locate`
+**Description:** Retrieves the latest spatial state for an array of vehicle IDs.
+**Authorization Verification (Theoretical):** The backend must ensure every ID in the array belongs to the `tenant_id` of the requesting user.
+**(Current behavior):** Ownership enforcement is handled by downstream policy evaluation.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Entra ID OAuth2 JWT>
+Content-Type: application/json
+```
+
+**Expected Request Payload:**
+```json
+{
+  "vehicle_ids": [
+    "TRK-1001",
+    "TRK-1002",
+    "TRK-1005"
+  ]
+}
+```
+
+**Success Response (HTTP 200 OK):**
+```json
+{
+  "results": [
+    {
+      "vehicle_id": "TRK-1001",
+      "latitude": 34.0522,
+      "longitude": -118.2437,
+      "speed_kmh": 85,
+      "heading": 270,
+      "last_updated": "2026-04-08T19:08:12Z"
+    }
+  ]
+}
+```
+
+
+
+
+
+
+# SYNTHETIC ARTIFACT: object-scope VIA BATCH/BULK LOOKUP (HAR TRACE)
+**Applies to Architecture:** FreightNode Telematics Platform v1.1.0
+
+This HTTP Archive (HAR) trace captures the moment a dispatcher from "Alpha Logistics" (`tenant_id: org_logistics_alpha`) intercepts their browser's map polling request. They manually append the truck ID of a known competitor (`TRK-99882` belonging to "Omega Freight") to the JSON array. 
+
+Because the backend uses an unfiltered `IN (...)` SQL clause, it returns the real-time GPS coordinates of the competitor's truck alongside the dispatcher's own trucks.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "AWS WAF Telemetry Exporter",
+      "version": "2.1.0"
+    },
+    "entries": [
+      {
+        "startedDateTime": "2026-04-08T19:08:14.331Z",
+        "time": 185,
+        "request": {
+          "method": "POST",
+          "url": "https://api.freightnode.com/api/v1/telematics/batch-locate",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            { "name": ":authority", "value": "api.freightnode.com" },
+            { "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkaXNwYXRjaGVyXzAxIiwidGVuYW50X2lkIjoib3JnX2xvZ2lzdGljc19hbHBoYSIsInJvbGUiOiJkaXNwYXRjaGVyIn0..." },
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-client-version", "value": "web-dash-v2.1" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"vehicle_ids\": [\"TRK-1001\", \"TRK-1002\", \"TRK-99882\"]}"
+          },
+          "bodySize": 54
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-db-query-time-ms", "value": "42" }
+          ],
+          "content": {
+            "size": 395,
+            "mimeType": "application/json",
+            "text": "{\"results\": [{\"vehicle_id\": \"TRK-1001\", \"latitude\": 34.0522, \"longitude\": -118.2437, \"speed_kmh\": 85, \"heading\": 270, \"last_updated\": \"2026-04-08T19:08:12Z\"}, {\"vehicle_id\": \"TRK-1002\", \"latitude\": 34.0610, \"longitude\": -118.2510, \"speed_kmh\": 0, \"heading\": 15, \"last_updated\": \"2026-04-08T19:08:10Z\"}, {\"vehicle_id\": \"TRK-99882\", \"latitude\": 41.8781, \"longitude\": -87.6298, \"speed_kmh\": 105, \"heading\": 90, \"last_updated\": \"2026-04-08T19:08:13Z\"}]}"
+          },
+          "bodySize": 395
+        }
+      }
+    ]
+  }
+}
+```
+
+
+
+## 8.0 Operational Reliability Addendum
+### 8.1 Dispatch SLA and Capacity Planning
+- Dispatch map refresh objective: p95 under 2.5 seconds for tenant-scoped fleet views.
+- Batch query fan-out is capped per request to protect peak-hour dispatcher workflows.
+- Capacity plans reserve additional headroom for weather-event traffic spikes.
+
+### 8.2 Observability and Alerting
+- API telemetry includes request volume, query latency, and cache effectiveness by endpoint.
+- Kafka consumer lag is tracked per topic partition and surfaced to on-call dashboards.
+- Nightly data-quality checks compare telemetry ingestion counts to active modem registry.
+
+### 8.3 Change and Release Controls
+- Schema migrations follow expand/contract rollout with tenant-safe backfill windows.
+- Feature flags gate new dashboard polling behaviors before full deployment.
+- Rollback runbooks require preserving geospatial index integrity and query-plan stability.

@@ -205,3 +205,14 @@ If the cycle touches runtime behavior (`src/bola_ai/api/**`, `src/bola_ai/agent/
 5. Manual chat verification passes.
 
 If any step above is not possible, the cycle must be reported as **OPEN/BLOCKED** (not complete) with explicit blocker evidence.
+
+---
+
+## Model promotion dependency (QLoRA/LoRA refactor)
+
+When promoting a newly trained adapter-based model:
+
+1. Run training/eval pipeline and confirm all metric gates in `docs/MODEL_PROMOTION_GATES.md`.
+2. Package model assets with `scripts/package_trained_model_for_ollama.py`.
+3. Re-run this E2E workflow against the promoted model image.
+4. Block promotion if placeholder-path artifacts or q5 grounding failures appear.

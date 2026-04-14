@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ThreatLens SOC Platform
+**Document Version:** 2.4.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Cybersecurity / SIEM
+**Architecture:** REST + STIX/TAXII + GraphQL
+**Training Example ID:** BOLA-0733
+
+## 1.0 Executive Summary
+ThreatLens SOC Platform is a cybersecurity / siem platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v1/records endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 1.5 — Multi-tenant / cross-tenant access
+
+## 3.0 Database Schema
+```sql
+
+-- Record table
+CREATE TABLE records (
+    record_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_record_tenant ON records(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 1.5 — Multi-tenant / cross-tenant access (BOLA)
+
+The `GET/PATCH/DELETE /api/v1/records/:id` endpoint accepts a `record_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-3304` can access objects owned by `ORG-D737`.
+
+_Specific exploitation for Pattern 1.5:_ Token from `ORG-3304` passes `tenantId=ORG-D737` as a query parameter. Server trusts client-supplied tenant.
+
+## 5.0 Artifact (GraphQL HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:24:11.254634+00:00",
+        "time": 231,
+        "request": {
+          "method": "GET",
+          "url": "https://api.threatlens-soc-.example.com/api/v1/records/REC-2733",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-3304"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"REC-2733\",\"tenantId\":\"ORG-D737\",\"ownerId\":\"other-user-3304d737\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-D737\"}"
+          },
+          "bodySize": 197
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-15-733:** Pattern 1.5 detected in `/api/v1/records` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-833.

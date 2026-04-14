@@ -1,0 +1,109 @@
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+type Query {
+  # Authenticated user context resolution
+  me: UserContext!
+  
+  # Direct object lookups (Protected by OPA at the resolver level)
+  patient(id: ID!): Patient
+  practitioner(id: ID!): Practitioner
+}
+
+# --- IDENTITY SUBGRAPH ---
+
+union UserContext = Patient | Practitioner
+
+type Patient @key(fields: "id") {
+  id: ID!
+  active: Boolean!
+  name: [HumanName!]!
+  telecom: [ContactPoint!]
+  
+  # Forward-edge resolution
+  encounters(last: Int, status: String): [Encounter!]!
+  observations(category: String): [Observation!]!
+}
+
+type Practitioner @key(fields: "id") {
+  id: ID!
+  npi_number: String!
+  name: [HumanName!]!
+  specialty: String
+  
+  # REVERSE-EDGE RESOLVER (VULNERABILITY VECTOR 9.1)
+  # This resolver uses the system service-account and fails to re-evaluate 
+  # the requester's JWT if the requester is a Patient traversing the graph.
+  activePatients: [Patient!]!
+}
+
+type HumanName {
+  use: String
+  family: String!
+  given: [String!]!
+}
+
+type ContactPoint {
+  system: String!
+  value: String!
+  use: String
+}
+
+# --- CLINICAL SUBGRAPH ---
+
+type Encounter @key(fields: "id") {
+  id: ID!
+  status: String!
+  period: Period!
+  participants: [EncounterParticipant!]!
+}
+
+type EncounterParticipant {
+  type: String # e.g., 'primary-performer', 'consultant'
+  practitioner: Practitioner!
+}
+
+type Period {
+  start: String!
+  end: String
+}
+
+type Observation @key(fields: "id") {
+  id: ID!
+  status: String!
+  category: String!
+  code: CodeableConcept!
+  valueQuantity: Quantity
+  subject: SubjectReference!
+}
+
+type SubjectReference {
+  reference: String! # e.g., "Patient/P-449102"
+}
+
+type CodeableConcept {
+  text: String!
+}
+
+type Quantity {
+  value: Float!
+  unit: String!
+}
+
+
+# 6.0 Resolver Authorization Contract
+Each resolver must execute policy checks with caller context (subject, role, tenant/patient relationship).
+For nested traversals, authorization must be re-evaluated per edge.
+
+# 6.1 Reverse-Edge Safety Rule
+Resolver Practitioner.activePatients must require one of:
+- role == practitioner with active treatment context for each returned patient
+- role == admin with approved audit reason
+Otherwise return authorization error and no partial patient list.
+
+# 6.2 Query Instrumentation
+Resolvers emit decision traces: decision_id, actor, edge_name, object_scope, allow/deny reason.
+This instrumentation is required for audit and post-incident root cause analysis.
+

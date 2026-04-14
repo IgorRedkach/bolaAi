@@ -1,0 +1,88 @@
+---
+description: Never stop before plan completion; keep active progress visible
+alwaysApply: true
+---
+
+# Nonstop Plan Execution Rule
+
+- Continue execution until the active plan is fully complete.
+- Do not stop at analysis-only updates when implementation/testing work is still pending.
+- Keep progress visibly active:
+  - poll long-running work on a strict cadence (default <= 5 minutes between checks),
+  - report concrete status changes,
+  - update tracking artifacts as execution advances.
+- If a process stalls or fails, immediately apply a corrective action and resume.
+- Prefer autonomous decision-making over waiting for user prompts when the goal is clear.
+- Only pause when the user explicitly asks to stop.
+
+## Active Monitoring Enforcement
+
+- Do not call it "active monitoring" unless there are repeated, timestamped manual checks.
+- Every monitoring loop must include:
+  - process liveness check,
+  - resource/progress check (CPU/memory and at least one progress signal),
+  - artifact/output existence check,
+  - explicit decision ("continue", "intervene", or "restart with reason").
+- If two consecutive checkpoints show no meaningful progress signal, intervene immediately.
+- Do not leave long-running training unattended while claiming monitoring.
+
+## Loop Tail (Mandatory)
+
+After every checkpoint message, execute this exact control flow:
+
+1. Emit `decision` (`continue`, `intervene`, or `restart`).
+2. If `continue`: schedule and run the next checkpoint immediately (sleep + recheck).
+3. If `intervene`/`restart`: perform action, then return to step 1 on the new process.
+4. Never end monitoring on a status report alone.
+5. Stop only when:
+   - process completed successfully and artifacts exist, OR
+   - user explicitly asks to stop.
+
+## Anti-Break Actions (Mandatory)
+
+- Maintain a checkpoint ledger in each monitoring turn:
+  - `checkpoint_id`,
+  - `cpu_ticks_total`,
+  - `artifact_status`,
+  - `decision`,
+  - `next_checkpoint_scheduled`.
+- Queue at least the next **two** monitoring actions before leaving a monitoring update:
+  - one short interval check (1-3 minutes),
+  - one medium interval check (5-10 minutes).
+- If a response is sent while monitoring is active, it must include:
+  - current decision,
+  - exact next action already started.
+- Any missing `next_checkpoint_scheduled` entry is treated as monitoring failure and must be corrected immediately.
+
+## Progress vs 24h Decision Rule
+
+- If `cpu_ticks_total` (or equivalent progress metric) increases, keep run alive.
+- If no increase across consecutive checkpoints, project completion time.
+- If projected completion is >24h, apply performance corrective action (threading/data-path improvements)
+  without changing model family or downgrading training quality.
+- After correction, resume the mandatory loop tail.
+
+## Strict Task Sequence (Never Skip)
+
+For active monitoring sessions, execute this sequence in order each round:
+
+1) `check_liveness`
+2) `check_progress_signal`
+3) `check_artifacts`
+4) `check_errors`
+5) `emit_decision`
+6) `queue_short_checkpoint`
+7) `queue_medium_checkpoint`
+8) `record_next_checkpoint_scheduled`
+
+If any step is skipped, immediately perform the missing step and continue from step 1.
+
+## Full Context Audit (Mandatory)
+
+- Decisions must use full monitoring context, not latest checkpoint only.
+- At each decision, review:
+  - current checkpoint,
+  - previous short checkpoint,
+  - previous medium checkpoint,
+  - live heartbeat files (`docs/retrain_live_heartbeat.json`, `docs/retrain_loop_status.json`),
+  - tracking plan (`docs/TRAINING_MONITORING_24H_PLAN.md`).

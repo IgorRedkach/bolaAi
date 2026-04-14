@@ -1,0 +1,116 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** AquaGrid Meter Management (Salesforce-Integrated)
+**Document Version:** 2.3.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Water Utilities / Smart Meters
+**Platform:** Salesforce Lightning / Aura Framework
+**Training Example ID:** SF-0089
+
+## 1.0 Executive Summary
+AquaGrid Meter Management is a water utilities / smart meters platform built on Salesforce Lightning Experience.
+The front-end uses Aura Components that communicate with Apex Controllers via the Salesforce
+Aura Framework's `c.ControllerName.methodName` call pattern. Authorization is expected to be
+enforced through Salesforce sharing rules (OWD, Role Hierarchy, Sharing Rules) AND explicitly
+in Apex controller code using `WITH SECURITY_ENFORCED` or manual ownership checks.
+
+## 2.0 Architecture Overview
+- **Front-End:** Salesforce Lightning Aura Components (LWC migrated to Aura)
+- **Middle Layer:** Apex Controllers called via Aura Action Framework
+- **Data Layer:** Salesforce Objects with standard and custom fields
+- **Auth:** Salesforce Session ID (Bearer token), OWD = Private on Task object
+
+## 3.0 Salesforce Object Schema
+```sql
+-- Task Object (Standard + Custom Fields)
+Task (
+  Id           VARCHAR(18) PRIMARY KEY,   -- Salesforce record ID
+  Name         VARCHAR(255),
+  OwnerId      VARCHAR(18),               -- Links to User object
+  AccountId    VARCHAR(18),               -- Parent account
+  SensitiveData__c VARCHAR(500),          -- Custom field: sensitive PII/business data
+  InternalNotes__c  TEXT,                 -- Custom field: internal review notes
+  IsDeleted    BOOLEAN DEFAULT FALSE
+)
+```
+
+## 4.0 Apex Controller (Vulnerable Implementation)
+```apex
+public class TaskController {
+    @AuraEnabled
+    public static List<Task> getTaskDetails(String taskId, List<String> fields) {
+        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
+        // VULNERABILITY: no ownership check on taskId parameter
+        return [Task]Database.query(
+            'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
+            'FROM Task ' +
+            'WHERE Id = :' + taskId
+            // Missing: AND OwnerId = UserInfo.getUserId()
+            // Missing: WITH SECURITY_ENFORCED
+        );
+    }
+}
+```
+
+## 5.0 Vulnerability Context
+**Pattern:** 3.1 — Client-assumed authority (Insecure Design)
+
+The Apex controller `c.TaskController.getTask` accepts a `taskId` parameter from the client-side
+Aura component. The controller runs `without sharing` and does not validate that the
+authenticated user owns or has been granted access to the requested record.
+
+An attacker with a valid Salesforce session can substitute any `taskId` value in the
+Aura framework request payload to access records owned by other users.
+
+## 6.0 HAR Capture (Aura Framework Request)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:39.182708+00:00",
+        "time": 230,
+        "request": {
+          "method": "POST",
+          "url": "https://f52fbd05.lightning.force.com/aura",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer 00DF52FBD05!ARf52fbd05..."},
+            {"name": "Content-Type", "value": "application/x-www-form-urlencoded"},
+            {"name": "X-SFDC-Session", "value": "00DF52FBD05!ARf52fbd05..."}
+          ],
+          "postData": {
+            "mimeType": "application/x-www-form-urlencoded",
+            "params": [
+              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.TaskController.getTask",       "callingDescriptor": "UNKNOWN",       "params": {         "taskId": "001BD05",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "aura.token", "value": "undefined"}
+            ]
+          },
+          "bodySize": 278
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{   \"actions\": [     {       \"id\": \"1;a\",       \"state\": \"SUCCESS\",       \"returnValue\": {         \"records\": [           {             \"Id\": \"001BD05\",             \"Name\": \"Victim Task Record\",             \"OwnerId\": \"005VICTIM\",             \"InternalNotes__c\": \"CONFIDENTIAL: internal review notes\",             \"SensitiveData__c\": \"SSN: 000-13-4078\"           }         ]       },       \"error\": []     }   ] }"
+          },
+          "bodySize": 429
+        }
+      }
+    ]
+  }
+}
+```
+
+## 7.0 Sharing Rule Configuration
+```
+Task OWD: Private
+Sharing Rules: Users can access records they own or have been explicitly shared with them.
+Apex Controller Declaration: "public class TaskController" (WITHOUT "with sharing")
+```
+
+## 8.0 Known Risks
+- **RISK-SF-089:** Controller declared without `with sharing`. Sharing rules not enforced.
+- **RISK-SF-090:** No ownership check in SOQL WHERE clause.
+- Client-supplied `taskId` is directly interpolated into SOQL without validation.

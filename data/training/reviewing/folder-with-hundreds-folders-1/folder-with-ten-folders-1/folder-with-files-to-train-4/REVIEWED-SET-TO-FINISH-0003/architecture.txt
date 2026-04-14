@@ -1,0 +1,11 @@
+
+
+
+4.0 Authorization Responsibility Model
+Edge BFF is responsible for authentication and coarse route controls, but each privileged backend gRPC method must also enforce role-level checks using forwarded identity context.
+Trust in transport identity (mTLS peer) must not replace user-level authorization for admin operations.
+
+4.1 Admin Path Safety Invariant
+Any operation mapped to ComplianceAdminService must require role aml_compliance_officer OR approved dual-control admin workflow token.
+Retail roles are never allowed to invoke admin force-clear functions.
+

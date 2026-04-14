@@ -1,0 +1,10 @@
+{
+  "target": "ollama_direct_short",
+  "ctx_len": 4500,
+  "status": 200,
+  "len": 1480,
+  "has_placeholder": false,
+  "has_curl": true,
+  "has_two_token_markers": true,
+  "sample": "## Findings\n1. **Authorization Boundary Violation:** The `/api/v1/telematics/batch-locate` endpoint does not enforce tenant-level authorization, allowing unauthorized access from different tenants.\n\n2. **Data Exposure Risk:** If a user with token_A attempts to query vehicle telemetry for a truck owned by another tenant (token_B), the system will return the telemetry data without any checks or restrictions.\n\n## Evidence\n- The `TelemetryRepository` method `findBulkLocationsbatch` does not include any tenant-level filtering.\n- The Spring REST controller passes the user-provided array of vehicle IDs directly to this repository method without any additional checks.\n\n## Reproduction Steps\n\n### Step 1: Obtain Tokens for Different Tenants\nAssume you have two tokens, token_A and token_B, each representing a different tenant. These tokens should be obtained through proper authentication mechanisms (e.g., Microsoft Entra ID).\n\n### Step 2: Execute the Curl Commands\n\n#### Command 1: Using Token_A to Query Vehicle Telemetry for Truck Owned by Tenant Alpha\n```bash\ncurl -i -X POST \"https://api.example.com/api/v1/telematics/batch-locate\" \\\n  -H \"Authorization: Bearer token_A_tenant_alpha\" \\\n  -H \"C"
+}

@@ -1,0 +1,23 @@
+{
+  "created_at": "20260410T133837Z",
+  "config": "/home/iredkach/Downloads/bola/bolaAi/configs/training/eval.yaml",
+  "holdout": "/home/iredkach/Downloads/bola/bolaAi/data/training/eval/holdout.jsonl",
+  "rows": 4,
+  "metrics": {
+    "groundedness_rate": 1.0,
+    "testing_methodology_rate": 1.0,
+    "actionable_finding_rate": 0.75,
+    "severity_weighted_recall": 1.0,
+    "false_positive_rate": 0.0,
+    "cohens_kappa": 0.9167
+  },
+  "gates": {
+    "groundedness_pass": true,
+    "methodology_pass": true,
+    "actionable_pass": false,
+    "weighted_recall_pass": true,
+    "false_positive_pass": true,
+    "kappa_pass": true
+  },
+  "all_pass": false
+}

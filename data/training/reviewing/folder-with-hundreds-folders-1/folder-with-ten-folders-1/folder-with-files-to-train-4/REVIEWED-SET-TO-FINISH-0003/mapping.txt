@@ -1,0 +1,7 @@
+
+
+
+7.3 Mapping Control Requirement
+All /api/v1/admin/* HTTP routes must include explicit authorization middleware before gRPC invocation mapping occurs.
+Missing middleware is a deployment blocker. CI policy should fail builds if admin route group lacks authz wrapper.
+

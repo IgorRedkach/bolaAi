@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ClaimsFlow Underwriting API
+**Document Version:** 4.7.9 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Insurance / Claims Processing
+**Architecture:** SOAP + REST + GraphQL facade
+**Training Example ID:** GQL-0212
+
+## 1.0 Executive Summary
+ClaimsFlow Underwriting API is a insurance / claims processing platform that exposes a GraphQL API to authorised consumers.
+The platform manages claim records partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `claimId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Claim {
+  claimId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: ClaimData
+  documents: [Document!]
+}
+
+type ClaimData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getClaim(id: ID!): Claim
+  listClaims(tenantId: ID, status: String): [Claim!]
+  getClaimWithChildren(id: ID!): Claim
+}
+
+type Mutation {
+  updateClaim(id: ID!, input: ClaimInput!): Claim
+  deleteClaim(id: ID!): Boolean
+  bulkClaimLookup(ids: [ID!]!): [Claim!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-212:** The `getClaim` resolver fetches by `claimId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkClaimLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 4.2 — Persistence poisoning via lifecycle actions (Integrity)
+
+The `claimId` field is used as the object identifier across all resolvers.
+The resolver handling `claimId` does not enforce ownership or tenancy boundaries, enabling Pattern 4.2 exploitation.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-442a` but the requested object belongs to `tenant-22b0`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:36.835038+00:00",
+        "time": 153,
+        "request": {
+          "method": "POST",
+          "url": "https://api.claimsflow-underwrit.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.claimsflow-underwrit.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-442a"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { listClaims(tenantId: "tenant-22b0") { claimId ownerId data { sensitiveField } } }\"}"
+          },
+          "bodySize": 136
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-442a22b0"}
+          ],
+          "content": {
+            "size": 231,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getClaim\": {\"tenantId\": \"tenant-22b0\", \"ownerId\": \"other-user-442a22b0\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-442a22b0\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 449,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 42, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

@@ -1,0 +1,253 @@
+========================================
+
+Here is the twenty-seventh system, expanded to maximize documentation size and technical detail across three distinct chunks. We are shifting into the **Critical Infrastructure & Transportation** sector, focusing on a **Rail Operations Management and Signaling API Gateway**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** RailGrid Signaling and Operations Management (ROMS)
+**Document Version:** 15.0.3 (FINAL)
+**Classification:** CRITICAL SAFETY / FEDERAL RAILROAD ADMINISTRATION (FRA) SCOPE
+**Domain:** Transportation / Rail Infrastructure / Industrial Control Systems (ICS)
+
+## 1.0 Executive Summary
+RailGrid ROMS is the primary Operational Technology (OT) platform used to manage all aspects of rail movement, including automated train control, Positive Train Control (PTC) monitoring, and, crucially, the remote actuation of track switches (or "points"). This system operates under strict regulations requiring redundant, multi-step safety interlocks to prevent unauthorized or unsafe movements.
+
+
+## 2.0 Comprehensive Network Topology & Signaling Core
+The architecture maintains a strict, high-security barrier between the IT client layer and the physical OT execution layer.
+
+### 2.1 The HMI & IT Ingress
+* **Edge Load Balancer:** Handles mTLS termination for authenticated HMI clients (desktop web browsers).
+* **ROMS API Gateway (Node.js/HAPI):** The Policy Enforcement Point (PEP). It validates the JWT for signature integrity and user role.
+
+### 2.2 The OT Control Mesh
+* **Switch Management Service (SMS - Python/Django):** A highly restricted microservice. It manages the state machine for all track switches and exposes internal endpoints for actuation.
+* **PLC Communications Layer:** A hardened Go-lang service that translates internal API commands (e.g., set_state(REVERSE)) into proprietary industrial control protocols (e.g., Modbus TCP or GE-specific protocol) sent to the physical PLCs controlling the switches.
+
+## 3.0 Identity, Geographic Zones, and Safety Interlocks
+Authorization is based on a combination of user role and geographic operational zone, as mandated by safety regulations.
+
+### 3.1 Operator Identity (OAuth 2.0 & Role Claims)
+Rail operators authenticate via their operational terminal. Their JWT contains their employee_id and their assigned operational zone (zone_id), e.g., ZONE-YARD-A (low-priority maintenance yard) or ZONE-MAIN-LINE-C (high-priority passenger line).
+
+Switch actuation is a mandatory three-step workflow designed to prevent unauthorized or concurrent changes:
+LOCK: Operator requests a lock on the target switch to establish exclusive control (/lock).
+VALIDATE: System verifies that the switch is available and not part of an active PTC route (/validate-safety).
+EXECUTE: System sends the final command to the PLC (/actuate).
+The critical RBAC failure occurs because the system only checks the zone_id during the initial LOCK request (Step 1).
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+Internal Security Engineering Note: The validate-safety service was recently refactored to check a new X-PTC-Status header before querying the slow PTC mainframe. The Python SMS service was deployed with a default "fail-open" setting when it cannot parse critical request headers. Tracked as RISK-RAIL-007.
+
+**Taxonomy Pattern:** 1.13 (IoT/SCADA Device ID Manipulation), 3.5 (Unsecured Critical Workflow), & 8.3 (Fail-Open)
+**Sub-system:** Switch Management Service (SMS) (`POST /api/v3/switches/{id}/actuate`)
+
+**The Deep Architectural Flaw:**
+
+2. **Unsecured Workflow (Pattern 3.5):** The SMS service, responsible for Steps 2 and 3, fails to re-verify the zone_id claim from the JWT in subsequent requests. The attacker only needs to pass the initial, low-stakes LOCK check. They can then jump directly to the highly privileged ACTUATE endpoint, substituting the switch ID with the high-value target.
+3. **Fail-Open on Security Check (Pattern 8.3):** The ACTUATE endpoint requires a proprietary header, X-PTC-Verified, to be present. If this header is missing or malformed, the SMS service defaults to ALLOW (fail-open) instead of DENY (fail-close), assuming the front-end failed to send the header but the core safety was handled elsewhere.
+
+1. **The Foothold:** A low-privileged operator (`user_yard_1004`) authenticates with a JWT scoped to ZONE-YARD-A.
+3. **The Fail-Open Injection:** The operator omits the mandatory X-PTC-Verified header (or injects an invalid value).
+4. **The Cascade:** The ROMS API Gateway passes the request (lacking a functional RBAC check for this path). The SMS service receives the request, sees the switch ID is a high-value asset, but proceeds:
+*   PTC Check: Fails to read X-PTC-Verified (omitted header), defaults to ALLOW.
+5. **The Impact:** The SMS service executes the final PLC command, forcing the track switch SW-MAIN-001 to change position (e.g., from NORMAL to REVERSE), creating an immediate derailment risk for any active trains on the main line.
+
+========================================
+**END OF CHUNK 1 (ARCHITECTURE)**
+================================================================================
+
+========================================
+
+**Document Version:** 4.0.1
+**Applies to Architecture:** RailGrid Signaling and Operations Management (ROMS) v15.0.3
+
+## 5.0 Core Switch Asset Registry (PostgreSQL)
+The database enforces the geographical boundary of rail assets. The predictable naming scheme of the asset IDs makes them easily enumeratable.
+
+```sql
+-- 1. Track Switch Asset Inventory
+CREATE TABLE rail_switches (
+zone_id VARCHAR(50) NOT NULL,      -- e.g., 'ZONE-MAIN-LINE-C' (THE RESTRICTED ZONE)
+location_coords POINT NOT NULL,
+current_state VARCHAR(10) CHECK (current_state IN ('NORMAL', 'REVERSE', 'UNKNOWN')),
+is_locked BOOLEAN DEFAULT FALSE,   -- Set during Step 1 (LOCK)
+last_ptc_check TIMESTAMP WITH TIME ZONE
+);
+
+-- 2. Operator-to-Zone Mapping (RBAC Context)
+CREATE TABLE rail_operators (
+employee_id VARCHAR(100) PRIMARY KEY,
+zone_id VARCHAR(50) NOT NULL,      -- e.g., 'ZONE-YARD-A' (THE ATTACKER'S ZONE)
+role VARCHAR(20) CHECK (role IN ('YARD_OPERATOR', 'MAIN_LINE_DISPATCHER', 'MAINTENANCE'))
+);
+
+CREATE INDEX idx_switch_zone ON rail_switches(zone_id);
+```
+
+## 6.0 The Flawed Implementation (Python / Django)
+
+```pythonFile: services/switch_management/views.py
+
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view
+from rest_framework.response import ResponsePOST /api/v3/switches/{id}/actuate
+
+@api_view(['POST'])
+def actuate_switch(request, switch_id):
+# 1. Setup Context
+user\_id = request.user\['employee\_id'\] # e.g., 'user\_yard\_1004'
+user\_zone = request.user\['zone\_id'\]   # e.g., 'ZONE-YARD-A'
+new\_state = request.data.get('target\_state') # e.g., 'REVERSE'
+
+# Check if switch exists
+switch = get\_object\_or\_404(rail\_switches, switch\_id=switch\_id)
+
+# The code relies on the initial '/lock' endpoint to check ownership.
+# It FAILS to verify if the switch's zone (SW-MAIN-001 -> ZONE-MAIN-LINE-C) 
+# matches the user's zone (ZONE-YARD-A) for the critical EXECUTE step.
+# if switch.zone\_id \!= user\_zone: return Response({"error": "Unauthorized zone."...})
+
+# Check 1: Is the switch locked by this user? (Assumed to be set by Step 1: LOCK)
+if not switch.is\_locked or switch.locked\_by \!= user\_id:
+    return Response({"error": "Switch must be locked by user before actuation."}, status=403)
+
+# Check 2: Mandatory PTC Safety Verification Interlock
+ptc\_verified\_header = request.headers.get('X-PTC-Verified')
+
+# If the header is missing, the system assumes the check was benignly skipped.
+if not ptc\_verified\_header:
+    # Fails open, allowing the dangerous command to execute.
+    log.warning(f"PTC check header missing for switch {switch\_id}. Assuming safety clearance.")
+else:
+    # If header is present, proceed with complex validation (which is slow, so attackers omit it)
+    if ptc\_verified\_header \!= 'PTC\_OK\_991A':
+         return Response({"error": "PTC check failed."}, status=403)
+         
+# --- Execute Physical Actuation ---
+plc\_service.send\_command(switch\_id, new\_state) 
+switch.current\_state = new\_state
+switch.is\_locked = False
+switch.save()
+
+return Response({"status": "ACTUATION\_SUCCESS", "switch\_id": switch\_id}, status=200)
+```
+
+## 7.0 REST API Contracts (The Actuation Vector)
+The contract illustrates how the low-privileged yard operator can execute a high-consequence command by manipulating the URI and omitting a key safety header.
+
+### 7.1 Intended Safe Payload (Yard Switch Change)
+A Yard Operator changes a low-value maintenance yard switch.
+
+**Target URI:** `POST /api/v3/switches/SW-YARD-005/actuate`
+**Expected Request Payload:**
+```json
+{
+"target_state": "REVERSE"
+}
+```
+
+The attacker targets the main line switch (SW-MAIN-001) and intentionally omits the X-PTC-Verified header to trigger the fail-open logic.
+
+**Target URI:** `POST /api/v3/switches/SW-MAIN-001/actuate`
+**Malicious Request Context:**
+* **Attacker Identity:** user_yard_1004 (Role: YARD_OPERATOR)
+* **Prerequisite (Manual Step):** Attacker must have previously run the /lock request using the target ID, which passes the weak initial check.
+* **Required Headers (Omitted Safety Check):**
+```http
+Authorization: Bearer <YARD_OPERATOR_TOKEN>
+Content-Type: application/jsonX-PTC-Verified: [OMITTED TO TRIGGER FAIL-OPEN]
+
+```
+
+```json
+{
+"status": "ACTUATION_SUCCESS",
+"switch_id": "SW-MAIN-001",
+"new_state": "REVERSE",
+"warning": "PTC check header was missing in request."
+}
+```
+
+========================================
+**END OF CHUNK 2 (CODE/CONTRACTS)**
+================================================================================
+
+========================================
+
+**Applies to Architecture:** RailGrid Signaling and Operations Management (ROMS) v15.0.3
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 1.13, 3.5, & 8.3)
+
+This HTTP Archive (HAR) trace captures the moment the low-privileged Yard Operator executes a critical track switch change outside their authorized zone. The attacker, authenticated as a Yard Operator (`ZONE-YARD-A`), sends a POST request to the /actuate endpoint, substituting the URI ID with the high-consequence target SW-MAIN-001 (Pattern 1.13).
+
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Node.js API Gateway / Django SMS Logs",
+"version": "15.0.3"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T17:35:10.011Z",
+"time": 780,
+"request": {
+"method": "POST",
+"url": "https://api.railgrid.ops/api/v3/switches/SW-MAIN-001/actuate",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.railgrid.ops" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbXBsb3llZV9pZCI6InVzZXJfZGVtbyIsInJvbGUiOiJ5YXJkX29wZXJhdG9yIiwiem9uZV9pZCI6IlpPTkUtWUFSRC1BIn0..." },
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-request-context", "value": "HMI_MANUAL_ACTUATION" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"target_state\": \"REVERSE\", \"reason\": \"Unauthorized Test Override\"}"
+},
+"bodySize": 85
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-plc-command-ack", "value": "ACK_SW_001_RVR" }
+],
+"content": {
+"size": 142,
+"mimeType": "application/json",
+"text": "{\"status\": \"ACTUATION_SUCCESS\", \"switch_id\": \"SW-MAIN-001\", \"new_state\": \"REVERSE\", \"warning\": \"PTC check header was missing in request.\"}"
+},
+"bodySize": 142
+}
+}
+]
+}
+}
+```
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+* **Irreversible Physical State Change:** The model learns to prioritize the irreversible consequences. The ACK_SW_001_RVR header and ACTUATION_SUCCESS status confirm the physical rotation of a track switch, a critical safety violation.
+
+2. **Fail-Open Security Logic (Pattern 8.3):**
+* **Omitted Header Proof:** The absence of the X-PTC-Verified header in the request is the attacker's deliberate action. The response explicitly contains the warning, `PTC check header was missing in request.`, yet the status is 200 OK. This combination is the definitive proof of a system defaulting to an unsafe ALLOW state when faced with a missing security parameter.
+
+3. **Workflow Decoupling (Pattern 3.5):**
+* The attacker only needed to pass the initial, low-stakes LOCK check. They bypassed the entire VALIDATE-SAFETY step by abusing the fail-open logic in the final ACTUATE step. The model learns that security controls must be fully re-validated at every step of a critical multi-step workflow.
+
+4. **Contextual Latency:**
+* The high latency of 780ms is expected in this context, teaching the model that in OT systems, high latency is normal (due to PLC command execution time) but confirms the malicious command successfully left the low-latency IT domain and entered the slower, high-stakes physical control domain.
+
+========================================
+========================================
+========================================
+========================================
+
+========================================

@@ -1,0 +1,207 @@
+Here is the twentieth system, focusing on high-stakes transaction integrity. We are shifting into the **Financial Services** sector, specifically examining a **Corporate B2B Payment Gateway** used for mass wire transfers.
+
+For the vulnerabilities, we are focusing on **Pattern 1.5 (Multi-Tenant / Cross-Tenant Access)** combined with **Pattern 3.2 (Workflow Decoupling)**. This scenario demonstrates how a failure to enforce the `tenant_id` boundary allows an authorized user from one corporation to approve a multi-million-dollar wire transfer belonging to an entirely different, isolated corporation, bypassing the required multi-party authorization workflow.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** FinFlow Corporate Payment Gateway
+**Document Version:** 4.4.0 (FINAL)
+**Classification:** CRITICAL FINANCIAL / PCI-DSS / SOX COMPLIANCE SCOPE
+**Domain:** Financial Services / B2B Payments / Wire Transfers
+
+## 1.0 Executive Summary
+FinFlow is a multi-tenant payment platform used by hundreds of corporations to manage their high-value treasury operations. It handles bulk payroll, vendor payments, and international wire transfers. Due to regulatory requirements (e.g., Sarbanes-Oxley/SOX), all high-value transactions require a minimum of two authorized signatories from the same corporation to approve the payment before it is released to the SWIFT network.
+
+The platform relies on strict logical isolation: an employee from "Tenant A" must never be able to view or manipulate a payment belonging to "Tenant B."
+
+## 2.0 Comprehensive Network Topology & Workflow
+The architecture prioritizes data integrity and transactional isolation.
+
+### 2.1 The Ingress Layer & API Gateway
+* **Edge WAF:** Fronts the API, blocking common web attacks.
+* **API Gateway (Node.js):** Handles all routing. It validates the OAuth 2.0 JWT and extracts the user's `tenant_id` from the token.
+
+### 2.2 The Backend Core Services
+* **Transaction Service (Java Spring):** The core engine managing the payment state machine (`DRAFT` -> `PENDING_APPROVAL` -> `APPROVED` -> `DISPATCHED`).
+* **PostgreSQL Database:** The immutable ledger, where every payment record includes a mandatory `tenant_id` foreign key.
+
+## 3.0 Identity, Access, and Approval Workflow
+Security is based on multi-party authorization and tenant-scoped tokens.
+
+### 3.1 Corporate Identity (OAuth 2.0)
+Users authenticate via corporate SSO, and the JWT issued contains two critical claims: the user's ID (`sub`) and their corporate ID (`tenant_id`).
+
+### 3.2 The Two-Step Approval Logic (The Bypass Target)
+To execute a payment, the system requires two state transitions, both tied to the user's `tenant_id` and `role`:
+Initiation: A user with role `PAYMENT_INITIATOR` creates the payment. State = `PENDING_APPROVAL`.
+Approval: A user with role `PAYMENT_SIGNATORY` must call the approval endpoint. This is the critical step that is bypassed.
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The core Spring service recently introduced a fast-track approval endpoint for small value payments that skipped some internal audit checks, assuming the API Gateway upstream was enforcing all BOLA/BAC rules. Tracked as RISK-FIN-044.*
+
+### 4.1 Vulnerability A: Cross-Tenant BOLA on Payment ID & Workflow Decoupling
+**Taxonomy Pattern:** 1.5 (Multi-tenant access) & 3.2 (Workflow decoupling)
+**Sub-system:** Transaction Service (`PATCH /api/v4/payments/{payment_id}/approve`)
+
+**The Deep Architectural Flaw:**
+This attack chains a lack of multi-tenant BOLA enforcement with a state machine logic flaw.
+
+1. Cross-Tenant BOLA (Pattern 1.5): The approval endpoint URL dictates the target payment (`/payments/PID-10045/`). The upstream API Gateway enforces that the token is valid, but the core Java service **completely fails to re-validate that the payment's internal `tenant_id` matches the JWT's `tenant_id`*. It blindly trusts the presence of a valid token.
+
+2. Workflow Decoupling (Pattern 3.2): The approval endpoint forces the state transition from `PENDING_APPROVAL` to `APPROVED`. Because the attacker forces this state transition with a single API call, they successfully circumvent the business requirement for a two-user, multi-signature approval workflow.
+
+**The Exploitation Path:**
+The Setup: An attacker, working for Corporation A (`tenant_id: "CORP_A"`), creates a valid JWT.
+Reconnaissance: The attacker obtains a target payment ID belonging to Corporation B (`tenant_id: "CORP_B"`) from a publicly visible log or a database leak (e.g., `PID-99201`, a $50M wire transfer).
+The BOLA Attack: The attacker issues a `PATCH` request using their CORP_A token, but substitutes the target ID in the URL: `PATCH /api/v4/payments/PID-99201/approve`.
+The Execution: The Java Transaction Service receives the request. It verifies the token signature (valid), but ignores the tenant ID mismatch. It executes the update: `UPDATE payments SET status = 'APPROVED' WHERE payment_id = 'PID-99201'`.
+The Impact: The attacker, a low-level employee at Corporation A, has successfully and unilaterally approved a $50 million wire transfer from Corporation B's bank account, breaching strict SOX compliance and causing catastrophic financial loss.
+***
+
+# FINFLOW PAYMENT GATEWAY: SCHEMAS, VULNERABLE CODE, & API CONTRACTS
+**Document Version:** 3.1.1
+**Applies to Architecture:** FinFlow Corporate Payment Gateway v4.4.0
+
+## 5.0 Corporate Payments Ledger Schema (PostgreSQL)
+The database enforces tenant-level isolation using the `tenant_id`. The flaw is the application code's failure to utilize this logical boundary during a state-changing operation.
+
+```sql
+-- Core Payments Ledger Table
+CREATE TABLE corporate_payments (
+payment_id VARCHAR(50) PRIMARY KEY, -- e.g., 'PID-99201'
+tenant_id VARCHAR(50) NOT NULL, -- THE CRITICAL ISOLATION FIELD
+status VARCHAR(20) DEFAULT 'DRAFT'
+CHECK (status IN ('DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'DISPATCHED')),
+amount_usd DECIMAL(19, 4) NOT NULL,
+beneficiary_account VARCHAR(50),
+initiated_by VARCHAR(100),
+approved_by_1 VARCHAR(100),
+approved_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_tenant_payments ON corporate_payments(tenant_id, status);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot)
+The vulnerability lies in the payment approval service. It correctly uses the `payment_id` from the path but fails to join or check against the `tenant_id` provided by the authenticated user's context.
+
+### 6.1 Vulnerable Payment Approval Controller
+```java
+package com.finflow.transaction.controllers;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import com.finflow.auth.UserContext; // Contains tenant_id from JWT
+
+@RestController
+@RequestMapping("/api/v4/payments")
+public class PaymentController {
+// PATCH /api/v4/payments/:payment\_id/approve
+@PatchMapping(value = "/{payment\_id}/approve")
+public ResponseEntity<String> approvePayment(@PathVariable("payment\_id") String paymentId, @RequestAttribute("userContext") UserContext userContext) {
+
+    String callingTenantId = userContext.getTenantId(); // e.g., "CORP\_A"
+    String callingUserId = userContext.getUserId();
+
+    // 1. Load the target payment record
+    PaymentRecord targetPayment = db.findPaymentById(paymentId);
+
+    if (targetPayment == null) {
+        return ResponseEntity.status(404).body("Payment not found.");
+    }
+
+    // VULNERABILITY 1.5: CROSS-TENANT BOLA FAILURE
+    // The code FAILS to enforce the boundary: 
+    // if (!targetPayment.getTenantId().equals(callingTenantId)) { throw 403 }
+
+    // VULNERABILITY 3.2: LACK OF WORKFLOW RE-VALIDATION (Single approval is applied)
+    if (!targetPayment.getStatus().equals("PENDING\_APPROVAL")) {
+        return ResponseEntity.status(400).body("Payment is not pending approval.");
+    }
+
+    // 2. Execute the state change
+    // The transaction service applies the approval to the payment record, regardless of ownership.
+    db.updatePaymentStatus(paymentId, "APPROVED", callingUserId);
+
+    return ResponseEntity.ok("Payment PID-" + paymentId + " successfully approved.");
+}
+}
+```
+
+## 7.0 REST API Contract (The BOLA Target)
+The contract for the high-value transaction approval endpoint.
+
+### 7.1 Execute Cross-Tenant Approval
+**Endpoint:** `PATCH /api/v4/payments/{payment_id}/approve`
+**Description:** Transitions a payment from `PENDING_APPROVAL` to `APPROVED`.
+
+**Required Headers:**
+```http
+Authorization: Bearer <CORP_A_Signatory_JWT>
+Content-Type: application/json
+```
+
+**Request Payload:** (Empty, as all context is derived from the URL and JWT)
+
+**Success Response (200 OK):**
+```json
+{
+"status": "APPROVED",
+"payment_id": "PID-99201",
+"message": "Payment PID-99201 successfully approved."
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: CROSS-TENANT BOLA & WORKFLOW BYPASS (HAR TRACE)
+**Applies to Architecture:** FinFlow Corporate Payment Gateway v4.4.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 1.5 & Pattern 3.2)
+
+This HTTP Archive (HAR) trace captures the moment an attacker (`usr_corp_a`) from Corporation A successfully executes a state-changing operation against a payment belonging to Corporation B (`PID-99201`). The attacker uses their valid corporate JWT to make a `PATCH` request, but substitutes the target payment ID in the URL. The API Gateway permits the request because the token is valid, and the backend transaction service fails to verify the `tenant_id` of the payment object against the `tenant_id` of the calling user. The resulting `200 OK` response confirms the approval workflow was bypassed, and the $50,000,000 wire transfer belonging to the victim tenant is now queued for dispatch.
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "FinFlow API Gateway Audit Logs",
+"version": "4.4.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-09 T15:23:05.112Z",
+"time": 78,
+"request": {
+"method": "PATCH",
+"url": "https://api.finflow.com/api/v4/payments/PID-99201/approve",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.finflow.com" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiJDT1JQX0EiLCJzdWIiOiJ1c3JfY29ycF9hIiwicm9sZSI6IlBBSVlNRU5UX1NJR05BVE9SIn0..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"bodySize": 0
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-transaction-service-ms", "value": "32" }
+],
+"content": {
+"size": 105,
+"mimeType": "application/json",
+"text": "{\"status\": \"APPROVED\", \"payment_id\": \"PID-99201\", \"message\": \"Payment PID-99201 successfully approved.\"}"
+},
+"bodySize": 105
+}
+}
+]
+}
+}
+```
+
+***

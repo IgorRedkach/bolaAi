@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** PipelinePro Sales API
+**Document Version:** 5.0.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** B2B SaaS / CRM
+**Architecture:** REST + GraphQL + Salesforce integration
+**Training Example ID:** BOLA-5033
+
+## 1.0 Executive Summary
+PipelinePro Sales API is a b2b saas / crm platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v1/resources endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 7.4 — Incomplete log context
+
+## 3.0 Database Schema
+```sql
+
+-- Resource table
+CREATE TABLE resources (
+    resource_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_resource_tenant ON resources(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 7.4 — Incomplete log context (Logging Failures)
+
+The `GET/PATCH/DELETE /api/v1/resources/:id` endpoint accepts a `resource_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-5822` can access objects owned by `ORG-96D0`.
+
+_Specific exploitation for Pattern 7.4:_ The `/api/v1/resources` handler does not enforce tenant/owner boundaries for Pattern 7.4.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:26:08.988598+00:00",
+        "time": 295,
+        "request": {
+          "method": "GET",
+          "url": "https://api.pipelinepro-sal.example.com/api/v1/resources/RES-7033",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-5822"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"RES-7033\",\"tenantId\":\"ORG-96D0\",\"ownerId\":\"other-user-582296d0\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-96D0\"}"
+          },
+          "bodySize": 310
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-74-5033:** Pattern 7.4 detected in `/api/v1/resources` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-5133.

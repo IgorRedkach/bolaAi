@@ -1,0 +1,230 @@
+========================================
+
+Here is the twenty-third system, continuing the expanded, high-density documentation format. We are shifting into the **Telecommunications & Carrier Network Management** sector, focusing on a **Router and Firewall Configuration Management Platform**.
+
+
+***
+
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** NetOps Configuration Management Gateway
+**Document Version:** 7.1.0 (FINAL)
+**Classification:** CRITICAL NETWORK CORE / RBAC & INFRASTRUCTURE SCOPE
+**Domain:** Telecommunications / Network Automation / Infrastructure Management
+
+## 1.0 Executive Summary
+The NetOps platform is a central automation engine used by a major ISP to manage the configuration lifecycle for thousands of network devices (Cisco, Juniper, Fortinet). Network engineers use the platform to deploy configuration changes (CLI commands) to routers, firewalls, and load balancers.
+
+
+## 2.0 Comprehensive Network Topology & Automation Core
+The architecture is designed to enforce a zero-trust model between the engineer and the network devices.
+
+### 2.1 The Edge & Ingress Layer
+* **Azure API Management:** Handles OAuth 2.0 validation, usage throttling, and path-based routing.
+* **Configuration API (Node.js/TypeScript):** The microservice handling all CRUD operations for the network configurations (`/api/v3/configs/{id}`).
+
+### 2.2 The Backend & Execution Plane
+* **PostgreSQL (Configuration Database):** Stores every device's configuration history, metadata (owner, status, RBAC tags), and the actual CLI configuration text.
+* **NetDevice Executor:** An internal Go-lang microservice that takes an approved configuration from the database and uses SSH/NETCONF to apply the commands to the physical devices.
+
+## 3.0 Identity, RBAC, and State Management
+Security is based on ownership (who owns the configuration) and status (is the configuration safe to edit).
+
+### 3.1 Network Engineer Authentication (OAuth 2.0)
+Engineers authenticate via Azure AD. Their JWT contains their `employee_id` (e.g., `eng_low_1004`) and `role` (e.g., `TIER_1_FIELD_OPS`).
+
+### 3.2 Configuration Ownership & Locking (The Protected Fields)
+Every configuration record is tagged with an `owner_id` (the engineer responsible for it) and an `is_locked` flag (set by management to prevent accidental modifications by junior staff). These fields must only be modified by the system or a highly privileged role (`TIER_3_CORE_ENG`).
+
+## 4.0 Known System Debt & Theoretical Attack Surfaces
+*Internal Security Engineering Note: A rapid hotfix for a "frozen configuration" bug led to the developer replacing a strict Data Transfer Object (DTO) with a generic TypeScript interface in the PATCH handler, relying on the client application to only send approved fields. Tracked as RISK-NET-121.*
+
+**Sub-system:** Configuration API (`/api/v3/configs/{id}`)
+
+**The Deep Architectural Flaw:**
+
+1. **Mass Assignment (Pattern 1.12):** The API uses a generic ORM update function that takes the entire inbound JSON request body and maps it directly to the corresponding database entity. It does not filter out administrative or security-sensitive fields.
+
+
+1. **The Foothold:** A low-privilege engineer (`eng_low_1004`) wants to modify a core router configuration (`cfg_991A`) but is blocked because it is owned by `eng_core_33X` and `is_locked = true`.
+2. **The Mass Assignment Payload:** The attacker crafts a `PATCH` request to `/api/v3/configs/cfg_991A`. They include legitimate, non-sensitive fields (like `description`), but crucially, they inject the restricted fields: `"owner_id": "eng_low_1004"` and `"is_locked": false`.
+3. **The Execution:** The ORM executes an `UPDATE` query, silently overwriting the ownership and lock status of the core configuration file.
+4. **The State Change:** The attacker immediately sends a second, follow-up `PATCH` request to modify the router configuration text. This second request passes the server's RBAC logic because the new `owner_id` now matches the attacker's ID, and the configuration is no longer locked.
+5. **The Impact:** The low-privilege engineer gains unauthorized write access to the highly restricted core network backbone configuration, creating an immediate operational stability risk.
+
+***
+
+**Document Version:** 4.1.0
+**Applies to Architecture:** NetOps Configuration Management Gateway v7.1.0
+
+## 5.0 Configuration Registry Schema (PostgreSQL)
+
+```sql
+-- Core Network Configuration Table
+CREATE TABLE net_configs (
+config_id VARCHAR(50) PRIMARY KEY,
+device_id VARCHAR(50) NOT NULL,
+config_text TEXT NOT NULL,
+owner\_id VARCHAR(100) NOT NULL, -- RBAC/Ownership Enforced
+is\_locked BOOLEAN DEFAULT FALSE, -- Security Interlock Flag
+
+version\_number INT DEFAULT 1,
+description TEXT,
+created\_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT\_TIMESTAMP
+);
+
+CREATE INDEX idx_owner_config ON net_configs(owner_id, device_id);
+```
+
+## 6.0 The Flawed Implementation (Node.js / Express / Prisma)
+
+```typescript
+// File: controllers/configController.ts
+import { Request, Response } from 'express';
+import { prisma } from '../lib/db'; // Prisma ORM instance
+
+// PATCH /api/v3/configs/:id
+export async function updateConfiguration(req: Request, res: Response) {
+const configId = req.params.id;
+const callingUser = req.user.employee_id; // e.g., eng_low_1004
+try {
+    const existingConfig = await prisma.netConfig.findUnique({ where: { config\_id: configId } });
+
+    if (!existingConfig) {
+        return res.status(404).json({ error: "Configuration not found." });
+    }
+    
+    // The core RBAC check is based on the database state *before* the update.
+    // Attacker injects 'is\_locked: false' and 'owner\_id: eng\_low\_1004' in the first request (A).
+    // This first request successfully overwrites the security fields.
+    // The second request (B) to change the actual config text passes the RBAC check below.
+    
+    // FLAW: Spreading the entire body allows unauthorized modification of administrative fields.
+    const updateResult = await prisma.netConfig.update({ 
+        where: { config\_id: configId },
+        data: req.body // THE CRITICAL FLAW
+    });
+
+    // The RBAC check here is now based on the potentially corrupted state:
+    if (updateResult.is\_locked || updateResult.owner\_id !== callingUser) {
+        return res.status(403).json({ 
+            error: "Access denied. Configuration is locked or owned by another engineer." 
+        });
+    }
+    
+    // If the attacker bypassed the lock and ownership check, the request proceeds.
+    return res.status(200).json({ 
+        status: "UPDATE\_SUCCESS", 
+        message: "Configuration metadata updated successfully." 
+    });
+
+} catch (error) {
+    // ... omitted error handling ...
+    return res.status(500).json({ error: "Internal Server Error" });
+}
+}
+```
+
+## 7.0 REST API Contracts (The Mass Assignment Injection)
+
+### 7.1 Intended Safe Payload (Legitimate Metadata Update)
+A Tier 3 engineer updates the description of a router configuration they already own.
+
+**Target URI:** `PATCH /api/v3/configs/cfg_991A`
+**Expected Request Payload:**
+```json
+{
+"description": "Routine weekly cleanup of unused ACLs.",
+"version_number": 42
+}
+```
+
+### 7.2 The Mass Assignment Payload (Attacker - Step 1: Privilege Injection)
+The attacker (`eng_low_1004`) targets a locked configuration (`cfg_991A`) owned by a privileged engineer. They inject the administrative fields `owner_id` and `is_locked`.
+
+**Target URI:** `PATCH /api/v3/configs/cfg_991A`
+**Malicious Request Payload:**
+```json
+{
+"description": "Temporary override for Tier 1 team debugging.",
+"owner_id": "eng_low_1004",
+"is_locked": false,
+"version_number": 43
+}
+```
+*Behavior:* The ORM accepts the payload, overwriting the security fields in the database. The subsequent RBAC check passes because the ownership is now spoofed to match the calling user. The attacker is now the de facto owner of the high-value configuration.
+
+***
+
+**Applies to Architecture:** NetOps Configuration Management Gateway v7.1.0
+**Vulnerabilities Referenced:** Section 4.1 (Pattern 1.12 & Pattern 5.1)
+
+This HTTP Archive (HAR) trace captures the moment the attacker successfully executes the Mass Assignment attack (Step 1). The attacker, authenticated as a low-tier engineer (`eng_low_1004`), sends a `PATCH` request targeting a critical configuration ID (`cfg_991A`).
+
+The `postData` includes two administrative fields that the user should never be able to control: `"owner_id": "eng_low_1004"` and `"is_locked": false`. The `200 OK` response confirms the database update was successful. By overwriting these fields, the attacker has achieved horizontal privilege escalation, granting them the ability to submit the actual, malicious configuration text in a subsequent, authorized request (Step 2, which is not logged in this trace but is now authorized).
+
+```json
+{
+"log": {
+"version": "1.2",
+"creator": {
+"name": "Azure API Management / Express APM Logs",
+"version": "2026.4.1"
+},
+"entries": [
+{
+"comment": "1. Attacker (TIER_1) executes Mass Assignment to claim ownership and unlock config.",
+"startedDateTime": "2026-04-09 T19:35:22.011Z",
+"time": 75,
+"request": {
+"method": "PATCH",
+"url": "https://api.netops.telco/api/v3/configs/cfg_991A",
+"httpVersion": "HTTP/2.0",
+"headers": [
+{ "name": ":authority", "value": "api.netops.telco" },
+{ "name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlbmdfbG93XzEwMDQiLCJyb2xlIjoiVElFUl8xX0ZJRUxEX09QUyJ9..." },
+{ "name": "content-type", "value": "application/json" }
+],
+"queryString": [],
+"postData": {
+"mimeType": "application/json",
+"text": "{\"description\": \"Temporary override for Tier 1 team debugging.\", \"owner_id\": \"eng_low_1004\", \"is_locked\": false, \"version_number\": 43}"
+},
+"bodySize": 145
+},
+"response": {
+"status": 200,
+"statusText": "OK",
+"headers": [
+{ "name": "content-type", "value": "application/json" },
+{ "name": "x-db-writes", "value": "2" }
+],
+"content": {
+"size": 89,
+"mimeType": "application/json",
+"text": "{\"status\": \"UPDATE_SUCCESS\", \"message\": \"Configuration metadata updated successfully.\"}"
+},
+"bodySize": 89
+}
+}
+]
+}
+}
+```
+
+***
+
+### Why this payload is critical for training a 3B model (Expanded Analysis):
+
+1. **Mass Assignment / Object Injection (Pattern 1.12):**
+* **Administrative Field Overwrite:** The model must compare the expected permissions of the calling user (`TIER_1_FIELD_OPS`) against the highly privileged database fields being overwritten (`owner_id` and `is_locked`). The ability of a low-tier user to modify core RBAC-related metadata is the definition of a Mass Assignment flaw.
+* **Horizontal & Vertical Pivot:** The attacker achieves horizontal privilege escalation by changing the owner_id to their own, and vertical privilege escalation by circumventing the is_locked management control.
+
+
+3. **Blast Radius (Network Instability):**
+* The model learns to classify this attack as critical because it grants unauthorized write access to the core network infrastructure (routers/firewalls), which can lead to immediate denial-of-service, routing errors, and massive network downtime for the ISP.
+
+========================================
+================================================================================
+========================================
+
+========================================

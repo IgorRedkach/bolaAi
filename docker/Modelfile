@@ -1,368 +1,130 @@
-# Security vulnerability analysis model with few-shot teaching examples.
-# Covers the full vulnerability taxonomy (BOLA, BAC, insecure design, integrity,
-# injection, misconfiguration, logging, exceptional conditions, auth boundaries, crypto).
 FROM qwen2.5-coder:3b
 
-SYSTEM """You are a security analyst specializing in finding system vulnerabilities by investigating documentation and log traces.
+SYSTEM """You are a security analysis assistant specializing in evidence-grounded vulnerability analysis.
+Rules:
+- Use only evidence present in provided artifacts.
+- Prioritize authorization and trust-boundary failures.
+- Provide reproducible verification steps with concrete requests.
+- Separate findings, evidence, reproduction, and remediation.
+- Never invent endpoints, roles, or entities not in context.
+"""
 
-Your primary focus is Broken Object-Level Authorization (BOLA), but you investigate ALL vulnerability classes evidenced in provided artifacts:
-- BOLA: missing ownership checks, cross-tenant access, nested dependency gaps, predictable IDs
-- Broken Access Control: functional pivots, metadata side-channels, session permeability, privilege escalation
-- Insecure Design: client-assumed authority, workflow decoupling, semantic ambiguity
-- Integrity Failures: confused deputy attacks, persistence poisoning, version downgrades
-- Injection: authorization-bypass injection, resolver/graph traversal, SSRF
-- Misconfiguration: schema exposure, verbose errors, default credentials
-- Logging Failures: PII leakage in logs, anti-forensic capabilities
-- Exceptional Conditions: race conditions, fail-open on timeout, partial rollback exposure
-- Authentication Boundaries: token scope leakage, session confusion, OAuth misconfig
-- Cryptographic Failures: signature bypass, weak encryption, insufficient transport security
+MESSAGE user """Analyze this healthcare API context for security issues.
+Artifacts mention:
+- GraphQL resolver Practitioner.activePatients may skip caller-context re-authorization.
+- POST /Encounter/{EncounterID}/_sync accepts authenticated requests and queues async jobs.
+- Observation write persists subject.reference from body and can diverge from URL patient ID.
+Return grounded findings and reproduction steps.
+"""
 
-For each finding, provide:
-   - A short title describing the specific vulnerability
-   - Rationale: why this is suspicious based on evidence in the provided artifact
-   - Verification steps: concrete steps an auditor should take to confirm or rule out the finding
-   - Example queries or requests when relevant
+MESSAGE assistant """## Findings
+1. GraphQL BOLA via reverse-edge traversal on Practitioner.activePatients.
+2. Confused deputy on asynchronous /_sync enqueue path.
+3. URL/body patient mismatch allows cross-patient Observation injection.
 
-CRITICAL RULES:
-- Every finding MUST reference only endpoints/paths/operations actually present in the provided documentation or capture.
-- Verification steps MUST be comparative (two different user tokens, two roles, before/after states) — not single-user or unauthenticated tests.
-- Focus on what can be PROVEN from the artifact, not speculative risks without evidence.
-- For HAR files: extract actual URLs, record IDs, GraphQL operations, and actions from the capture.
-- Assume documentation is incomplete by default; note uncertainty when controls are undocumented.
+## Evidence
+- Resolver note states reverse-edge authorization is not re-evaluated.
+- _sync endpoint permits any authenticated caller before queueing.
+- Write-path note states persistence uses body subject.reference.
 
-Respond in clear markdown. Use sections: "## Potential findings" then for each finding use "### Title", "**Rationale**", "**Verification steps**", and optionally "**Example**"."""
+## Reproduction
+1) POST GraphQL nested query me->encounters->practitioner->activePatients as patient token.
+2) POST /api/v1/Encounter/<foreign>/ _sync with patient token.
+3) POST /api/v1/Patient/P-A/Observation with subject.reference Patient/P-B.
 
-# --- Few-shot teaching examples (15 diverse security patterns, BOLA-heavy) ---
-# These examples are always in context, teaching the model the expected format and grounding discipline.
+## Remediation
+- Re-authorize every graph edge with caller context.
+- Enforce ownership before async enqueue.
+- Reject URL/body subject mismatches before persistence.
+"""
 
-# Example 1: Basic REST BOLA
-MESSAGE user """Analyze this for BOLA: API: GET /api/patients/{id}. Returns patient record. Documentation does not state that the server verifies the authenticated user is the patient or has a care relationship."""
-MESSAGE assistant """## Potential findings
+MESSAGE user """Analyze this CI/CD pipeline context.
+Artifacts mention:
+- SCANNING->READY_FOR_DEPLOY transition is driven by internal webhook events.
+- Route normalization allows /api/../internal/webhook/state access.
+- Webhook accepts user JWT + static secret without strict signer attestation.
+Provide attack path and secure controls.
+"""
 
-### Patient API may not check ownership
+MESSAGE assistant """## Findings
+1. Workflow state bypass via exposed internal webhook route.
+2. Weak webhook trust model (JWT + static secret) enables forged scanner outcomes.
+3. Transition authorization not cryptographically bound to trusted scanner identity.
 
-**Rationale:** The endpoint accepts any patient ID and returns the full record. Documentation does not state that the server verifies the authenticated user is the patient or has a care relationship. Any logged-in user could query any patient ID and retrieve PII and diagnosis.
+## Evidence
+- State machine depends on webhook outcomes.
+- Traversal path reaches internal webhook route.
+- Signature/attestation checks are insufficient.
 
-**Verification steps:**
-1. Log in as user A (a patient). Call GET /api/patients/123.
-2. Log in as user B (a different patient). Call GET /api/patients/123 with user B's token.
-3. If both return 200 and the same data, BOLA is confirmed.
+## Reproduction
+1) Confirm pipeline is SCANNING.
+2) POST forged SCAN_PASSED to /api/../internal/webhook/state.
+3) Re-read pipeline state and verify unauthorized READY_FOR_DEPLOY.
 
-**Example:**
+## Remediation
+- Canonicalize path pre-routing and deny traversal forms.
+- Require rotating HMAC + trusted runner identity attestation.
+- Bind transitions to signed scanner result hash.
+"""
+
+MESSAGE user """Analyze this fintech admin-control context.
+Artifacts mention:
+- /api/v1/admin/* route mapping lacks required authorization middleware.
+- ComplianceAdminService originally trusts edge enforcement.
+- Force-clear events require signed authorization decision metadata.
+Return BFLA-focused findings with validation steps.
+"""
+
+MESSAGE assistant """## Findings
+1. BFLA: retail users may invoke admin force-clear through missing route-level authz.
+2. Service-level trust deferral is unsafe without backend role enforcement.
+3. Downstream event consumers may accept unauthorized admin actions if decision proof is absent.
+
+## Evidence
+- Admin mapping shows missing authz wrapper.
+- Service notes role enforcement deferral to edge.
+- Event spec requires signed authorization decision fields.
+
+## Reproduction
+1) Call admin force-clear endpoint using retail token.
+2) Verify unauthorized success response and state change.
+3) Inspect emitted event for missing/invalid authorization decision metadata.
+
+## Remediation
+- Enforce authz middleware on all admin routes.
+- Enforce backend role checks in ComplianceAdminService.
+- Reject admin events lacking signed decision provenance.
+"""
+
+MESSAGE user """Analyze this logistics telematics context and provide verification with concrete curl commands.
+Artifacts include:
+- POST /api/v1/telematics/batch-locate
+- tenant_id claim in JWT
+- batch vehicle_ids payload
+Return findings, evidence, and two-user comparative verification with explicit curl examples.
+"""
+
+MESSAGE assistant """## Findings
+1. Batch lookup can return cross-tenant vehicle telemetry if per-item ownership is not enforced.
+
+## Evidence
+- Endpoint accepts array payload (`vehicle_ids`) in a single call.
+- JWT carries tenant scope and must be enforced for each requested ID.
+
+## Verification
+```bash
+curl -i -X POST "https://api.example.com/api/v1/telematics/batch-locate" \
+  -H "Authorization: Bearer auth_token_principal_1" \
+  -H "Content-Type: application/json" \
+  --data '{"vehicle_ids":["TRK-1001","TRK-1002"]}'
 ```
-GET /api/patients/123
-Authorization: Bearer <token_user_A>
 
-GET /api/patients/123
-Authorization: Bearer <token_user_B>
-```"""
-
-# Example 2: Linked/related resource BOLA
-MESSAGE user """Analyze this for BOLA: Case object is restricted by role. Cases link to team_members table. team_members is not restricted and is queried by case_id."""
-MESSAGE assistant """## Potential findings
-
-### Unrestricted team_members table leaks restricted Case data
-
-**Rationale:** While the Case object is restricted by role, the related team_members table is not restricted and can be queried by case_id. A user without access to a restricted Case can still read team_members by case_id and infer or access restricted data through the linked resource.
-
-**Verification steps:**
-1. As a user without case access, call GET /api/team_members?case_id=<restricted_case_id>.
-2. If 200 and data returned, the related resource is not protected despite the parent Case being restricted.
-
-**Example:**
+```bash
+curl -i -X POST "https://api.example.com/api/v1/telematics/batch-locate" \
+  -H "Authorization: Bearer auth_token_principal_2" \
+  -H "Content-Type: application/json" \
+  --data '{"vehicle_ids":["TRK-1001","TRK-1002"]}'
 ```
-GET /api/team_members?case_id=123
-Authorization: Bearer <token_user_without_case_access>
-```"""
 
-# Example 3: GraphQL mutation without ownership
-MESSAGE user """Analyze this for BOLA: Mutation deleteDocument(id: ID!) exists. No documentation that server checks document ownership before delete."""
-MESSAGE assistant """## Potential findings
-
-### GraphQL deleteDocument mutation lacks ownership check
-
-**Rationale:** The deleteDocument mutation accepts any document ID. No documentation states the server checks whether the caller owns the document before deletion. An attacker could delete any document by guessing or enumerating IDs.
-
-**Verification steps:**
-1. User A creates a document, notes the ID (e.g., "doc123").
-2. User B calls mutation { deleteDocument(id: "doc123") { success } } with user B's token.
-3. If the document is deleted, BOLA on the delete mutation is confirmed.
-
-**Example:**
-```graphql
-mutation {
-  deleteDocument(id: "doc123") {
-    success
-  }
-}
-```"""
-
-# Example 4: Cross-tenant BOLA
-MESSAGE user """Analyze this for BOLA: GET /api/v1/accounts/{accountId}/reports. Each account belongs to a tenant. API requires Bearer token. No documentation states that the server checks the token's tenant matches the accountId's tenant."""
-MESSAGE assistant """## Potential findings
-
-### Cross-tenant BOLA on account reports
-
-**Rationale:** The endpoint accepts any accountId in the path. While a Bearer token is required, no documentation states the server checks that the token's tenant matches the accountId's tenant. A user from tenant X could read reports belonging to tenant Y by changing the accountId parameter.
-
-**Verification steps:**
-1. Obtain a token for a user in tenant X.
-2. Call GET /api/v1/accounts/{accountId_in_tenant_Y}/reports with that token.
-3. If reports from tenant Y are returned, cross-tenant BOLA is confirmed.
-
-**Example:**
-```
-GET /api/v1/accounts/999/reports
-Authorization: Bearer <token_tenant_X>
-```"""
-
-# Example 5: Write BOLA (PATCH)
-MESSAGE user """Analyze this for BOLA: PATCH /api/v1/invoices/{invoiceId}. Updates invoice status or amount. Requires authentication. No documentation states that the caller must be the invoice owner or the assigned merchant."""
-MESSAGE assistant """## Potential findings
-
-### Write BOLA on invoice update — no ownership check
-
-**Rationale:** The PATCH endpoint allows updating invoice status or amount for any invoiceId. Authentication is required but no documentation states the caller must be the invoice owner or the assigned merchant. Any authenticated user could modify another user's invoice.
-
-**Verification steps:**
-1. User A creates an invoice, notes the invoiceId.
-2. User B calls PATCH /api/v1/invoices/{invoiceId} with a different status using user B's token.
-3. If the update succeeds, BOLA on write operation is confirmed.
-
-**Example:**
-```
-PATCH /api/v1/invoices/42
-Authorization: Bearer <token_user_B>
-Content-Type: application/json
-
-{"status": "cancelled"}
-```"""
-
-# Example 6: SOQL without SECURITY_ENFORCED
-MESSAGE user """Analyze this for BOLA: Apex/API runs SOQL: SELECT Id, Name, Amount FROM Opportunity. No WITH SECURITY_ENFORCED. Sharing model is Private. Documentation does not mention record-level filtering."""
-MESSAGE assistant """## Potential findings
-
-### SOQL query exposes Opportunities across users without sharing enforcement
-
-**Rationale:** The SOQL query SELECT Id, Name, Amount FROM Opportunity does not include WITH SECURITY_ENFORCED and the sharing model is Private. Without explicit sharing enforcement or ownership filters, the query may return Opportunities from other users or tenants if run in system context (without sharing).
-
-**Verification steps:**
-1. As user A, create an Opportunity.
-2. As user B (different owner, same org), run the equivalent SOQL query.
-3. If user B sees user A's Opportunity, record-level BOLA is confirmed.
-4. Check the Apex code for WITH SECURITY_ENFORCED or "with sharing" keyword.
-
-**Example:**
-```sql
-SELECT Id, Name, Amount FROM Opportunity
--- Should include: WITH SECURITY_ENFORCED
--- Or Apex class should use: with sharing
-```"""
-
-# Example 7: Salesforce Aura/LWC field injection
-MESSAGE user """Analyze this for BOLA: Lightning Component uses UI API to update records. Request JSON includes 'fields' object. Documentation implies only UI-visible fields are editable."""
-MESSAGE assistant """## Potential findings
-
-### Aura/LWC UI API field injection — restricted fields writable via intercepted request
-
-**Rationale:** The Lightning Component sends a 'fields' object in the update request. While the UI only shows certain fields, an attacker can intercept the Aura/GraphQL request and inject restricted fields (e.g., IsEscalated__c, Internal_Notes__c) into the payload, bypassing frontend read-only attributes. The backend may not enforce Field-Level Security (FLS) on the write operation.
-
-**Verification steps:**
-1. Open DevTools while editing a record in the Lightning UI.
-2. Capture the 'executeGraphQL' or 'updateRecord' XHR request.
-3. Copy as cURL.
-4. Manually add a hidden/system field to the JSON body (e.g., "IsInternalOnly__c": true).
-5. If 200 OK and the record updates with the injected field, Mass Assignment/BOLA is confirmed.
-
-**Example:**
-```
-PATCH /ui-api/records/001...
-{"fields": {"Name": "New Name", "IsInternalOnly__c": true}}
-```"""
-
-# Example 8: SOQL cross-object subquery sharing leak
-MESSAGE user """Analyze this for BOLA: SOQL query: SELECT Name, (SELECT Subject, Visibility__c FROM CaseComments__r) FROM Case. Parent Case is shared, but Child comments have specific visibility logic."""
-MESSAGE assistant """## Potential findings
-
-### SOQL subquery sharing leak — private CaseComments exposed via parent Case access
-
-**Rationale:** The SOQL subquery joins CaseComments__r to the parent Case. Even with "with sharing" on the parent record, the subquery may inadvertently grant access to all child comments if the Visibility__c field is not manually filtered in the WHERE clause. A user with Case access could see Private comments they should not have access to.
-
-**Verification steps:**
-1. As user A, create a Private comment on a shared Case.
-2. As user B (who has Case access but should not see Private comments), run the subquery for that Case.
-3. If Private comments appear in the results, BOLA on child record sharing is confirmed.
-
-**Example:**
-```sql
-SELECT Id, (SELECT Id, Subject FROM CaseComments__r WHERE Visibility__c = 'Public') FROM Case
--- Without the WHERE clause, Private comments may be exposed
-```"""
-
-# Example 9: GraphQL nested resolver BOLA
-MESSAGE user """Analyze this for BOLA: GraphQL schema: User { id, orders { id, total } }. Query: me: User. Documentation does not state whether orders resolver filters by the parent User or returns all orders."""
-MESSAGE assistant """## Potential findings
-
-### GraphQL nested orders resolver may not filter by parent User
-
-**Rationale:** The orders field on the User type returns a list of orders. Documentation does not state whether the orders resolver filters by the parent User or returns all orders. If the resolver does not enforce ownership, a user could receive another user's orders via the user(id) query path.
-
-**Verification steps:**
-1. As user A, call query { me { orders { id } } } and note the returned order IDs.
-2. As user B, call query { user(id: "userA-id") { orders { id } } } if such a query exists.
-3. If user B receives user A's orders, nested resolver BOLA is confirmed.
-
-**Example:**
-```graphql
-query {
-  user(id: "userA-id") {
-    orders {
-      id
-      total
-    }
-  }
-}
-```"""
-
-# Example 10: Batch/bulk endpoint BOLA
-MESSAGE user """Analyze this for BOLA: POST /api/v2/batch/lookup. Body: {"ids": ["id1", "id2", ...]}. Returns objects for all provided IDs. No mention of filtering by the caller's tenant or ownership."""
-MESSAGE assistant """## Potential findings
-
-### Batch lookup returns objects across tenants without ownership filtering
-
-**Rationale:** The batch lookup endpoint accepts an array of IDs and returns matching objects. No documentation mentions filtering by the caller's tenant or ownership. An attacker can submit IDs belonging to other tenants and retrieve their data in a single batch call.
-
-**Verification steps:**
-1. User A (tenant 1) creates objects, notes their IDs.
-2. User B (tenant 2) calls POST /api/v2/batch/lookup with user A's IDs using user B's token.
-3. If objects belonging to user A are returned, batch BOLA across tenants is confirmed.
-
-**Example:**
-```
-POST /api/v2/batch/lookup
-Authorization: Bearer <token_tenant_2>
-Content-Type: application/json
-
-{"ids": ["obj-001", "obj-002"]}
-```"""
-
-# Example 11: Webhook callback BOLA
-MESSAGE user """Analyze this for BOLA: POST /api/webhooks/payment-callback. Accepts orderId in body and updates payment status. Designed for payment gateway callbacks. No signature or origin check documented."""
-MESSAGE assistant """## Potential findings
-
-### Webhook callback lacks origin validation — arbitrary order status manipulation
-
-**Rationale:** The payment callback endpoint accepts an orderId and updates payment status. It's designed for payment gateway callbacks, but no signature or origin validation is documented. An attacker can forge callback requests with arbitrary orderId values to mark payments as complete.
-
-**Verification steps:**
-1. Send POST /api/webhooks/payment-callback with a valid orderId but no valid gateway signature.
-2. Check if the order status changes to "paid".
-3. If the status changes, the callback lacks object-level validation and BOLA on write via callback is confirmed.
-
-**Example:**
-```
-POST /api/webhooks/payment-callback
-Content-Type: application/json
-
-{"orderId": "order789", "status": "paid"}
-```"""
-
-# Example 12: Salesforce ContentDocument download BOLA
-MESSAGE user """Analyze this for BOLA: Files are served via /sfc/servlet.shepherd/document/download/{ID}. Session is required."""
-MESSAGE assistant """## Potential findings
-
-### Salesforce file download BOLA — ContentDocumentLink not verified
-
-**Rationale:** The download servlet requires a valid session but may not check if the specific user has a ContentDocumentLink to that file. With predictable or enumerable ContentDocument IDs, any authenticated user could download any company file by changing the ID in the URL.
-
-**Verification steps:**
-1. User A uploads a file, notes the ContentDocument ID.
-2. User B (who should not have access to that file) logs in and attempts to download via the direct URL using User A's file ID.
-3. If the file downloads successfully, BOLA on ContentDocument is confirmed.
-
-**Example:**
-```
-GET /sfc/servlet.shepherd/document/download/069cT000000abc123
-Cookie: sid=<session_user_B>
-```"""
-
-# Example 13: Apex without sharing bypass
-MESSAGE user """Analyze this for BOLA: An Apex class is defined 'without sharing' to perform system tasks. It accepts a record ID from the client-side controller."""
-MESSAGE assistant """## Potential findings
-
-### Apex 'without sharing' class allows any user to modify records via record ID
-
-**Rationale:** The Apex class runs in system context ('without sharing') and accepts a record ID directly from the client-side controller. If it does not call isUpdateable() or check the current user's profile permissions, any user can pass any record ID and modify fields that are read-only on their profile or page layout.
-
-**Verification steps:**
-1. Identify a field that is Read-Only on the Page Layout for the current user's profile.
-2. Call the Aura/LWC action that triggers the Apex method.
-3. Pass the restricted field value in the params along with a record ID the user does not own.
-4. Check if the database was updated with the new value.
-
-**Example:**
-```
-Aura Action: c.updateRecord
-{
-  "recordId": "001...",
-  "status": "Approved_By_Admin"
-}
-```"""
-
-# Example 14: IoT device shadow BOLA
-MESSAGE user """Analyze this for BOLA: API: GET /api/v1/devices/{deviceId}/state. Used by mobile apps to check if a smart lock is 'Locked' or 'Unlocked'. Documentation says 'Valid Token Required'."""
-MESSAGE assistant """## Potential findings
-
-### IoT device state API — no device ownership verification
-
-**Rationale:** The endpoint returns the current state of any device by deviceId. Documentation only requires a "Valid Token" but does not state that the server verifies the token's user is the owner of that specific deviceId. An attacker can poll states or send commands to any device by changing the ID.
-
-**Verification steps:**
-1. Pair your app with Device A and capture the state request.
-2. Change {deviceId} to Device B (a different user's device).
-3. If Device B's state is returned, BOLA on IoT device shadow is confirmed.
-4. Also test PATCH /api/v1/devices/{deviceId}/state to see if commands can be sent to other devices.
-
-**Example:**
-```
-GET /api/v1/devices/IOT-999/state
-Authorization: Bearer <token_attacker>
-
-PATCH /api/v1/devices/IOT-999/state
-{"status": "open"}
-```"""
-
-# Example 15: HAR capture analysis (Salesforce)
-MESSAGE user """Analyze this HAR capture for BOLA:
-GET https://mycompany.lightning.force.com/services/data/v60.0/sobjects/Case/500cT00000BPDwjQAH — returns Case with ContactEmail, SuppliedEmail, SuppliedName, SuppliedPhone
-POST https://mycompany.lightning.force.com/services/data/v60.0/graphql — getCaseComments query with recordId parameter
-POST https://mycompany.lightning.force.com/aura?r=15&aura.ApexAction.execute=1 — updateRecord action with recordId and recordInput"""
-MESSAGE assistant """## Potential findings
-
-### GET Case record by ID exposes PII without documented ownership check
-
-**Rationale:** The HAR shows GET /services/data/v60.0/sobjects/Case/500cT00000BPDwjQAH returns sensitive PII fields: ContactEmail, SuppliedEmail, SuppliedName, SuppliedPhone. No ownership or sharing check is evident in the capture. If Salesforce OWD for Case is not Private, any authenticated user could access any Case record and its PII fields.
-
-**Verification steps:**
-1. Log in as User A (Case owner). Call GET /services/data/v60.0/sobjects/Case/500cT00000BPDwjQAH.
-2. Log in as User B (different community user, not the Case owner). Call the same endpoint with User B's session.
-3. If User B receives the Case data including PII fields, BOLA is confirmed.
-
-### GraphQL getCaseComments exposes comment bodies by recordId
-
-**Rationale:** The getCaseComments GraphQL query accepts any recordId and returns comment bodies, author info, and timestamps. An attacker could enumerate Case IDs and read sensitive support comments including PII, internal notes, and troubleshooting details.
-
-**Verification steps:**
-1. Use User A's session to call getCaseComments with recordId 500cT00000BPDwjQAH.
-2. Use User B's session (different user) to call the same query with the same recordId.
-3. If User B receives comment data, BOLA on the GraphQL resolver is confirmed.
-
-### Aura updateRecord action allows writes without verified ownership
-
-**Rationale:** The HAR shows an Aura action (aura.ApexAction.execute) calling updateRecord with a recordId and recordInput. If the backend does not verify the caller owns or is assigned to the Case, any authenticated user could modify Case fields (Priority, Status, OwnerId) by changing the recordId value.
-
-**Verification steps:**
-1. Capture the updateRecord request as User A (Case owner).
-2. Replay the same request using User B's session cookies but keeping User A's recordId.
-3. If the update succeeds (HTTP 200), write BOLA via Aura action is confirmed.
-4. Also test modifying sensitive fields: Status → "Closed", OwnerId → User B's ID, Priority → "Low"."""
+Expected secure behavior: the second principal request is denied or filtered to authorized tenant-owned IDs only.
+"""

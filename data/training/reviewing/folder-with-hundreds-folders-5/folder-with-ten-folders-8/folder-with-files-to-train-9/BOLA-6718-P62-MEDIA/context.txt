@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** StreamCore VOD Platform
+**Document Version:** 5.9.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Media / Content Delivery
+**Architecture:** CDN + REST + GraphQL content API
+**Training Example ID:** BOLA-6718
+
+## 1.0 Executive Summary
+StreamCore VOD Platform is a media / content delivery platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v2/records endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 6.2 — Verbose error feedback
+
+## 3.0 Database Schema
+```sql
+
+-- Record table
+CREATE TABLE records (
+    record_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_record_tenant ON records(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 6.2 — Verbose error feedback (Misconfiguration)
+
+The `GET/PATCH/DELETE /api/v2/records/:id` endpoint accepts a `record_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-EF57` can access objects owned by `ORG-6240`.
+
+_Specific exploitation for Pattern 6.2:_ The `/api/v2/records` handler does not enforce tenant/owner boundaries for Pattern 6.2.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:32:22.631859+00:00",
+        "time": 164,
+        "request": {
+          "method": "PATCH",
+          "url": "https://api.streamcore-vod-.example.com/api/v2/records/REC-8718",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-EF57"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"REC-8718\",\"tenantId\":\"ORG-6240\",\"ownerId\":\"other-user-ef576240\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-6240\"}"
+          },
+          "bodySize": 359
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-62-6718:** Pattern 6.2 detected in `/api/v2/records` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-6818.

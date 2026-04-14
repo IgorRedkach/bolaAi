@@ -1,0 +1,40 @@
+
+
+===== architecture.txt =====
+
+
+
+4.0 Authorization Responsibility Model
+Edge BFF is responsible for authentication and coarse route controls, but each privileged backend gRPC method must also enforce role-level checks using forwarded identity context.
+Trust in transport identity (mTLS peer) must not replace user-level authorization for admin operations.
+
+4.1 Admin Path Safety Invariant
+Any operation mapped to ComplianceAdminService must require role aml_compliance_officer OR approved dual-control admin workflow token.
+Retail roles are never allowed to invoke admin force-clear functions.
+
+
+
+===== mapping.txt =====
+
+
+
+7.3 Mapping Control Requirement
+All /api/v1/admin/* HTTP routes must include explicit authorization middleware before gRPC invocation mapping occurs.
+Missing middleware is a deployment blocker. CI policy should fail builds if admin route group lacks authz wrapper.
+
+
+
+===== grpc.txt (focused section) =====
+5.3 Service-Level Authorization Requirement
+ComplianceAdminService must enforce role checks server-side on every method:
+- ForceClearTransfer requires aml_compliance_officer
+- FreezeAccount requires aml_compliance_officer or system_admin
+Requests failing role checks must return PERMISSION_DENIED regardless of BFF route result.
+
+
+
+===== kafka.txt (focused section) =====
+6.3 Event Authorization Traceability
+TransferForceCleared events must include verified_authorization_decision_id and verified_actor_role fields signed by authorization service.
+If absent, event consumer must reject event and emit SECURITY_EVENT_INVALID_ADMIN_ACTION.
+

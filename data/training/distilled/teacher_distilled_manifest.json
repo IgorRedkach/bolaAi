@@ -1,0 +1,6 @@
+{
+  "created_at": "20260410T125145Z",
+  "input": "/home/iredkach/Downloads/bola/bolaAi/data/training/bola_training.jsonl",
+  "output": "/home/iredkach/Downloads/bola/bolaAi/data/training/distilled/teacher_distilled.jsonl",
+  "count": 0
+}

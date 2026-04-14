@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** PowerGrid Customer Billing API
+**Document Version:** 1.8.2 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Energy / Utilities / Smart Grid
+**Architecture:** REST + GraphQL + SCADA bridge
+**Training Example ID:** GQL-0164
+
+## 1.0 Executive Summary
+PowerGrid Customer Billing API is a energy / utilities / smart grid platform that exposes a GraphQL API to authorised consumers.
+The platform manages billing datas partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `meterId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Meter {
+  meterId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: MeterData
+  readings: [Reading!]
+}
+
+type MeterData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getMeter(id: ID!): Meter
+  listMeters(tenantId: ID, status: String): [Meter!]
+  getMeterWithChildren(id: ID!): Meter
+}
+
+type Mutation {
+  updateMeter(id: ID!, input: MeterInput!): Meter
+  deleteMeter(id: ID!): Boolean
+  bulkMeterLookup(ids: [ID!]!): [Meter!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-164:** The `getMeter` resolver fetches by `meterId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkMeterLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 1.12 — Mass assignment via object fields (BOLA)
+
+The `meterId` field is used as the object identifier across all resolvers.
+The mutation `updateMeter` accepts `ownerId` and `tenantId` as writable fields in the input, allowing mass assignment of ownership attributes.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-180b` but the requested object belongs to `tenant-ccb6`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:35.925971+00:00",
+        "time": 167,
+        "request": {
+          "method": "POST",
+          "url": "https://api.powergrid-customer-b.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.powergrid-customer-b.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-180b"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { updateMeter(id: "M-2164", input: {status: "approved", ownerId: "attacker-180bccb6"}) { meterId status } }\"}"
+          },
+          "bodySize": 156
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-180bccb6"}
+          ],
+          "content": {
+            "size": 581,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getMeter\": {\"tenantId\": \"tenant-ccb6\", \"ownerId\": \"other-user-180bccb6\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-180bccb6\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 454,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 194, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

@@ -1,0 +1,131 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** OreTrack Fleet Management
+**Document Version:** 5.1.7 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Mining / Resource Extraction
+**Architecture:** REST + IoT telemetry + GraphQL
+**Training Example ID:** GQL-0275
+
+## 1.0 Executive Summary
+OreTrack Fleet Management is a mining / resource extraction platform that exposes a GraphQL API to authorised consumers.
+The platform manages data records partitioned by tenant (`tenantId`). The architecture uses
+JWT-based OAuth2 authentication, and the JWT carries both the `sub` (user ID) and `tenantId` claims.
+Authorization is expected to be enforced per-resolver on the GraphQL server.
+
+## 2.0 Architecture Overview
+- **API Layer:** GraphQL single endpoint (`POST /graphql`) served via Apollo Server
+- **Auth:** OAuth2 JWT issued by internal IdP; claims include `sub`, `role`, `tenantId`
+- **Database:** PostgreSQL with row-level security policies; each table has a `tenant_id` column
+- **Caching:** Redis cache keyed by `resourceId` (NOTE: no user dimension in cache key)
+
+## 3.0 GraphQL Schema
+```graphql
+
+type Resource {
+  resourceId: ID!
+  tenantId: ID!
+  ownerId: ID!
+  status: String!
+  data: ResourceData
+  items: [Item!]
+}
+
+type ResourceData {
+  title: String
+  sensitiveField: String      # PII / business-sensitive
+  internalNotes: String       # Internal-only field
+  auditLog: [AuditEntry!]
+}
+
+type Query {
+  getResource(id: ID!): Resource
+  listResources(tenantId: ID, status: String): [Resource!]
+  getResourceWithChildren(id: ID!): Resource
+}
+
+type Mutation {
+  updateResource(id: ID!, input: ResourceInput!): Resource
+  deleteResource(id: ID!): Boolean
+  bulkResourceLookup(ids: [ID!]!): [Resource!]
+}
+
+```
+
+## 4.0 Known Architectural Notes
+- **RISK-GQL-275:** The `getResource` resolver fetches by `resourceId` only.
+  The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`.
+  Tracked internally as a known gap pending remediation.
+- The `bulkResourceLookup` mutation accepts an arbitrary array of IDs without
+  per-ID ownership filtering.
+
+## 5.0 Vulnerability Context
+**Pattern:** 2.2 — Metadata/attribute side-channel (BAC)
+
+The `resourceId` field is used as the object identifier across all resolvers.
+The GraphQL schema exposes `listResources` with partial data even for unauthorised objects, leaking the existence and metadata of records the user should not know about.
+
+## 6.0 HAR Capture (Network Trace)
+The following HTTP Archive (HAR) capture was recorded during a penetration test.
+The attacker's token belongs to `tenant-2488` but the requested object belongs to `tenant-0231`.
+
+```json
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "SecurityProxy", "version": "1.0"},
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:22:38.492704+00:00",
+        "time": 270,
+        "request": {
+          "method": "POST",
+          "url": "https://api.oretrack-fleet-manag.example.com/graphql",
+          "httpVersion": "HTTP/2.0",
+          "headers": [
+            {"name": ":authority", "value": "api.oretrack-fleet-manag.example.com"},
+            {"name": "authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-tenant-id", "value": "tenant-2488"}
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"query\": \"query VulnerableOp { updateResource(id: "R-2275", input: {status: "approved", ownerId: "attacker-24880231"}) { resourceId status } }\"}"
+          },
+          "bodySize": 195
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [
+            {"name": "content-type", "value": "application/json"},
+            {"name": "x-request-id", "value": "req-24880231"}
+          ],
+          "content": {
+            "size": 417,
+            "mimeType": "application/json",
+            "text": "{\"data\": {\"getResource\": {\"tenantId\": \"tenant-0231\", \"ownerId\": \"other-user-24880231\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-24880231\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+          },
+          "bodySize": 454,
+          "redirectURL": "",
+          "headersSize": 120
+        },
+        "timings": {"send": 2, "wait": 78, "receive": 5},
+        "cache": {}
+      }
+    ]
+  }
+}
+```
+
+## 7.0 API Contract (Partial)
+```
+POST /graphql
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+Body: { "query": "..." }
+
+Authenticated user's tenantId is extracted from JWT.
+Resolver MUST cross-check tenantId against fetched object's tenantId.
+```

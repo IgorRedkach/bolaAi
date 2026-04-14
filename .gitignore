@@ -33,13 +33,25 @@ env/
 docs/e2e_loop_last_run.json
 docs/live_e2e_test_timings.md
 
+# Large generated training cycles (keep baseline artifacts only)
+data/training/ai_cycles/
+data/training/ai_tasks/
+data/training/generated_cycles/
+data/training/retrain_runs/
+
 # Testing
 .coverage
 htmlcov/
 .pytest_cache/
 
-# Models (optional local cache)
-models/
+# Models
+# Keep local training cache ignored, but allow published split bundles and manifests
+# so trained model artifacts can be pushed with git and baked into images.
+models/*
+!models/published/
+!models/published/**
+!models/packaged/
+!models/packaged/**
 *.bin
 *.gguf
 

@@ -133,24 +133,37 @@ def evaluate_report(doc_name: str, report: str, must_mention: list, must_not: li
         if pattern in r_lower:
             issues.append(f"Report contains disallowed path pattern: {pattern}")
             break
-    # Verification: two-token or reminder
-    two_token_phrases = [
+    # Verification methodology check — accept single-token ID swap (primary) or two-token (secondary).
+    # Single-token: attacker uses own valid token with victim's resource ID.
+    # Two-token: comparative test with two different principals (for cross-tenant/cross-role).
+    verification_methodology_phrases = [
+        # Single-token ID swap methodology (preferred)
+        "your own", "your token", "own valid", "swap", "replace", "change the id",
+        "victim", "victim id", "victim's", "id swap", "id-swap",
+        "own id", "own resource", "own token",
+        # Two-token / comparative (acceptable)
         "two different user tokens", "two different users", "two user tokens",
-        "token a", "token b", "another user token", "verification reminder",
-        "token A", "token B", "with token a", "with token b",
+        "token a", "token b", "with token a", "with token b",
+        "user a", "user b", "actor a", "actor b",
+        "user 1", "user 2", "user_a", "user_b",
+        "two users", "two separate", "second user", "another user",
+        "different user", "different account", "separate user",
+        "attacker", "second account", "another account",
+        # Generic verification reminder
+        "verification reminder", "baseline", "id probe",
     ]
-    if len(report) > 200 and "verification" in r_lower and not any(p in r_lower for p in two_token_phrases):
-        issues.append("Verification section present but no two-token phrasing or reminder")
+    if len(report) > 200 and "verification" in r_lower and not any(p.lower() in r_lower for p in verification_methodology_phrases):
+        issues.append("Verification section present but no ID-swap or comparison methodology")
     # Duplicate heading
     if "### ###" in report or "#### ###" in report:
         issues.append("Duplicate heading (### ###) in output")
     # Bold-wrapped heading (Issue 8)
     if "**###" in report or "** ###" in report:
         issues.append("Bold-wrapped heading (**### pattern) in output")
-    # Rationale should not suggest verification "without a token" (BOLA needs two tokens)
+    # Verification must use a valid token — testing without auth is not a BOLA test
     if "without a token" in r_lower or "without authentication" in r_lower:
         if "if successful" in r_lower or "bola is confirmed" in r_lower:
-            issues.append("Verification suggests testing without token (BOLA requires two user tokens)")
+            issues.append("Verification suggests testing without token (BOLA requires at least one valid authenticated session)")
     if ("401 unauthorized" in r_lower or "invalid token" in r_lower) and "bola is confirmed" in r_lower:
         issues.append("Verification treats auth failure (401/invalid token) as BOLA confirmation")
     # Rationale should not say "does not require authentication" when doc says auth required
@@ -174,12 +187,14 @@ def main():
         help="POST /ingest timeout (embedding/learning); default from BOLA_AI_INGEST_TIMEOUT",
     )
     ap.add_argument("--base-url", default=os.environ.get("BOLA_AI_LIVE_URL", "http://localhost:8000"))
+    ap.add_argument("--max-cases", type=int, default=0, help="Limit number of test cases (0=all)")
     args = ap.parse_args()
     base = args.base_url.rstrip("/")
     timeout = args.timeout
     ingest_timeout = float(args.ingest_timeout) if args.ingest_timeout is not None else _INGEST_T
     all_issues = []
-    for doc_name, must_mention, must_not, doc_path in TEST_CASES:
+    cases_to_run = TEST_CASES if args.max_cases <= 0 else TEST_CASES[: args.max_cases]
+    for doc_name, must_mention, must_not, doc_path in cases_to_run:
         path = FIXTURES / doc_path
         if not path.exists():
             print(f"[SKIP] {doc_name}: fixture not found")

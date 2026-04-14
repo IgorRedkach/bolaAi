@@ -1,0 +1,85 @@
+# ENGINEERING ARCHITECTURE SPECIFICATION
+**System Name:** TrialVault ClinicalOps API
+**Document Version:** 5.1.0 (FINAL)
+**Classification:** SENSITIVE
+**Domain:** Pharmaceutical / Clinical Trials
+**Architecture:** 21 CFR Part 11 + REST + GraphQL
+**Training Example ID:** BOLA-0871
+
+## 1.0 Executive Summary
+TrialVault ClinicalOps API is a pharmaceutical / clinical trials platform with a REST API. Resources are partitioned
+by `tenant_id` and ownership is tracked via `owner_id`. The API uses JWT authentication
+where the token encodes `sub` (user ID) and `tenant_id`.
+
+## 2.0 Architecture
+- **API:** REST (/api/v1/documents endpoints)
+- **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
+- **Database:** PostgreSQL with logical tenant partitioning
+- **Pattern under test:** 5.3 — SSRF via user-controlled URLs
+
+## 3.0 Database Schema
+```sql
+
+-- Document table
+CREATE TABLE documents (
+    document_id    VARCHAR(50) PRIMARY KEY,
+    owner_id         VARCHAR(50) NOT NULL REFERENCES users(user_id),
+    tenant_id        VARCHAR(50) NOT NULL,
+    status           VARCHAR(20) DEFAULT 'active',
+    sensitive_data   TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_document_tenant ON documents(tenant_id);
+-- NOTE: Application code does NOT use tenant_id in authorization checks
+
+```
+
+## 4.0 Vulnerability Context
+**Pattern:** 5.3 — SSRF via user-controlled URLs (Injection)
+
+The `GET/PATCH/DELETE /api/v1/documents/:id` endpoint accepts a `document_id` in the URL path.
+The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-A736` can access objects owned by `ORG-20B1`.
+
+_Specific exploitation for Pattern 5.3:_ The `/api/v1/documents` handler does not enforce tenant/owner boundaries for Pattern 5.3.
+
+## 5.0 Artifact (HAR)
+```json
+{
+  "log": {
+    "version": "1.2",
+    "entries": [
+      {
+        "startedDateTime": "2026-04-13T16:24:36.292995+00:00",
+        "time": 274,
+        "request": {
+          "method": "GET",
+          "url": "https://api.trialvault-clin.example.com/api/v1/documents/DOC-2871",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
+            {"name": "X-Tenant-ID", "value": "ORG-A736"},
+            {"name": "Accept", "value": "application/json"}
+          ],
+          "queryString": [],
+          "bodySize": 0
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "content": {
+            "mimeType": "application/json",
+            "text": "{\"id\":\"DOC-2871\",\"tenantId\":\"ORG-20B1\",\"ownerId\":\"other-user-a73620b1\",\"sensitiveData\":\"CONFIDENTIAL: cross-tenant data for ORG-20B1\"}"
+          },
+          "bodySize": 136
+        }
+      }
+    ]
+  }
+}
+```
+
+## 6.0 Known Risk Log
+- **RISK-53-871:** Pattern 5.3 detected in `/api/v1/documents` handler.
+  The handler was written before the tenant isolation policy was established.
+  Remediation is blocked pending DB migration ticket #DB-971.
