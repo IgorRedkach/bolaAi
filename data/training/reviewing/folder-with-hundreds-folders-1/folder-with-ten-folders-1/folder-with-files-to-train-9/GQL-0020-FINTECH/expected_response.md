@@ -1,79 +1,79 @@
-# Expected Response
-
 ## System
-- Domain: Fintech / Payments Gateway
-- System: PayBridge Transaction API
+
+- System: PayBridge Transaction API v5.1.5
+- Domain: FINTECH / PAYMENTS GATEWAY
 - Example ID: GQL-0020
+- Risk ID: RISK-GQL-020
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — ID swap in own request (Pattern 10.1)
-**Severity:** Critical
-**Category:** Single-User
+### 1. `listResources` Client-Controlled `tenantId` — Single Token Accesses Full Payment Tenant (Pattern 10.1 / HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 10.1 (ID swap in own request) vulnerability.
-An authenticated user belonging to `tenant-2fef` can access or manipulate objects owned by
-`tenant-151b` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**Primary HAR attack**: The HAR shows `listResources(tenantId: "tenant-151b")` from JWT `tenant-2fef`. Pattern 10.1 (Single-User ID Swap): a single authenticated user with one valid token substitutes the target `tenantId` directly in the query argument — no credential theft, no privilege escalation, just one ID change.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-2fef`
-- Response body `tenantId`: `tenant-151b` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-151b`
+**HAR evidence**: JWT `x-tenant-id: tenant-2fef`. Request: `listResources(tenantId: "tenant-151b")`. Response: HTTP 200 OK with `"tenantId": "tenant-151b"`, `"sensitiveField": "CONFIDENTIAL-2fef151b"` — an entire payment merchant's transaction list returned with a single query argument change.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+**Fintech/PCI DSS impact**: `Resource` objects in a payments gateway represent transactions, payment method tokens, or merchant settlement records. The `sensitiveField` in this context likely contains cardholder data or financial account identifiers. Single-token cross-tenant access to transaction records constitutes a PCI DSS breach and may expose payment credentials of another merchant's customers.
 
-## Steps to Reproduce
+### 2. BOLA on `getResource` — Single-ID Swap (RISK-GQL-020 / Pattern 10.1 Canonical)
 
-### Step 1 — Establish attacker baseline
-```bash
-curl -s -X POST https://api.paybridge-transactio.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-2FEF>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1020\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+Section 4.0 (RISK-GQL-020): `getResource` fetches by `resourceId` without tenant check. Section 5.0 describes Pattern 10.1 as a user substituting their valid `resourceId` with a victim's — the simplest possible BOLA with no special tools required.
+
+### 3. BOLA on `bulkResourceLookup` — No Per-ID Ownership Filter (Pattern 1.9)
+
+Section 4.0: documented gap.
+
+### 4. Redis Cache Without Tenant Dimension
+
+Section 2.0: `resourceId`-only cache key. Payment records cached without tenant dimension could serve cross-merchant transaction data.
+
+## Evidence
+
+- **HAR**: `listResources(tenantId: "tenant-151b")` with `tenant-2fef` JWT → HTTP 200 → `tenantId: tenant-151b` with `sensitiveField`.
+- **Section 5.0**: Pattern 10.1 — single user swaps `resourceId` (or `tenantId`) with victim's to access their data.
+- **Section 4.0 (RISK-GQL-020)**: `getResource` lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` lacks per-ID filter.
+- **Section 2.0**: Redis cache keyed by `resourceId` only.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
+```graphql
+query { listResources(tenantId: "tenant-2fef") { resourceId tenantId data { sensitiveField } } }
 ```
-**Expected baseline:** Returns `tenantId: "tenant-2fef"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
-```bash
-curl -s -X POST https://api.paybridge-transactio.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-2FEF>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2020\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+Expected: All records belong to `tenant-2fef`.
+
+**Step 2 — Single-token tenant override (Pattern 10.1 / primary HAR attack):**
+
+```graphql
+query { listResources(tenantId: "tenant-151b") { resourceId tenantId ownerId data { sensitiveField internalNotes } items { itemId } } }
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-151b"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
-```bash
-curl -s -X POST https://api.paybridge-transactio.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-2FEF>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2020\", \"R-3020\", \"R-4020\"]) { resourceId tenantId data { sensitiveField } } }"}'
+Expected secure: Ignores client-supplied `tenantId`; returns only records for JWT's `tenantId`.  
+Expected vulnerable: HTTP 200 with all payment transaction records for `tenant-151b`.
+
+**Step 3 — Single-ID swap (Pattern 10.1 canonical / RISK-GQL-020):**
+
+```graphql
+query { getResource(id: "R-2020") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
-```bash
-curl -s -X POST https://api.paybridge-transactio.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-2FEF>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
-```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+Replace `R-1020` (own record) with `R-2020` (victim record) — no other change required.  
+Expected secure: HTTP 403/404.  
+Expected vulnerable: HTTP 200 with `tenantId: "tenant-151b"` and payment record data.
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+**Step 4 — Bulk cross-tenant lookup:**
+
+```graphql
+mutation { bulkResourceLookup(ids: ["R-2020", "R-3020", "R-4020"]) { resourceId tenantId data { sensitiveField } } }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Ignore client-supplied `tenantId` in `listResources`**: source exclusively from JWT `tenantId`.
+- **Enforce `tenant_id` WHERE clause in `getResource`** (RISK-GQL-020).
+- **Filter `bulkResourceLookup` by JWT `tenantId`**.
+- **Add `tenantId` to Redis cache key**.
+- **PCI DSS scope**: any cross-tenant access to cardholder data is a reportable incident — add real-time alerting on `tenantId` mismatch in response.

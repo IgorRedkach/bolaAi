@@ -1,21 +1,15 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0019) was generated independently for the **StreamCore VOD Platform** system (Media / Content Delivery).
+1. **HAR shows `updateResource` write mutation as primary**: HAR is `updateResource(id: "R-2019", input: {status: "approved", ownerId: "attacker-a0c15440"})`. The original expected_response.md ignored this and started with a read step.
 
-## Generation Method
-1. Selected industry: **Media / Content Delivery**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 9.1 (GraphQL: single endpoint vulnerabilities)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 9.1 (GraphQL Single Endpoint) framing is the key training signal**: REST APIs protect write operations by routing to different HTTP methods (GET vs POST/PUT/PATCH/DELETE) or different paths, allowing path-based authorization middleware. GraphQL routes everything through `POST /graphql`. This means: (a) a WAF rule blocking DELETE on a specific path is useless — the delete comes as a POST body; (b) per-operation authorization must be at the resolver level, not HTTP middleware. The training signal is that a single missing resolver check exposes ALL operations (read, write, delete) simultaneously, not just one HTTP method.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **`deleteResource` step added**: section 5.0 says "all operations (including sensitive mutations)" — demonstrating a delete at the single endpoint reinforces the Pattern 9.1 concept. In a VOD platform, deleting a competitor's content is a clear sabotage scenario.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Media/VOD context**: content status transitions (draft → approved → published) are business-critical in a streaming platform. Unauthorized approval bypasses content moderation gates; ownership transfer enables content rights fraud.
 
-## Pattern Coverage
-- Primary: Pattern 9.1 — GraphQL: single endpoint vulnerabilities (Platform)
+5. **Bulk lookup confirmed, not conditional**: section 4.0 documents `bulkResourceLookup` lacking per-ID filter.
+
+6. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+7. **HAR response/request mismatch**: request is `updateResource` mutation but response is `getResource`. Same synthetic artifact. Confirmed signal: `tenantId: tenant-5440` with HTTP 200.
