@@ -1,79 +1,75 @@
-# Expected Response
-
 ## System
-- Domain: Travel / GDS
-- System: SkyPort Global Distribution
+
+- System: SkyPort Global Distribution v4.5.0
+- Domain: TRAVEL / GDS
 - Example ID: GQL-0018
+- Risk ID: RISK-GQL-018
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Operational PII/PHI leakage (Pattern 7.1)
-**Severity:** Critical
-**Category:** Logging Failures
+### 1. BOLA on `bulkResourceLookup` — Batch Cross-Tenant Lookup Exposing Traveler PII (Pattern 7.1 / HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 7.1 (Operational PII/PHI leakage) vulnerability.
-An authenticated user belonging to `tenant-50cd` can access or manipulate objects owned by
-`tenant-8ffc` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**Primary HAR attack**: The HAR shows `bulkResourceLookup(ids: ["R-2018", "R-1018", "R-3018"])` from JWT `tenant-50cd`. The batch lookup returns multiple cross-tenant booking records without ownership filtering.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-50cd`
-- Response body `tenantId`: `tenant-8ffc` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-8ffc`
+**HAR evidence**: JWT `x-tenant-id: tenant-50cd`. Request: `bulkResourceLookup(ids: ["R-2018", "R-1018", "R-3018"])`. Response: HTTP 200 OK with `"tenantId": "tenant-8ffc"`, `"sensitiveField": "CONFIDENTIAL-50cd8ffc"`, `"internalNotes": "Internal data exposed"` — cross-tenant PNR data returned in bulk.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+**Pattern 7.1 (Logging Failures — Operational PII/PHI leakage)**: the BOLA enables mass cross-tenant access to traveler PII (passenger name records, itinerary details, potentially passport numbers and payment method references). The logging failure compounds this: if cross-tenant access events are not flagged in audit logs, each unauthorized `bulkResourceLookup` call retrieves multiple airlines' or agencies' traveler records silently, with no breach detection signal.
 
-## Steps to Reproduce
+**Travel/GDS impact**: `Resource` objects in a Global Distribution System represent booking records (PNRs) containing traveler names, itineraries, and contact information. The `auditLog: [AuditEntry!]` field means an attacker reading cross-tenant records also receives the operational audit trail of a competing carrier's bookings — revealing internal booking patterns and modification history.
 
-### Step 1 — Establish attacker baseline
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-50CD>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1018\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+### 2. BOLA on `getResource` — Missing `tenant_id` Filter (RISK-GQL-018)
+
+Section 4.0 (RISK-GQL-018): `getResource` fetches by `resourceId` without tenant check.
+
+### 3. `auditLog` Field Exposure via Cross-Tenant Access
+
+The `ResourceData` type includes `auditLog: [AuditEntry!]`. Cross-tenant access via `bulkResourceLookup` or `getResourceWithChildren` exposes the operational audit trail for another carrier's booking records — including who modified the PNR, when, and what changed.
+
+### 4. Redis Cache Without Tenant Dimension
+
+Section 2.0: `resourceId`-only cache key — cached booking records without tenant dimension.
+
+## Evidence
+
+- **HAR**: `bulkResourceLookup(ids: ["R-2018", "R-1018", "R-3018"])` with `tenant-50cd` JWT → HTTP 200 → `tenantId: tenant-8ffc` with `sensitiveField`.
+- **Section 5.0**: Pattern 7.1 — cross-tenant access exposes PII; logging failures mean unauthorized access is not detected.
+- **Section 4.0 (RISK-GQL-018)**: `getResource` lacks tenant check.
+- **Section 2.0**: Redis cache keyed by `resourceId` only.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
+```graphql
+query { getResource(id: "R-1018") { resourceId tenantId data { sensitiveField } } }
 ```
-**Expected baseline:** Returns `tenantId: "tenant-50cd"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-50CD>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2018\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+Expected: `tenantId: "tenant-50cd"`.
+
+**Step 2 — Bulk cross-tenant booking record lookup (primary HAR attack):**
+
+```graphql
+mutation {
+  bulkResourceLookup(ids: ["R-2018", "R-1018", "R-3018"]) {
+    resourceId tenantId ownerId
+    data { sensitiveField internalNotes auditLog { event timestamp } }
+    items { itemId }
+  }
+}
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-8ffc"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-50CD>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2018\", \"R-3018\", \"R-4018\"]) { resourceId tenantId data { sensitiveField } } }"}'
-```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+Expected secure: Only returns records where `tenantId` matches JWT `tenantId`.  
+Expected vulnerable: HTTP 200 with PNR data for multiple tenants in a single batch response, including `auditLog` entries.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-50CD>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
-```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+**Step 3 — Single cross-tenant booking read (RISK-GQL-018):**
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+```graphql
+query { getResource(id: "R-2018") { resourceId tenantId ownerId data { sensitiveField internalNotes auditLog { event timestamp actor } } } }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Filter `bulkResourceLookup` by JWT `tenantId`**: after fetching by IDs, remove any result where `tenantId != jwt.tenantId`.
+- **Enforce `tenant_id` WHERE clause in `getResource`** (RISK-GQL-018).
+- **Audit log all cross-tenant access attempts**: any request where a fetched object's `tenantId` does not match the JWT's `tenantId` must generate a security alert — the logging failure is what makes Pattern 7.1 uniquely dangerous.
+- **Add `tenantId` to Redis cache key**.

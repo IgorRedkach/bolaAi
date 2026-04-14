@@ -1,21 +1,15 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0018) was generated independently for the **SkyPort Global Distribution** system (Travel / GDS).
+1. **HAR shows `bulkResourceLookup` batch attack as primary**: the HAR request is `bulkResourceLookup(ids: ["R-2018", "R-1018", "R-3018"])` from `tenant-50cd`. The original expected_response.md ignored this and started with `getResource` single-ID — wrong primary step.
 
-## Generation Method
-1. Selected industry: **Travel / GDS**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 7.1 (Operational PII/PHI leakage)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 7.1 (Operational PII/PHI leakage via Logging Failures) has a dual nature**: (a) the BOLA enables access to traveler PII, and (b) the logging failure means this access is not detected. The remediation must address both — not just the BOLA fix but also the logging/audit requirement. In a GDS, bulk unauthorized access to PNRs is a reportable data breach; if audit logs don't flag cross-tenant access, the breach is undetectable by the victim carrier/agency.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **`auditLog` field exposure is a secondary unique finding**: the `ResourceData` schema includes `auditLog: [AuditEntry!]`. When an attacker reads a cross-tenant booking record, they also receive the victim's operational audit history — who modified the booking, when, and the modification history. This is operational intelligence beyond the PII itself.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **GDS/travel domain context**: booking records in a Global Distribution System contain multi-leg itineraries, passenger names, seat assignments, and potentially frequent flyer numbers. Cross-tenant bulk access is equivalent to a carrier reading a competitor's reservation database.
 
-## Pattern Coverage
-- Primary: Pattern 7.1 — Operational PII/PHI leakage (Logging Failures)
+5. **Bulk lookup is the HAR-primary, not conditional**: section 4.0 documents the gap, and the HAR demonstrates the attack.
+
+6. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+7. **Redis cache added**: section 2.0 documents `resourceId`-only cache key. Booking records cached without tenant dimension could serve cross-carrier PNR data.

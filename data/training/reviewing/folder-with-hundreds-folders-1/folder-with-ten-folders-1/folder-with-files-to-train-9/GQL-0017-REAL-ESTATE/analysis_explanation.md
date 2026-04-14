@@ -1,21 +1,13 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0017) was generated independently for the **EstateFlow Property API** system (Real Estate / PropTech).
+1. **This is the one example where the introspection step IS the primary finding**: section 5.0 explicitly states "GraphQL introspection is enabled in production. The schema exposes internal type names, field descriptions, and sensitive relationship paths that aid exploitation." This is Pattern 6.1 (Schema/relationship over-exposure). In all previous examples, introspection was a speculative step not grounded in the context. Here it is the documented primary vulnerability.
 
-## Generation Method
-1. Selected industry: **Real Estate / PropTech**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 6.1 (Schema/relationship over-exposure)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Introspection enables and amplifies all subsequent BOLA attacks**: by exposing `sensitiveField`, `internalNotes`, `auditLog`, and `items` relationship paths, introspection transforms a partial data access into a complete extraction attack. The original expected_response.md treated introspection as Step 4 ("if Pattern 6.1 also present") — it should be Step 1 as the documented primary attack, with the BOLA attacks following as the exploitation that introspection enables.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **HAR shows `listResources` tenant override as the secondary BOLA**: HAR request is `listResources(tenantId: "tenant-6cab")` from `tenant-2d4e`. The original expected_response.md started with `getResource` single-ID which doesn't match the HAR. The `listResources` tenant override should be Step 2 — the BOLA attack that introspection discovery enables.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Attack chain is the key training signal**: introspection → discover field names → craft targeted query → extract data. This two-phase attack is specifically what Pattern 6.1 describes.
 
-## Pattern Coverage
-- Primary: Pattern 6.1 — Schema/relationship over-exposure (Misconfiguration)
+5. **Bulk lookup confirmed, not conditional**: section 4.0 documents `bulkResourceLookup` lacking per-ID ownership filtering.
+
+6. **Redis cache added**: section 2.0 documents `resourceId`-only cache key.

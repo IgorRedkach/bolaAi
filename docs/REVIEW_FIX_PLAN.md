@@ -128,8 +128,8 @@
 #### folder-with-files-to-train-9
 
 - [x] **0091** [GQL-0016-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0016-EDUCATION/context.txt)
-- [ ] **0092** [GQL-0017-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0017-REAL-ESTATE/context.txt)
-- [ ] **0093** [GQL-0018-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0018-TRAVEL/context.txt)
+- [x] **0092** [GQL-0017-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0017-REAL-ESTATE/context.txt)
+- [x] **0093** [GQL-0018-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0018-TRAVEL/context.txt)
 - [ ] **0094** [GQL-0019-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0019-MEDIA/context.txt)
 - [ ] **0095** [GQL-0020-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0020-FINTECH/context.txt)
 - [ ] **0096** [GQL-0021-PHARMACEUTICAL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0021-PHARMACEUTICAL/context.txt)
