@@ -3,7 +3,6 @@
 **Document Version:** 4.2.0 (FINAL)
 **Classification:** SENSITIVE
 **Domain:** Pharmaceutical / Clinical Trials
-**Vulnerability Type:** SQL Injection
 **Training Example ID:** INJ-0121
 
 ## 1.0 Executive Summary

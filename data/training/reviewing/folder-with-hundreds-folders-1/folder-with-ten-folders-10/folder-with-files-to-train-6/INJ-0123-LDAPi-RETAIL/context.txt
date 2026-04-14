@@ -3,20 +3,21 @@
 **Document Version:** 1.7.0 (FINAL)
 **Classification:** SENSITIVE
 **Domain:** Retail / Loyalty Programme
-**Vulnerability Type:** LDAP Injection
 **Training Example ID:** INJ-0123
 
 ## 1.0 Executive Summary
-RewardCore Loyalty API is a retail / loyalty programme platform with a REST API backed by corporate directory services.
-The platform exposes search and filter endpoints that accept user-supplied parameters.
-Input sanitization is inconsistent across the codebase due to a mix of raw query
-construction and ORM usage.
+RewardCore Loyalty API is a retail / loyalty programme platform with a REST API. The platform
+uses Active Directory (LDAP) for loyalty member authentication and account lookup. The `/api/v3/orders`
+endpoint filters loyalty orders by member username using an LDAP directory query. Additionally,
+a legacy SQL path remains active for order data retrieval from the relational database.
+Input sanitization is inconsistent across the codebase.
 
 ## 2.0 Architecture
-- **API Layer:** Node.js / Express or Java Spring Boot REST API
-- **Database:** corporate directory services — primary data store
+- **API Layer:** Node.js / Express REST API
+- **Directory Services:** Active Directory (LDAP) — loyalty member authentication and lookup
+- **Database:** PostgreSQL (via legacy SQL path)
 - **Auth:** JWT Bearer tokens
-- **Known Debt:** Older endpoint `/api/v3/orders` uses string concatenation for queries
+- **Known Debt:** Older endpoint `/api/v3/orders` passes `filter` parameter directly to LDAP query and SQL query without sanitization
 
 ## 3.0 Vulnerable Endpoint
 ```
@@ -24,15 +25,23 @@ GET /api/v3/orders?filter=<user_input>
 Authorization: Bearer <JWT>
 ```
 
-**Vulnerable Code Snippet:**
+**Backend Code Snippet (LDAP authentication path):**
 ```javascript
-// Node.js — raw query construction (VULNERABLE)
+// Node.js — LDAP filter constructed from user input without escaping
+// Note: filter parameter is interpolated directly into LDAP search filter
+const ldapFilter = `(&(objectClass=user)(cn=${req.query.filter}))`;
+ldapClient.search('dc=rewardcore,dc=local', { filter: ldapFilter }, (err, res) => { ... });
+```
+
+**Legacy Code Snippet (SQL path — active on same endpoint):**
+```javascript
+// Node.js — raw SQL query construction (legacy path)
 const query = `SELECT * FROM orders WHERE filter = '${req.query.filter}'`;
 db.execute(query, (err, results) => { ... });
 ```
 
 ## 4.0 Injection Payload
-The following input exploits the lack of parameterization:
+The following input was recorded in the penetration test:
 ```
 filter=admin)(&(password=*))
 ```
@@ -48,7 +57,7 @@ filter=admin)(&(password=*))
         "time": 151,
         "request": {
           "method": "GET",
-          "url": "https://api.rewardcore-loya.example.com/api/v3/orders?filter=admin)(&(password=*))",
+          "url": "https://api.rewardcore-loya.example.com/api/v3/orders?filter=admin)(%26(%26(password%3D*)))",
           "httpVersion": "HTTP/1.1",
           "headers": [
             {"name": "Authorization", "value": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3Jfe3VpZH0iLCJyb2xlIjoie3JvbGV9IiwidGVuYW50X2lkIjoie3RlbmFudH0ifQ.SIG"},
@@ -74,11 +83,11 @@ filter=admin)(&(password=*))
 }
 ```
 
-## 6.0 Misconfiguration Context
-- Over-privileged DB account: application connects as `db_owner` instead of a restricted role
+## 6.0 Misconfiguration Notes
+- Over-privileged directory binding: service account has read access to all directory attributes
 - Verbose error messages enabled in staging (and leaked to production accidentally)
 - No WAF or input validation middleware on legacy endpoints
 
 ## 7.0 Known Risk
-- **RISK-INJ-123:** Endpoint `/api/v3/orders` uses raw string concatenation.
-  Parameterized queries are used in newer endpoints but this one was missed in the migration.
+- **RISK-INJ-123:** Endpoint `/api/v3/orders` passes `filter` parameter directly to LDAP search filter without special character escaping.
+  A legacy SQL path on the same endpoint also uses raw string concatenation.

