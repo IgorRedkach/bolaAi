@@ -1,73 +1,69 @@
 # Expected Response
 
 ## System
-- Domain: Document Signing / eSign
-- System: SignFlow eSign Platform (Salesforce-Integrated)
+- System: SignFlow eSign Platform (Salesforce-Integrated) v4.9.0
+- Domain: DOCUMENT SIGNING / eSIGN
 - Example ID: SF-0247
+- Risk IDs: RISK-SF-247, RISK-SF-248
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Mass assignment via object fields (Pattern 1.12)
-**Severity:** Critical
-**Category:** BOLA
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 1.12 — Mass Assignment via Client-Supplied `fields` Array + BOLA: `c.OpportunityController.getOpportunity` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.ContactController.updateContact` is vulnerable to Pattern 1.12.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `contactId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+The Aura controller `c.OpportunityController.getOpportunity` accepts both `opportunityId` (cross-tenant ID substitution) and a client-controlled `fields` array specifying which Opportunity fields to return. The controller runs `without sharing` (RISK-SF-247), bypassing `OWD=Private` sharing rules, and contains no ownership check in the SOQL WHERE clause (RISK-SF-248). This enables two compounding vulnerabilities:
+
+1. **BOLA:** Any `opportunityId` can be substituted to read another user's Opportunity record.
+2. **Mass assignment (Pattern 1.12):** The client specifies the exact fields returned including sensitive custom fields `SensitiveData__c` and `InternalNotes__c`, bypassing field-level security that would otherwise restrict access to these fields.
 
 **Evidence from HAR:**
-- Aura action: `c.ContactController.updateContact`
-- Requested `contactId`: `001C988` (belongs to a different user)
+- Aura action: `c.OpportunityController.getOpportunity`
+- Requested `opportunityId`: `001C988` — belongs to `OwnerId: "005VICTIM"`
+- Client-supplied `fields`: `["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]`
 - Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+- Response includes `SensitiveData__c: "SSN: 000-52-7113"` and `InternalNotes__c: "CONFIDENTIAL: internal review notes"` — PII exposed
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `contactId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `contactId` sourced directly from Aura params without server-side validation
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Capture a baseline Aura request to your own record
+**Step 1 — Capture baseline Aura request:**
 Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.ContactController.updateContact` action in the `message` POST body.
-Record your own `contactId` value (e.g., `001YOURRECORDID000000`).
+Identify `c.OpportunityController.getOpportunity` in the `message` POST body.
+Record your own `opportunityId` (e.g., `001YOURRECORDID000000`).
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `contactId` values.
-
-### Step 3 — Substitute victim ID in Aura request
+**Step 2 — Substitute victim `opportunityId` + mass assign sensitive fields (primary HAR attack):**
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://c4dfc988.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00DC4DFC988!ARc4dfc988...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00DC4DFC988!ARc4dfc988...
 
-message={"actions":[{"id":"1;a","descriptor":"c.ContactController.updateContact","callingDescriptor":"UNKNOWN",
-"params":{"contactId":"001C988","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.OpportunityController.getOpportunity","callingDescriptor":"UNKNOWN",
+"params":{"opportunityId":"001C988","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+**Step 3 — Enumerate adjacent Opportunity IDs:**
+Salesforce Opportunity IDs follow predictable patterns (18-char with `001` prefix). Increment the last segment to enumerate victim records:
+```
+opportunityId: 001C987, 001C989, 001C98A, ...
+```
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 4 — Verify BOLA + mass assignment:**
+**Vulnerable outcome:** Response `state: "SUCCESS"` with victim Opportunity data including:
+- `SensitiveData__c: "SSN: 000-52-7113"` — SSN exposed (PII breach)
+- `InternalNotes__c: "CONFIDENTIAL: internal review notes"`
+- `OwnerId: "005VICTIM"` — confirmed cross-user access
+
+**Secure outcome:** Response `state: "ERROR"` with `INSUFFICIENT_ACCESS` or empty `records` array.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+1. **Add `with sharing` to Apex class (RISK-SF-247):**
    ```apex
-   public with sharing class ContactController { ... }
+   public with sharing class OpportunityController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL (RISK-SF-248):**
    ```apex
-   WHERE Id = :contactId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :opportunityId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `contactId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries** to enforce field-level security server-side, preventing client-supplied `fields` from bypassing FLS.
+4. **Server-side field allowlist:** Do not accept `fields` parameter from client. Define the allowed fields server-side only.
+5. **Automated test:** Apex test authenticating as User A requesting User B's `opportunityId` — assert `INSUFFICIENT_ACCESS` or empty result.

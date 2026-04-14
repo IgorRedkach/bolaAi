@@ -1,22 +1,28 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0247-DOCUMENT-SIGNIN
 
-This example (SF-0247) was generated independently for **SignFlow eSign Platform** (Document Signing / eSign).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Document Signing / eSign**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 1.12 (Mass assignment via object fields)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Corrected Controller, Object, and Parameter Names
+Original used `c.ContactController.updateContact` with `contactId`. Context Section 5.0 and HAR specify:
+- Controller: `c.OpportunityController.getOpportunity`
+- Parameter: `opportunityId`
+- Object: `Opportunity`
+Corrected throughout.
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `eventId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+### 2. Corrected Org Host and Session Token
+Original used generic `<ORG_ID>.lightning.force.com`. HAR specifies `c4dfc988.lightning.force.com` and session token `00DC4DFC988!ARc4dfc988...`. Corrected in Step 2 reproduction.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 3. Explained Pattern 1.12 Correctly
+Pattern 1.12 is "Mass assignment via object fields." In this Salesforce context, the "mass assignment" aspect is the client-controlled `fields` array parameter in the Aura request — the client specifies which fields to return, including sensitive custom fields `SensitiveData__c` and `InternalNotes__c`. Server-side `WITH SECURITY_ENFORCED` or a server-side allowlist would prevent clients from requesting sensitive fields. This is distinct from plain BOLA (which is the `opportunityId` substitution). Both compounding issues are now documented together as Pattern 1.12.
 
-## Pattern Coverage
-- Primary: Pattern 1.12 — Mass assignment via object fields (BOLA)
+### 4. Highlighted SSN Exposure
+HAR response contains `SensitiveData__c: "SSN: 000-52-7113"`. Added explicit SSN PII breach impact in both the finding and Step 4 verification.
+
+### 5. Added Risk IDs
+RISK-SF-247 (`without sharing`) and RISK-SF-248 (no ownership check in SOQL) from Section 8.0 are now referenced in the remediation steps.
+
+### 6. Added `WITH SECURITY_ENFORCED` and Server-Side Field Allowlist
+Original remediation only addressed `with sharing` and SOQL ownership check. Since Pattern 1.12 involves client-controlled field selection, added `WITH SECURITY_ENFORCED` in SOQL and server-side field allowlist as specific remediations for the mass assignment aspect.
+
+### 7. Noted Method Name Inconsistency
+Section 4.0 Apex code defines method `getOpportunityDetails`, but Section 5.0 and HAR use `getOpportunity`. HAR is authoritative — using `getOpportunity`.

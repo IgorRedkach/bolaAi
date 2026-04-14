@@ -177,15 +177,15 @@
 - [x] **0130** [SF-0246-HR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0246-HR/context.txt)
 #### folder-with-files-to-train-3
 
-- [ ] **0131** [BOLA-0079-P35-FOOD-&-BEV](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0079-P35-FOOD-&-BEV/context.txt)
-- [ ] **0132** [BOLA-0080-P41-HOSPITALIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0080-P41-HOSPITALIT/context.txt)
-- [ ] **0133** [BOLA-0081-P42-FITNESS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0081-P42-FITNESS/context.txt)
-- [ ] **0134** [GQL-0421-PHARMACEUTICAL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/GQL-0421-PHARMACEUTICAL/context.txt)
-- [ ] **0135** [GQL-0422-AGRICULTURE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/GQL-0422-AGRICULTURE/context.txt)
-- [ ] **0136** [INJ-0112-SSRF-INSURANCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0112-SSRF-INSURANCE/context.txt)
-- [ ] **0137** [INJ-0113-SQLi-LOGISTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0113-SQLi-LOGISTICS/context.txt)
-- [ ] **0138** [INJ-0114-NoSQLi-ENERGY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0114-NoSQLi-ENERGY/context.txt)
-- [ ] **0139** [SF-0247-DOCUMENT-SIGNIN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/SF-0247-DOCUMENT-SIGNIN/context.txt)
+- [x] **0131** [BOLA-0079-P35-FOOD-&-BEV](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0079-P35-FOOD-&-BEV/context.txt)
+- [x] **0132** [BOLA-0080-P41-HOSPITALIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0080-P41-HOSPITALIT/context.txt)
+- [x] **0133** [BOLA-0081-P42-FITNESS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0081-P42-FITNESS/context.txt)
+- [x] **0134** [GQL-0421-PHARMACEUTICAL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/GQL-0421-PHARMACEUTICAL/context.txt)
+- [x] **0135** [GQL-0422-AGRICULTURE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/GQL-0422-AGRICULTURE/context.txt)
+- [x] **0136** [INJ-0112-SSRF-INSURANCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0112-SSRF-INSURANCE/context.txt)
+- [x] **0137** [INJ-0113-SQLi-LOGISTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0113-SQLi-LOGISTICS/context.txt)
+- [x] **0138** [INJ-0114-NoSQLi-ENERGY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0114-NoSQLi-ENERGY/context.txt)
+- [x] **0139** [SF-0247-DOCUMENT-SIGNIN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/SF-0247-DOCUMENT-SIGNIN/context.txt)
 - [ ] **0140** [SF-0248-TAX-COMPLIANCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/SF-0248-TAX-COMPLIANCE/context.txt)
 #### folder-with-files-to-train-4
 

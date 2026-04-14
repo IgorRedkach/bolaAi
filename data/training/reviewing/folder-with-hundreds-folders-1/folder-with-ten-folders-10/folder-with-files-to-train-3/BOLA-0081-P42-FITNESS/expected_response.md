@@ -1,53 +1,82 @@
-# Expected Response
-
 ## System
-- Domain: Fitness / Wearables
-- System: VitalTrack Health API
+
+- System: VitalTrack Health API v2.7.0
+- Domain: FITNESS / WEARABLES
 - Example ID: BOLA-0081
+- Risk ID: RISK-42-081
 
-## Priority Findings
+## Findings
 
-### Finding 1: Persistence poisoning via lifecycle actions (Pattern 4.2)
-**Severity:** Critical
-**Category:** Integrity
+### 1. Pattern 4.2 — Persistence Poisoning via Lifecycle Actions on `/api/v3/nodes/:id` (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 4.2 (Persistence poisoning via lifecycle actions).
-An authenticated user from `ORG-F7CC` can access or modify objects owned by `ORG-AF07`
-by manipulating the resource identifier in the request.
+**HAR evidence**: JWT `X-Tenant-ID: ORG-F7CC`. Request: `GET /api/v3/nodes/NOD-2081`. Response: HTTP 200 OK with `"tenantId": "ORG-AF07"`, `"ownerId": "other-user-f7ccaf07"`, `"sensitiveData": "CONFIDENTIAL: cross-tenant data for ORG-AF07"`.
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-F7CC`
-- Response body `tenantId`: `ORG-AF07` — confirms cross-tenant data returned
-- HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
+**Pattern 4.2 (Persistence Poisoning via Lifecycle Actions — Integrity)**: health tracking nodes undergo lifecycle actions (device sync, health data update, session archival, device deprovisioning). These lifecycle operations write data that persists in the system and feeds downstream analytics (health reports, fitness scores, insurance calculations). The handler lacks tenant/owner enforcement (Section 3.0: "does NOT use tenant_id in authorization checks", RISK-42-081), allowing an attacker from `ORG-F7CC` to:
+1. Read another user's health node data (HAR primary — GET)
+2. PATCH lifecycle actions that poison persistent health data of another fitness/health user
+3. DELETE lifecycle actions that destroy another user's health tracking history
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+Poisoned data (false health metrics, fabricated workout records) persists in the system and corrupts downstream health analytics — affecting insurance underwriting, clinical decision support (FHIR), or fitness program eligibility.
 
-## Steps to Reproduce
+**Fitness / Wearables impact**: nodes represent wearable device nodes, health metric records (FHIR resources), or workout session data. Cross-tenant PATCH poisons another user's health records (heart rate, sleep data, step counts) — corrupting FHIR patient data (HIPAA PHI violation) and potentially affecting clinical decisions based on poisoned metrics. DELETE destroys health tracking history irreversibly.
 
-### Step 1 — Authorize baseline
+Note: Section 5.0 labels this "GraphQL HAR" but the request is a REST endpoint (`/api/v3/nodes/`) — label inconsistency in the context.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.vitaltrack-heal.example.com/api/v1/resources/RES-1081" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-F7CC>"
+curl -s "https://api.vitaltrack-heal.example.com/api/v3/nodes/NOD-1081" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-F7CC>" \
+  -H "X-Tenant-ID: ORG-F7CC"
 ```
-Expected: Returns own record with `tenantId: "ORG-F7CC"`.
 
-### Step 2 — ID substitution
+Expected: `tenantId: "ORG-F7CC"` — own health node.
+
+**Step 2 — Cross-tenant health node read (primary HAR attack):**
+
 ```bash
-curl -s "https://api.vitaltrack-heal.example.com/api/v1/resources/RES-2081" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-F7CC>"
+curl -s "https://api.vitaltrack-heal.example.com/api/v3/nodes/NOD-2081" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-F7CC>" \
+  -H "X-Tenant-ID: ORG-F7CC"
 ```
-**Vulnerable:** Returns `tenantId: "ORG-AF07"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
 
-### Step 3 — Variant tests based on Pattern 4.2
-No specific variant documented for Pattern 4.2 — use Steps 1-2.
+Expected secure: HTTP 403 or 404.  
+Expected vulnerable: HTTP 200 with `tenantId: "ORG-AF07"` and health `sensitiveData`.
+
+**Step 3 — Persistence poisoning: corrupt another user's health data via PATCH lifecycle action:**
+
+```bash
+curl -s -X PATCH "https://api.vitaltrack-heal.example.com/api/v3/nodes/NOD-2081" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-F7CC>" \
+  -H "X-Tenant-ID: ORG-F7CC" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "synced", "sensitive_data": "heart_rate_falsified: 300bpm_avg"}'
+```
+
+Expected secure: HTTP 403.  
+Expected vulnerable: HTTP 200 — victim's persistent health records poisoned with false metrics; downstream FHIR analytics and health reports permanently corrupted.
+
+**Step 4 — Persistence destruction: DELETE lifecycle action destroys health history:**
+
+```bash
+curl -s -X DELETE "https://api.vitaltrack-heal.example.com/api/v3/nodes/NOD-2081" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-F7CC>" \
+  -H "X-Tenant-ID: ORG-F7CC"
+```
+
+Expected vulnerable: HTTP 200 — victim's health tracking node and all associated data destroyed.
+
+## Evidence
+
+- **HAR**: `GET /api/v3/nodes/NOD-2081` with `ORG-F7CC` JWT → HTTP 200 → `tenantId: ORG-AF07` with `sensitiveData`.
+- **Section 4.0 (RISK-42-081)**: Pattern 4.2 — GET/PATCH/DELETE lack tenant/owner filter.
+- **Section 3.0**: Application code does not use `tenant_id` in authorization checks.
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+
+- **Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub`** to GET/PATCH/DELETE handlers (RISK-42-081, unblock #DB-181).
+- **Lifecycle action authorization**: every lifecycle action (sync, archive, deprovision) must validate resource ownership before persisting changes.
+- **FHIR/HIPAA compliance**: PHI health records must be protected against unauthorized modification — HIPAA Security Rule §164.312.
+- **Regression test**: Tenant A token patches Tenant B `node_id` — assert HTTP 403/404.
