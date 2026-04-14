@@ -1,79 +1,63 @@
-# Expected Response
-
 ## System
-- Domain: Real Estate / PropTech
-- System: EstateFlow Property API
+
+- System: EstateFlow Property API v3.4.9
+- Domain: REAL ESTATE / PROPTECH
 - Example ID: GQL-0417
+- Risk ID: RISK-GQL-417
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Parameter escalation (own session scope extension) (Pattern 10.2)
-**Severity:** Critical
-**Category:** Single-User
+### 1. Pattern 10.2 — Parameter Escalation / Session Scope Extension via `getResource` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 10.2 (Parameter escalation (own session scope extension)) vulnerability.
-An authenticated user belonging to `tenant-3f8d` can access or manipulate objects owned by
-`tenant-d61a` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**HAR evidence**: JWT `x-tenant-id: tenant-3f8d`. Request: `getResource(id: "R-2417")`. Response: HTTP 200 OK with `"tenantId": "tenant-d61a"`, `"sensitiveField": "CONFIDENTIAL-3f8dd61a"`, `"internalNotes": "Internal data exposed"`.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-3f8d`
-- Response body `tenantId`: `tenant-d61a` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-d61a`
+**Pattern 10.2 (Single-User — Parameter Escalation / Own Session Scope Extension)**: the attacker extends their session scope by substituting the `resourceId` parameter with a value outside their authorized boundary. Within a single authenticated session (`tenant-3f8d`), a single parameter change grants access to another real estate agency's property portfolio data.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+**Real Estate/PropTech impact**: `Resource` objects represent property listings, deal records, or client portfolios. `sensitiveField` and `internalNotes` contain buyer qualification data, negotiation notes, or confidential deal terms. One parameter change exposes a competing agency's entire property database — constituting commercial intelligence theft.
 
-## Steps to Reproduce
+### 2. BOLA on `bulkResourceLookup` — No Per-ID Ownership Filter
 
-### Step 1 — Establish attacker baseline
-```bash
-curl -s -X POST https://api.estateflow-property-.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-3F8D>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1417\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+Section 4.0: documented gap — `bulkResourceLookup` accepts arbitrary IDs without per-ID filtering.
+
+### 3. Redis Cache Without Tenant Dimension
+
+Section 2.0: Redis cache keyed by `resourceId` only.
+
+## Evidence
+
+- **HAR**: `getResource(id: "R-2417")` with `tenant-3f8d` JWT → HTTP 200 → `tenantId: tenant-d61a` with `sensitiveField`.
+- **Section 5.0**: Pattern 10.2 — session scope extended via `resourceId` parameter substitution.
+- **Section 4.0 (RISK-GQL-417)**: `getResource` lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` lacks per-ID filter.
+- **Section 2.0**: Redis cache keyed by `resourceId` only.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
+```graphql
+query { getResource(id: "R-1417") { resourceId tenantId data { sensitiveField } } }
 ```
-**Expected baseline:** Returns `tenantId: "tenant-3f8d"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
-```bash
-curl -s -X POST https://api.estateflow-property-.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-3F8D>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2417\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+Expected: `tenantId: "tenant-3f8d"`.
+
+**Step 2 — Parameter escalation: extend session scope to competitor's property listing (primary HAR attack):**
+
+```graphql
+query { getResource(id: "R-2417") { resourceId tenantId ownerId data { sensitiveField internalNotes } items { itemId } } }
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-d61a"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
-```bash
-curl -s -X POST https://api.estateflow-property-.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-3F8D>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2417\", \"R-3417\", \"R-4417\"]) { resourceId tenantId data { sensitiveField } } }"}'
-```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+Expected secure: HTTP 403/404 or null.  
+Expected vulnerable: HTTP 200 with `tenantId: "tenant-d61a"` and property listing data.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
-```bash
-curl -s -X POST https://api.estateflow-property-.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-3F8D>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
-```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+**Step 3 — Bulk cross-tenant property lookup:**
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+```graphql
+mutation { bulkResourceLookup(ids: ["R-2417", "R-3417", "R-4417"]) { resourceId tenantId data { sensitiveField } } }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Enforce `tenant_id` WHERE clause in `getResource`** (RISK-GQL-417).
+- **Filter `bulkResourceLookup` by JWT `tenantId`**.
+- **Add `tenantId` to Redis cache key**.

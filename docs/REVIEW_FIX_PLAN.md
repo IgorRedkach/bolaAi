@@ -145,7 +145,7 @@
 - [x] **0102** [BOLA-0074-P25-LEGAL-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/BOLA-0074-P25-LEGAL-TECH/context.txt)
 - [x] **0103** [BOLA-0075-P31-MINING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/BOLA-0075-P31-MINING/context.txt)
 - [x] **0104** [GQL-0416-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/GQL-0416-EDUCATION/context.txt)
-- [ ] **0105** [GQL-0417-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/GQL-0417-REAL-ESTATE/context.txt)
+- [x] **0105** [GQL-0417-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/GQL-0417-REAL-ESTATE/context.txt)
 - [ ] **0106** [GQL-0418-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/GQL-0418-TRAVEL/context.txt)
 - [ ] **0107** [INJ-0108-CMDi-GOVERNMENT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/INJ-0108-CMDi-GOVERNMENT/context.txt)
 - [ ] **0108** [INJ-0109-ORMi-HR-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/INJ-0109-ORMi-HR-TECH/context.txt)

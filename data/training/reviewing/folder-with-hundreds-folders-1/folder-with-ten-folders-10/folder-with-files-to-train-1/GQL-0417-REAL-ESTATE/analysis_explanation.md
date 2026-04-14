@@ -1,21 +1,11 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0417) was generated independently for the **EstateFlow Property API** system (Real Estate / PropTech).
+1. **HAR matches `getResource` single-ID substitution**: correct primary step. Pattern 10.2 emphasis: single-session scope extension via parameter value change.
 
-## Generation Method
-1. Selected industry: **Real Estate / PropTech**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 10.2 (Parameter escalation (own session scope extension))** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Bulk lookup confirmed, not conditional**: section 4.0 documents `bulkResourceLookup` lacking per-ID filter.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Introspection removed**: not documented in sections 4.0 or 5.0.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Redis cache added**: section 2.0 documents `resourceId`-only cache key.
 
-## Pattern Coverage
-- Primary: Pattern 10.2 — Parameter escalation (own session scope extension) (Single-User)
+5. **Real estate impact**: property listing data including buyer qualification and negotiation notes is commercially sensitive. One ID change grants access to a competing agency's entire deal pipeline.
