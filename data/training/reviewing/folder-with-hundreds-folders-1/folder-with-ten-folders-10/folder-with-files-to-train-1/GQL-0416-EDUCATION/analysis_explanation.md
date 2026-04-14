@@ -1,21 +1,13 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0416) was generated independently for the **LearnPath Assessment Platform** system (Education / EdTech LMS).
+1. **HAR matches `getResource` single-ID swap**: HAR is `getResource(id: "R-2416")` from `tenant-1a78` returning `tenant-3913` — Step 2 correctly matches.
 
-## Generation Method
-1. Selected industry: **Education / EdTech LMS**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 10.1 (ID swap in own request)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 10.1 framing**: single-user, single-token, one ID change. The original response correctly identified this but the bulk step was conditional and introspection was speculative. Fixed: bulk is confirmed (section 4.0), introspection removed.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Bulk lookup confirmed, not conditional**: section 4.0 explicitly documents `bulkResourceLookup` lacking per-ID ownership filtering.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Introspection removed**: not documented in sections 4.0 or 5.0.
 
-## Pattern Coverage
-- Primary: Pattern 10.1 — ID swap in own request (Single-User)
+5. **Redis cache added**: section 2.0 documents `resourceId`-only cache key. Assessment content cached without tenant dimension could serve exam questions from one institution to another.
+
+6. **EdTech FERPA context**: student educational records and assessment content are FERPA-protected. Cross-institution access to exam resources is a FERPA violation and constitutes academic integrity fraud.

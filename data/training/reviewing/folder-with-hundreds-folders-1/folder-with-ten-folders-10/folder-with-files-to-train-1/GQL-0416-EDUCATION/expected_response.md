@@ -1,79 +1,63 @@
-# Expected Response
-
 ## System
-- Domain: Education / EdTech LMS
-- System: LearnPath Assessment Platform
+
+- System: LearnPath Assessment Platform v1.0.8
+- Domain: EDUCATION / EDTECH LMS
 - Example ID: GQL-0416
+- Risk ID: RISK-GQL-416
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — ID swap in own request (Pattern 10.1)
-**Severity:** Critical
-**Category:** Single-User
+### 1. Pattern 10.1 — ID Swap in Own Request via `getResource` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 10.1 (ID swap in own request) vulnerability.
-An authenticated user belonging to `tenant-1a78` can access or manipulate objects owned by
-`tenant-3913` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**HAR evidence**: JWT `x-tenant-id: tenant-1a78`. Request: `getResource(id: "R-2416")`. Response: HTTP 200 OK with `"tenantId": "tenant-3913"`, `"sensitiveField": "CONFIDENTIAL-1a783913"`, `"internalNotes": "Internal data exposed"`.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-1a78`
-- Response body `tenantId`: `tenant-3913` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-3913`
+**Pattern 10.1 (Single-User — ID Swap)**: a single authenticated user with one token substitutes their own valid `resourceId` with a victim institution's `resourceId`. No other change is required — one ID substitution in the GraphQL argument is sufficient to return another institution's assessment data.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+**Education/EdTech impact**: `Resource` objects in an assessment platform represent courses, exams, or content modules with `items: [Item!]` as questions and student submissions. Single-token cross-tenant access exposes exam questions, answer keys, and grade data from a competing institution (`tenant-3913`) — constituting academic IP theft and FERPA violation.
 
-## Steps to Reproduce
+### 2. BOLA on `bulkResourceLookup` — No Per-ID Ownership Filter
 
-### Step 1 — Establish attacker baseline
-```bash
-curl -s -X POST https://api.learnpath-assessment.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-1A78>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1416\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+Section 4.0: documented gap — `bulkResourceLookup` accepts arbitrary IDs without per-ID filtering.
+
+### 3. Redis Cache Without Tenant Dimension
+
+Section 2.0: Redis cache keyed by `resourceId` only — no `tenantId` in the cache key.
+
+## Evidence
+
+- **HAR**: `getResource(id: "R-2416")` with `tenant-1a78` JWT → HTTP 200 → `tenantId: tenant-3913` with `sensitiveField`.
+- **Section 5.0**: Pattern 10.1 — single user swaps own `resourceId` with victim's using one token.
+- **Section 4.0 (RISK-GQL-416)**: `getResource` lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` lacks per-ID filter.
+- **Section 2.0**: Redis cache keyed by `resourceId` only.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
+```graphql
+query { getResource(id: "R-1416") { resourceId tenantId data { sensitiveField } } }
 ```
-**Expected baseline:** Returns `tenantId: "tenant-1a78"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
-```bash
-curl -s -X POST https://api.learnpath-assessment.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-1A78>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2416\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+Expected: `tenantId: "tenant-1a78"`.
+
+**Step 2 — Single-token ID swap: access cross-tenant assessment resource (primary HAR attack):**
+
+```graphql
+query { getResource(id: "R-2416") { resourceId tenantId ownerId data { sensitiveField internalNotes } items { itemId } } }
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-3913"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
-```bash
-curl -s -X POST https://api.learnpath-assessment.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-1A78>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2416\", \"R-3416\", \"R-4416\"]) { resourceId tenantId data { sensitiveField } } }"}'
-```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+Replace own ID with victim's ID — no other change. Expected secure: HTTP 403/404 or null.  
+Expected vulnerable: HTTP 200 with `tenantId: "tenant-3913"` and full assessment resource data.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
-```bash
-curl -s -X POST https://api.learnpath-assessment.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-1A78>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
-```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+**Step 3 — Bulk cross-tenant lookup:**
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+```graphql
+mutation { bulkResourceLookup(ids: ["R-2416", "R-3416", "R-4416"]) { resourceId tenantId data { sensitiveField } } }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Enforce `tenant_id` WHERE clause in `getResource`** (RISK-GQL-416).
+- **Filter `bulkResourceLookup` by JWT `tenantId`**.
+- **Add `tenantId` to Redis cache key**.
