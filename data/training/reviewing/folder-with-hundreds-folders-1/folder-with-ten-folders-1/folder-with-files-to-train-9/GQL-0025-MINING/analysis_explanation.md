@@ -1,21 +1,13 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0025) was generated independently for the **OreTrack Fleet Management** system (Mining / Resource Extraction).
+1. **HAR shows `getResource` single-ID as HAR primary, but Pattern 1.3 (Bulk/List) should be the primary finding**: section 5.0 is explicit — Pattern 1.3 is specifically about the `listResources` bulk/list endpoint. The original expected_response.md never demonstrated the `listResources` attack at all, which is the defining characteristic of Pattern 1.3. The HAR single-ID read is a secondary finding (RISK-GQL-025).
 
-## Generation Method
-1. Selected industry: **Mining / Resource Extraction**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 1.3 (Bulk or list endpoints)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 1.3 has two sub-attacks**: (a) omit `tenantId` entirely — gets ALL data; (b) supply a different `tenantId` — gets a specific tenant's data. Both are documented in section 5.0 ("filter is omitted OR supplied from client without JWT-level validation"). The training signal must demonstrate both.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Mining fleet context amplifies bulk list impact**: unlike a single-record read, `listResources` returning all tenants' data exposes a competitor mining company's entire fleet inventory, including real-time GPS positions (`items: [Item!]` as telemetry), vehicle maintenance status, and ore extraction schedules. This enables targeted competitive intelligence or physical asset interference.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Bulk lookup is confirmed**: section 4.0 documents `bulkResourceLookup` lacking per-ID filter.
 
-## Pattern Coverage
-- Primary: Pattern 1.3 — Bulk or list endpoints (BOLA)
+5. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+6. **Redis cache with fleet telemetry**: real-time fleet position data cached without tenant dimension could serve competitor mining operators with live GPS coordinates of another company's vehicles.

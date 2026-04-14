@@ -136,7 +136,7 @@
 - [x] **0097** [GQL-0022-AGRICULTURE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0022-AGRICULTURE/context.txt)
 - [x] **0098** [GQL-0023-RETAIL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0023-RETAIL/context.txt)
 - [x] **0099** [GQL-0024-LEGAL-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0024-LEGAL-TECH/context.txt)
-- [ ] **0100** [GQL-0025-MINING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0025-MINING/context.txt)
+- [x] **0100** [GQL-0025-MINING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0025-MINING/context.txt)
 ### folder-with-ten-folders-10
 
 #### folder-with-files-to-train-1
