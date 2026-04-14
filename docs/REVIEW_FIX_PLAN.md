@@ -153,11 +153,11 @@
 - [x] **0110** [SF-0243-SMART-HOME](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/SF-0243-SMART-HOME/context.txt)
 #### folder-with-files-to-train-10
 
-- [ ] **0111** [BOLA-0095-P72-DATA-ANALY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/BOLA-0095-P72-DATA-ANALY/context.txt)
-- [ ] **0112** [BOLA-0096-P73-HR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/BOLA-0096-P73-HR/context.txt)
-- [ ] **0113** [GQL-0435-BLOCKCHAIN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/GQL-0435-BLOCKCHAIN/context.txt)
-- [ ] **0114** [GQL-0436-TELEMEDICINE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/GQL-0436-TELEMEDICINE/context.txt)
-- [ ] **0115** [INJ-0132-CMDi-GAMING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0132-CMDi-GAMING/context.txt)
+- [x] **0111** [BOLA-0095-P72-DATA-ANALY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/BOLA-0095-P72-DATA-ANALY/context.txt)
+- [x] **0112** [BOLA-0096-P73-HR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/BOLA-0096-P73-HR/context.txt)
+- [x] **0113** [GQL-0435-BLOCKCHAIN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/GQL-0435-BLOCKCHAIN/context.txt)
+- [x] **0114** [GQL-0436-TELEMEDICINE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/GQL-0436-TELEMEDICINE/context.txt)
+- [x] **0115** [INJ-0132-CMDi-GAMING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0132-CMDi-GAMING/context.txt)
 - [ ] **0116** [INJ-0133-ORMi-CYBERSECUR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0133-ORMi-CYBERSECUR/context.txt)
 - [ ] **0117** [INJ-0134-SSTI-B2B-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0134-SSTI-B2B-SAAS/context.txt)
 - [ ] **0118** [SF-0267-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0267-REAL-ESTATE/context.txt)
