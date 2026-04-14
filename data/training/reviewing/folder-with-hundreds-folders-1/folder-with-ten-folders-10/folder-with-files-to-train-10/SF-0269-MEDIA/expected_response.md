@@ -1,73 +1,65 @@
-# Expected Response
-
 ## System
-- Domain: Media / Content Delivery
-- System: StreamCore VOD Platform (Salesforce-Integrated)
+
+- System: StreamCore VOD Platform (Salesforce-Integrated) v4.3.0
+- Domain: MEDIA / CONTENT DELIVERY
 - Example ID: SF-0269
+- Risk IDs: RISK-SF-269, RISK-SF-270
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Functional pivot (vertical/horizontal) (Pattern 2.1)
-**Severity:** Critical
-**Category:** BAC
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 2.1 — Functional Pivot: Unauthorized Task Record Access via `c.TaskController.getTask` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.AccountController.getAccounts` is vulnerable to Pattern 2.1.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `accountId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+**HAR evidence**: Aura action `c.TaskController.getTask` with `taskId: "0012A04"`, client-supplied `fields: ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]`. Response: `state: "SUCCESS"`, `OwnerId: "005VICTIM"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`, `SensitiveData__c: "SSN: 000-24-9729"`.
 
-**Evidence from HAR:**
-- Aura action: `c.AccountController.getAccounts`
-- Requested `accountId`: `0012A04` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+**Pattern 2.1 (Functional Pivot — Broken Access Control)**: the controller's `without sharing` declaration allows both horizontal and functional pivots. Horizontal pivot: attacker accesses Task records owned by other users (`OwnerId: "005VICTIM"` ≠ attacker's ID). Functional pivot: `getTask` is a Task management function not intended for cross-user access — the attacker pivots into the functional scope of another user's Task operations by substituting `taskId`. Section 7.0 — `Task OWD: Private` — should restrict access to owned records, but RISK-SF-269 (`without sharing`) fully bypasses this. RISK-SF-270: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED`.
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `accountId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `accountId` sourced directly from Aura params without server-side validation
+**Media / Content Delivery impact**: Task records represent content review workflows, streaming infrastructure management tasks, or content rights management activities. Cross-user Task access exposes content pipeline internals, review decisions, and `SensitiveData__c` (SSN: `000-24-9729`) from other content managers. Internal review notes expose editorial and rights strategy.
 
-## Steps to Reproduce
+Note: Section 4.0 names the method `getTaskDetails` but HAR uses `getTask`. HAR is authoritative.
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.AccountController.getAccounts` action in the `message` POST body.
-Record your own `accountId` value (e.g., `001YOURRECORDID000000`).
+## Reproduction
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `accountId` values.
+**Step 1 — Capture baseline Aura request:**
 
-### Step 3 — Substitute victim ID in Aura request
+Intercept a legitimate Aura request via Burp Suite or DevTools. Identify `c.TaskController.getTask` in the `message` body. Record your own `taskId`.
+
+**Step 2 — Substitute victim `taskId` — functional pivot (primary HAR attack):**
+
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://11682a04.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D11682A04!AR11682a04...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D11682A04!AR11682a04...
 
-message={"actions":[{"id":"1;a","descriptor":"c.AccountController.getAccounts","callingDescriptor":"UNKNOWN",
-"params":{"accountId":"0012A04","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.TaskController.getTask","callingDescriptor":"UNKNOWN",
+"params":{"taskId":"0012A04","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+Expected secure: `state: "ERROR"` / INSUFFICIENT_ACCESS / empty `records`.  
+Expected vulnerable: `state: "SUCCESS"` with `OwnerId: "005VICTIM"`, `SensitiveData__c: "SSN: 000-24-9729"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`.
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 3 — Enumerate additional Task IDs for mass horizontal pivot:**
+
+Salesforce Task IDs use `00T` prefix (standard Task object). Enumerate to access all content team Task records in the org.
+
+## Evidence
+
+- **HAR**: `c.TaskController.getTask` with `taskId: "0012A04"` → `SUCCESS` → `SensitiveData__c: "SSN: 000-24-9729"`, `OwnerId: "005VICTIM"`.
+- **Section 4.0**: Apex controller declared `public class TaskController` (no `with sharing`) — RISK-SF-269.
+- **Section 4.0**: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` — RISK-SF-270.
+- **Section 7.0**: `Task OWD: Private` — sharing rules bypassed by `without sharing`.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+
+1. **Add `with sharing` to Apex class** (RISK-SF-269):
    ```apex
-   public with sharing class AccountController { ... }
+   public with sharing class TaskController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL** (RISK-SF-270):
    ```apex
-   WHERE Id = :accountId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :taskId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `accountId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Add `WITH SECURITY_ENFORCED`** to all SOQL queries.
+4. **Whitelist allowed fields server-side**: do not accept client-supplied `fields` array.
+5. **Regression test**: Apex test authenticates as User A, requests User B's `taskId` — assert `INSUFFICIENT_ACCESS` or empty `records`.

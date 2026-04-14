@@ -158,11 +158,11 @@
 - [x] **0113** [GQL-0435-BLOCKCHAIN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/GQL-0435-BLOCKCHAIN/context.txt)
 - [x] **0114** [GQL-0436-TELEMEDICINE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/GQL-0436-TELEMEDICINE/context.txt)
 - [x] **0115** [INJ-0132-CMDi-GAMING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0132-CMDi-GAMING/context.txt)
-- [ ] **0116** [INJ-0133-ORMi-CYBERSECUR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0133-ORMi-CYBERSECUR/context.txt)
-- [ ] **0117** [INJ-0134-SSTI-B2B-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0134-SSTI-B2B-SAAS/context.txt)
-- [ ] **0118** [SF-0267-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0267-REAL-ESTATE/context.txt)
-- [ ] **0119** [SF-0268-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0268-TRAVEL/context.txt)
-- [ ] **0120** [SF-0269-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0269-MEDIA/context.txt)
+- [x] **0116** [INJ-0133-ORMi-CYBERSECUR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0133-ORMi-CYBERSECUR/context.txt)
+- [x] **0117** [INJ-0134-SSTI-B2B-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/INJ-0134-SSTI-B2B-SAAS/context.txt)
+- [x] **0118** [SF-0267-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0267-REAL-ESTATE/context.txt)
+- [x] **0119** [SF-0268-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0268-TRAVEL/context.txt)
+- [x] **0120** [SF-0269-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0269-MEDIA/context.txt)
 #### folder-with-files-to-train-2
 
 - [ ] **0121** [BOLA-0076-P32-AEROSPACE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0076-P32-AEROSPACE/context.txt)
