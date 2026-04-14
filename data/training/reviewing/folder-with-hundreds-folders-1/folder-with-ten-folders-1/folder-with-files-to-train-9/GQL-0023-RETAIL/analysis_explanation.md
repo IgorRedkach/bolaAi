@@ -1,21 +1,15 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0023) was generated independently for the **RewardCore Loyalty API** system (Retail / Loyalty Programme).
+1. **HAR shows `updateResource` write as primary**: HAR is `updateResource(id: "R-2023", input: {status: "approved"...})`. The original expected_response.md started with `getResource` which does not match the HAR.
 
-## Generation Method
-1. Selected industry: **Retail / Loyalty Programme**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 1.1 (ID in path without ownership check)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 1.1 applies to ALL resolvers that use the same unguarded ID argument**: section 5.0 describes the flaw as "resolver accepts `resourceId` from the query without verifying ownership." This means not just `getResource` but also `updateResource` and `deleteResource` — all share the same missing ownership check. The HAR demonstrates this through the write path, which is more impactful than a read.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Loyalty programme context — reward fraud**: `status: "approved"` on a loyalty reward record in a points ledger system is a business-critical state transition. Approving another retailer's pending redemption without authorization constitutes fraud — triggering unauthorized points disbursement from the victim retailer's loyalty balance.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Bulk lookup is confirmed, not conditional**: section 4.0 documents the gap.
 
-## Pattern Coverage
-- Primary: Pattern 1.1 — ID in path without ownership check (BOLA)
+5. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+6. **Redis cache added**: section 2.0 documents `resourceId`-only cache key.
+
+7. **HAR response/request mismatch**: request is `updateResource` mutation but response is `getResource`. Same synthetic artifact. Confirmed signal: `tenantId: tenant-576a` with HTTP 200.
