@@ -1,79 +1,74 @@
-# Expected Response
-
 ## System
-- Domain: Pharmaceutical / Clinical Trials
-- System: TrialVault ClinicalOps API
+
+- System: TrialVault ClinicalOps API v2.3.4
+- Domain: PHARMACEUTICAL / CLINICAL TRIALS
 - Example ID: GQL-0021
+- Risk ID: RISK-GQL-021
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Parameter escalation (own session scope extension) (Pattern 10.2)
-**Severity:** Critical
-**Category:** Single-User
+### 1. Session Scope Extension via `bulkResourceLookup` — Foreign IDs Extend Authorized Session (Pattern 10.2 / HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 10.2 (Parameter escalation (own session scope extension)) vulnerability.
-An authenticated user belonging to `tenant-5274` can access or manipulate objects owned by
-`tenant-233b` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**Primary HAR attack**: The HAR shows `bulkResourceLookup(ids: ["R-2021", "R-1021", "R-3021"])` from JWT `tenant-5274`. Pattern 10.2 (Single-User — Parameter Escalation / Own Session Scope Extension): the attacker mixes their own authorized IDs (e.g., `R-1021`) with foreign cross-tenant IDs (`R-2021`, `R-3021`) in the same bulk lookup, extending the scope of their session beyond the authorized boundary without changing their token.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-5274`
-- Response body `tenantId`: `tenant-233b` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-233b`
+**HAR evidence**: JWT `x-tenant-id: tenant-5274`. Request: `bulkResourceLookup(ids: ["R-2021", "R-1021", "R-3021"])`. Response: HTTP 200 OK with `"tenantId": "tenant-233b"` — cross-tenant clinical trial data returned alongside the attacker's own authorized records in a single response.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+**21 CFR Part 11 / Pharmaceutical impact**: `Resource` objects in a clinical trials management platform represent trial protocols, case report forms, or adverse event records. Unauthorized access to another pharmaceutical company's trial data constitutes proprietary research theft. Under 21 CFR Part 11, electronic records in FDA-regulated systems require strict access controls and audit trails — cross-tenant bulk access violates both requirements.
 
-## Steps to Reproduce
+### 2. BOLA on `getResource` — Missing `tenant_id` Filter (RISK-GQL-021)
 
-### Step 1 — Establish attacker baseline
-```bash
-curl -s -X POST https://api.trialvault-clinicalo.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-5274>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1021\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+Section 4.0 (RISK-GQL-021): `getResource` fetches by `resourceId` without tenant check.
+
+### 3. BOLA on `bulkResourceLookup` — No Per-ID Ownership Filter (Documented Gap)
+
+Section 4.0: `bulkResourceLookup` accepts arbitrary IDs without per-ID filtering — this is the primary HAR attack vector.
+
+### 4. Redis Cache Without Tenant Dimension
+
+Section 2.0: `resourceId`-only cache key. Clinical trial records cached without tenant dimension could serve cross-pharma data.
+
+## Evidence
+
+- **HAR**: `bulkResourceLookup(ids: ["R-2021", "R-1021", "R-3021"])` with `tenant-5274` JWT → HTTP 200 → `tenantId: tenant-233b` with `sensitiveField`.
+- **Section 5.0**: Pattern 10.2 — user extends session scope by including cross-tenant IDs in bulk parameter.
+- **Section 4.0 (RISK-GQL-021)**: `getResource` lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` lacks per-ID filter.
+- **Section 2.0**: Redis cache keyed by `resourceId` only.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
+```graphql
+query { getResource(id: "R-1021") { resourceId tenantId data { sensitiveField } } }
 ```
-**Expected baseline:** Returns `tenantId: "tenant-5274"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
-```bash
-curl -s -X POST https://api.trialvault-clinicalo.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-5274>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2021\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+Expected: `tenantId: "tenant-5274"`.
+
+**Step 2 — Session scope extension via bulk ID list (primary HAR attack):**
+
+```graphql
+mutation {
+  bulkResourceLookup(ids: ["R-2021", "R-1021", "R-3021"]) {
+    resourceId tenantId ownerId
+    data { sensitiveField internalNotes auditLog { event timestamp } }
+    items { itemId }
+  }
+}
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-233b"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
-```bash
-curl -s -X POST https://api.trialvault-clinicalo.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-5274>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2021\", \"R-3021\", \"R-4021\"]) { resourceId tenantId data { sensitiveField } } }"}'
-```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+Mix own IDs (authorized) with foreign IDs (unauthorized). Expected secure: Only own records returned.  
+Expected vulnerable: HTTP 200 with clinical trial records from `tenant-233b` alongside attacker's own records.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
-```bash
-curl -s -X POST https://api.trialvault-clinicalo.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-5274>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
-```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+**Step 3 — Single cross-tenant trial record read (RISK-GQL-021):**
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+```graphql
+query { getResource(id: "R-2021") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Filter `bulkResourceLookup` by JWT `tenantId`**: after fetching, discard any result where `tenantId != jwt.tenantId` — the session scope must not be extensible via parameter list manipulation.
+- **Enforce `tenant_id` WHERE clause in `getResource`** (RISK-GQL-021).
+- **21 CFR Part 11 audit trail**: all access to clinical trial records must be logged with `sub`, `tenantId`, `resourceId`, and timestamp — cross-tenant mismatch must generate a compliance alert.
+- **Add `tenantId` to Redis cache key**.

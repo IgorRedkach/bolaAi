@@ -1,21 +1,15 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0021) was generated independently for the **TrialVault ClinicalOps API** system (Pharmaceutical / Clinical Trials).
+1. **HAR shows `bulkResourceLookup` batch as primary**: HAR is `bulkResourceLookup(ids: ["R-2021", "R-1021", "R-3021"])`. The original expected_response.md used `getResource` single-ID as primary — wrong.
 
-## Generation Method
-1. Selected industry: **Pharmaceutical / Clinical Trials**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 10.2 (Parameter escalation (own session scope extension))** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 10.2 (Parameter Escalation) distinctive mechanism**: the attacker doesn't need to issue a separate unauthorized request. They include their own valid ID (`R-1021`) alongside foreign IDs in the same list — extending the scope of a single authorized session beyond its allowed boundary. The server treats the entire list as a single operation, returning all results without per-element authorization. This is the "own session scope extension" aspect: the session is legitimately authenticated, but the parameter value extends what that session can access.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Pharmaceutical/21 CFR Part 11 context makes bulk access particularly dangerous**: in a clinical trials system, a single `bulkResourceLookup` call could expose an entire competing pharma company's trial protocol cohort, adverse event reports, or interim efficacy data — proprietary research that took years and hundreds of millions to generate. This is industrial espionage in a regulated environment.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **`auditLog` field access via cross-tenant bulk is a secondary concern**: reading another company's `auditLog` for trial records exposes who accessed which data and when — revealing their internal researchers and access patterns.
 
-## Pattern Coverage
-- Primary: Pattern 10.2 — Parameter escalation (own session scope extension) (Single-User)
+5. **Bulk lookup is the primary documented attack**: section 4.0 confirms `bulkResourceLookup` lacks per-ID ownership filtering.
+
+6. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+7. **Redis cache added**: section 2.0 documents `resourceId`-only cache key.
