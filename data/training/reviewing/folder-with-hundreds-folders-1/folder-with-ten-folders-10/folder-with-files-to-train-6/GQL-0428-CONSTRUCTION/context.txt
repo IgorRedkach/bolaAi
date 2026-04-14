@@ -58,11 +58,13 @@ type Mutation {
 - The `bulkResourceLookup` mutation accepts an arbitrary array of IDs without
   per-ID ownership filtering.
 
-## 5.0 Vulnerability Context
-**Pattern:** 1.12 — Mass assignment via object fields (BOLA)
+## 5.0 Behavioral Notes
 
 The `resourceId` field is used as the object identifier across all resolvers.
-The mutation `updateResource` accepts `ownerId` and `tenantId` as writable fields in the input, allowing mass assignment of ownership attributes.
+The mutation `updateResource` accepts an `input` object. The `input` type includes `ownerId` and
+`tenantId` as writable fields. The resolver does not strip or validate these ownership fields before
+applying the update — a client can supply arbitrary values for `ownerId` and `tenantId` in the input
+and they will be written to the record. No resolver-level ownership check prevents this on cross-tenant IDs.
 
 ## 6.0 HAR Capture (Network Trace)
 The following HTTP Archive (HAR) capture was recorded during a penetration test.
