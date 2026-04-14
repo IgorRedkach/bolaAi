@@ -1,21 +1,24 @@
-# Analysis Explanation
+# Analysis Explanation — GQL-0425-MINING
 
-This example (GQL-0425) was generated independently for the **OreTrack Fleet Management** system (Mining / Resource Extraction).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Mining / Resource Extraction**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 1.8 (Predictable or sequential IDs)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+### 1. context.txt — Removed Pattern Labels
+- Section 5.0 "Vulnerability Context" renamed to "Behavioral Notes"; removed "**Pattern:** 1.8 — Predictable or sequential IDs" label
+- Added neutral observation about sequential ID format: "Resource identifiers are formatted as `R-{sequential_number}`, assigned incrementally at record creation"
+- Section 4.0 keeps RISK-GQL-425 with factual description
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+### 2. Pattern 1.8 Primary: Sequential Enumeration via `bulkResourceLookup`
+Pattern 1.8 is "Predictable or sequential IDs." The HAR shows IDs `R-2425`, `R-1425`, `R-3425` — clearly sequential numeric pattern. The primary demonstration adds systematic enumeration (Step 3): iterating `R-2420` through `R-2428` to harvest cross-tenant records. This is the defining characteristic of Pattern 1.8 exploitability.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+### 3. HAR Primary: `bulkResourceLookup`
+HAR shows `bulkResourceLookup` with sequential IDs. Made this the primary finding. Note on HAR mismatch (response `getResource` vs request `bulkResourceLookup`) — same synthetic artifact as other GQL examples.
 
-## Pattern Coverage
-- Primary: Pattern 1.8 — Predictable or sequential IDs (BOLA)
+### 4. Removed Conditional Qualifiers
+Original Steps 3-4 used "if Pattern 1.9 also present" and "if Pattern 6.1 also present." `bulkResourceLookup` is documented in Section 4.0. Introspection not documented. Removed conditional qualifiers; removed speculative introspection.
+
+### 5. Added `x-tenant-id` Header and Redis Cache
+HAR shows `x-tenant-id: tenant-8369`. Added to all curl commands.
+Section 2.0 documents Redis cache keyed by `resourceId` only. Added as Finding 3.
+
+### 6. Added UUID Remediation
+Sequential IDs are the root enabler of Pattern 1.8. Added "Use non-sequential UUIDs for resource IDs" as specific remediation.

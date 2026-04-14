@@ -7,7 +7,7 @@
 **Training Example ID:** SF-0251
 
 ## 1.0 Executive Summary
-PatientCore EHR API is a healthcare / ehr platform platform built on Salesforce Lightning Experience.
+PatientCore EHR API is a healthcare / ehr platform built on Salesforce Lightning Experience.
 The front-end uses Aura Components that communicate with Apex Controllers via the Salesforce
 Aura Framework's `c.ControllerName.methodName` call pattern. Authorization is expected to be
 enforced through Salesforce sharing rules (OWD, Role Hierarchy, Sharing Rules) AND explicitly
@@ -33,33 +33,29 @@ Contract (
 )
 ```
 
-## 4.0 Apex Controller (Vulnerable Implementation)
+## 4.0 Apex Controller Implementation
 ```apex
 public class ContractController {
     @AuraEnabled
     public static List<Contract> getContractDetails(String contractId, List<String> fields) {
-        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
-        // VULNERABILITY: no ownership check on contractId parameter
+        // Note: class declaration does not include 'with sharing'
+        // No ownership or tenancy check present in WHERE clause
         return [Contract]Database.query(
             'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
             'FROM Contract ' +
             'WHERE Id = :' + contractId
-            // Missing: AND OwnerId = UserInfo.getUserId()
-            // Missing: WITH SECURITY_ENFORCED
         );
     }
 }
 ```
 
-## 5.0 Vulnerability Context
-**Pattern:** 9.2 — SOQL and Salesforce record-level access (Platform)
+## 5.0 Behavioral Notes
 
-The Apex controller `c.ContractController.approveContract` accepts a `contractId` parameter from the client-side
-Aura component. The controller runs `without sharing` and does not validate that the
-authenticated user owns or has been granted access to the requested record.
-
-An attacker with a valid Salesforce session can substitute any `contractId` value in the
-Aura framework request payload to access records owned by other users.
+The Apex controller `c.ContractController.approveContract` accepts a `contractId` parameter from the
+client-side Aura component. The SOQL WHERE clause filters records by `contractId` only.
+The controller does not call `UserInfo.getUserId()` or reference OwnerId in any WHERE predicate.
+The class declaration omits `with sharing`, meaning Salesforce OWD=Private rules are not
+automatically enforced by the platform.
 
 ## 6.0 HAR Capture (Aura Framework Request)
 ```json
@@ -82,7 +78,7 @@ Aura framework request payload to access records owned by other users.
           "postData": {
             "mimeType": "application/x-www-form-urlencoded",
             "params": [
-              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.ContractController.approveContract",       "callingDescriptor": "UNKNOWN",       "params": {         "contractId": "001B9DE",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "message", "value": "{   \"actions\": [     {       \"id\": \"1;a\",       \"descriptor\": \"c.ContractController.approveContract\",       \"callingDescriptor\": \"UNKNOWN\",       \"params\": {         \"contractId\": \"001B9DE\",         \"fields\": [\"Id\", \"Name\", \"OwnerId\", \"InternalNotes__c\", \"SensitiveData__c\"]       }     }   ] }"},
               {"name": "aura.token", "value": "undefined"}
             ]
           },
@@ -111,6 +107,6 @@ Apex Controller Declaration: "public class ContractController" (WITHOUT "with sh
 ```
 
 ## 8.0 Known Risks
-- **RISK-SF-251:** Controller declared without `with sharing`. Sharing rules not enforced.
-- **RISK-SF-252:** No ownership check in SOQL WHERE clause.
+- **RISK-SF-251:** Controller declared without `with sharing`. Sharing rules not enforced by Apex layer.
+- **RISK-SF-252:** No ownership check in SOQL WHERE clause. Any caller-supplied contractId is accepted.
 - Client-supplied `contractId` is directly interpolated into SOQL without validation.

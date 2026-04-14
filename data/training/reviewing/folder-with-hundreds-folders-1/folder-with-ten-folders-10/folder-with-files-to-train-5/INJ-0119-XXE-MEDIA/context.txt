@@ -3,20 +3,21 @@
 **Document Version:** 1.9.0 (FINAL)
 **Classification:** SENSITIVE
 **Domain:** Media / Content Delivery
-**Vulnerability Type:** XXE
 **Training Example ID:** INJ-0119
 
 ## 1.0 Executive Summary
-StreamCore VOD Platform is a media / content delivery platform with a REST API backed by XML parser.
-The platform exposes search and filter endpoints that accept user-supplied parameters.
-Input sanitization is inconsistent across the codebase due to a mix of raw query
-construction and ORM usage.
+StreamCore VOD Platform is a media / content delivery platform with a REST API. The platform
+supports content search and metadata filter endpoints. The `/api/v3/patients` endpoint (legacy
+name from a previous platform migration) processes user-supplied query parameters. The endpoint
+accepts URL-encoded input that is processed through both an SQL query builder and an XML parser
+depending on the request content type negotiation.
 
 ## 2.0 Architecture
-- **API Layer:** Node.js / Express or Java Spring Boot REST API
-- **Database:** XML parser — primary data store
+- **API Layer:** Java Spring Boot REST API
+- **XML Processing:** Apache Xerces (libxml2) XML parser — used for metadata filter content negotiation
+- **Database:** PostgreSQL (via JDBC)
 - **Auth:** JWT Bearer tokens
-- **Known Debt:** Older endpoint `/api/v3/patients` uses string concatenation for queries
+- **Known Debt:** Older endpoint `/api/v3/patients` uses string concatenation for query building; also accepts XML-encoded query parameter without external entity restriction
 
 ## 3.0 Vulnerable Endpoint
 ```
@@ -24,17 +25,27 @@ GET /api/v3/patients?query=<user_input>
 Authorization: Bearer <JWT>
 ```
 
-**Vulnerable Code Snippet:**
+**Backend Code Snippet (query handler — SQL path):**
 ```javascript
-// Node.js — raw query construction (VULNERABLE)
-const query = `SELECT * FROM patients WHERE query = '${req.query.query}'`;
-db.execute(query, (err, results) => { ... });
+// Java Spring Boot — legacy endpoint, migrated from raw JDBC
+// Note: query parameter is interpolated directly into SQL string without sanitization
+String sql = "SELECT * FROM patients WHERE query = '" + request.getParameter("query") + "'";
+jdbcTemplate.query(sql, rowMapper);
+```
+
+**XML parsing path (content negotiation branch):**
+```java
+// Apache Xerces XML parsing — external entity resolution not disabled
+DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+// Note: factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true) not called
+DocumentBuilder builder = factory.newDocumentBuilder();
+Document doc = builder.parse(new InputSource(new StringReader(queryParam)));
 ```
 
 ## 4.0 Injection Payload
-The following input exploits the lack of parameterization:
+The following input was recorded in the penetration test:
 ```
-query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM \'file:///etc/passwd\'>]><foo>&xxe;</foo>
+query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><foo>&xxe;</foo>
 ```
 
 ## 5.0 HAR Capture
@@ -74,7 +85,7 @@ query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM \'file:///etc/passwd\'>]><foo>&xxe;</fo
 }
 ```
 
-## 6.0 Misconfiguration Context
+## 6.0 Misconfiguration Notes
 - Over-privileged DB account: application connects as `db_owner` instead of a restricted role
 - Verbose error messages enabled in staging (and leaked to production accidentally)
 - No WAF or input validation middleware on legacy endpoints
@@ -82,3 +93,4 @@ query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM \'file:///etc/passwd\'>]><foo>&xxe;</fo
 ## 7.0 Known Risk
 - **RISK-INJ-119:** Endpoint `/api/v3/patients` uses raw string concatenation.
   Parameterized queries are used in newer endpoints but this one was missed in the migration.
+  External entity resolution is not disabled in the XML parser used by the same endpoint's content negotiation branch.

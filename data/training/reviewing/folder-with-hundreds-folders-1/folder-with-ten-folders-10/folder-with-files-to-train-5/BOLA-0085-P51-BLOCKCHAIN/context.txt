@@ -15,7 +15,6 @@ where the token encodes `sub` (user ID) and `tenant_id`.
 - **API:** REST (/api/v3/assets endpoints)
 - **Auth:** OAuth2 JWT with `sub` and `tenant_id` claims
 - **Database:** PostgreSQL with logical tenant partitioning
-- **Pattern under test:** 5.1 — Authorization-bypass injection
 
 ## 3.0 Database Schema
 ```sql
@@ -34,16 +33,14 @@ CREATE INDEX idx_asset_tenant ON assets(tenant_id);
 
 ```
 
-## 4.0 Vulnerability Context
-**Pattern:** 5.1 — Authorization-bypass injection (Injection)
+## 4.0 Behavioral Notes
 
-The `GET/PATCH/DELETE /api/v3/assets/:id` endpoint accepts a `asset_id` in the URL path.
-The backend handler queries the database by ID only, without filtering by `owner_id` or `tenant_id`.
-An authenticated user from `ORG-D3F6` can access objects owned by `ORG-74E1`.
+The `GET/PATCH/DELETE /api/v3/assets/:id` endpoint accepts an `asset_id` in the URL path.
+The backend handler queries the database by `asset_id` only, without filtering by `owner_id` or `tenant_id`.
+An authenticated user from `ORG-D3F6` can perform operations on objects owned by `ORG-74E1`
+by substituting a cross-tenant `asset_id` in the request path.
 
-_Specific exploitation for Pattern 5.1:_ The `/api/v3/assets` handler does not enforce tenant/owner boundaries for Pattern 5.1.
-
-## 5.0 Artifact (GraphQL HAR)
+## 5.0 Artifact (HAR)
 ```json
 {
   "log": {
@@ -80,6 +77,6 @@ _Specific exploitation for Pattern 5.1:_ The `/api/v3/assets` handler does not e
 ```
 
 ## 6.0 Known Risk Log
-- **RISK-51-085:** Pattern 5.1 detected in `/api/v3/assets` handler.
+- **RISK-51-085:** Cross-tenant access in `/api/v3/assets` handler.
   The handler was written before the tenant isolation policy was established.
   Remediation is blocked pending DB migration ticket #DB-185.

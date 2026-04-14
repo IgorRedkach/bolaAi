@@ -1,22 +1,20 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0251-HEALTHCARE
 
-This example (SF-0251) was generated independently for **PatientCore EHR API** (Healthcare / EHR Platform).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Healthcare / EHR Platform**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 9.2 (SOQL and Salesforce record-level access)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. context.txt — Removed Vulnerability Labels
+- Section 5.0 "Vulnerability Context" renamed to "Behavioral Notes"; removed "Pattern: 9.2" label
+- Removed "// VULNERABILITY:" comments from Section 4.0 code; replaced with neutral observational comments
+- Section 5.0 now describes the SOQL behavior (no UserInfo.getUserId() call, no OwnerId predicate) without naming the pattern
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `quoteId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+### 2. expected_response.md — Corrected Controller and Parameters
+Original used `c.LeadController.getLeadData` with `leadId`. Context Section 5.0 and HAR specify `c.ContractController.approveContract` with `contractId`. Corrected throughout including remediation class name.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 3. Corrected Org Host and Session Token
+Original used `<ORG_ID>.lightning.force.com` and generic token. HAR specifies `88a9b9de.lightning.force.com` and `00D88A9B9DE!AR88a9b9de...`. Corrected.
 
-## Pattern Coverage
-- Primary: Pattern 9.2 — SOQL and Salesforce record-level access (Platform)
+### 4. Explained Pattern 9.2 in Healthcare Context
+Pattern 9.2 "SOQL and Salesforce record-level access" — the platform OWD=Private is bypassed because the controller runs `without sharing`, and the SOQL doesn't compensate. In Healthcare/EHR, this exposes patient contract records containing SSN and PHI — a HIPAA §164.312 violation.
+
+### 5. Method Name Inconsistency
+Section 4.0 code defines `getContractDetails`; HAR and Section 5.0 use `approveContract`. HAR is authoritative.

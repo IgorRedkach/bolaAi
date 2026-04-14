@@ -58,11 +58,13 @@ type Mutation {
 - The `bulkResourceLookup` mutation accepts an arbitrary array of IDs without
   per-ID ownership filtering.
 
-## 5.0 Vulnerability Context
-**Pattern:** 1.9 — Batch/bulk lookup endpoints (BOLA)
+## 5.0 Behavioral Notes
 
 The `resourceId` field is used as the object identifier across all resolvers.
-The `bulkResourceLookup` mutation accepts a list of IDs without per-ID ownership checks. A single request can enumerate objects across all tenants.
+The `bulkResourceLookup` mutation accepts a list of IDs as input. The resolver does not perform
+per-ID ownership or tenancy checks — each ID in the input list is fetched directly from the
+database without filtering by `tenant_id` or `owner_id`. A single request with an arbitrary list
+of IDs can return records belonging to multiple tenants.
 
 ## 6.0 HAR Capture (Network Trace)
 The following HTTP Archive (HAR) capture was recorded during a penetration test.
