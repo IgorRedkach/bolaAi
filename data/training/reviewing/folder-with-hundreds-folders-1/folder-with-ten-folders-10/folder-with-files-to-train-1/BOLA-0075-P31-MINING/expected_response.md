@@ -1,53 +1,76 @@
-# Expected Response
-
 ## System
-- Domain: Mining / Resource Extraction
-- System: OreTrack Fleet Management
+
+- System: OreTrack Fleet Management v2.3.0
+- Domain: MINING / RESOURCE EXTRACTION
 - Example ID: BOLA-0075
+- Risk ID: RISK-31-075
 
-## Priority Findings
+## Findings
 
-### Finding 1: Client-assumed authority (Pattern 3.1)
-**Severity:** Critical
-**Category:** Insecure Design
+### 1. Pattern 3.1 — Client-Assumed Authority on `/api/v1/objects/:id` (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 3.1 (Client-assumed authority).
-An authenticated user from `ORG-A4F3` can access or modify objects owned by `ORG-A3EC`
-by manipulating the resource identifier in the request.
+**HAR evidence**: JWT `X-Tenant-ID: ORG-A4F3`. Request: `GET /api/v1/objects/OBJ-2075`. Response: HTTP 200 OK with `"tenantId": "ORG-A3EC"`, `"sensitiveData": "CONFIDENTIAL: cross-tenant data for ORG-A3EC"`.
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-A4F3`
-- Response body `tenantId`: `ORG-A3EC` — confirms cross-tenant data returned
-- HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
+**Pattern 3.1 (Insecure Design — Client-Assumed Authority)**: the API design assumes that an authenticated client will only supply `object_id` values they are authorized to access. There is no server-side validation to enforce this assumption. The client is effectively "assumed" to have authority over any object ID they present. Section 4.0 confirms: the backend queries by `object_id` only. Section 3.0: "Application code does NOT use tenant_id in authorization checks."
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+**Mining/Fleet IoT impact**: `objects` represent mining fleet assets — vehicles, drilling units, or IoT sensor clusters. The `sensitive_data` field contains operational fleet intelligence. Write access (PATCH) via client-assumed authority enables a mining company to issue unauthorized status changes to another operator's fleet equipment.
 
-## Steps to Reproduce
+### 2. Client-Assumed Write Authority via PATCH (Pattern 3.1 Extension)
 
-### Step 1 — Authorize baseline
+Section 4.0: "GET/PATCH/DELETE `/api/v1/objects/:id`" — all verbs share the same unguarded handler. Client-assumed authority over read extends to client-assumed authority over write and delete — the design never validates authority at any operation.
+
+## Evidence
+
+- **HAR**: `GET /api/v1/objects/OBJ-2075` with `ORG-A4F3` JWT → HTTP 200 → `tenantId: ORG-A3EC` with `sensitiveData`.
+- **Section 4.0 (RISK-31-075)**: Pattern 3.1 in `/api/v1/objects` — GET/PATCH/DELETE lack tenant/owner check.
+- **Section 3.0**: Database schema comment: no `tenant_id` in authorization checks.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.oretrack-fleet-.example.com/api/v1/resources/RES-1075" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-A4F3>"
+curl -s "https://api.oretrack-fleet-.example.com/api/v1/objects/OBJ-1075" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-A4F3>" \
+  -H "X-Tenant-ID: ORG-A4F3"
 ```
-Expected: Returns own record with `tenantId: "ORG-A4F3"`.
 
-### Step 2 — ID substitution
+Expected: `tenantId: "ORG-A4F3"`.
+
+**Step 2 — Client-assumed authority: read cross-tenant fleet object (primary HAR attack):**
+
 ```bash
-curl -s "https://api.oretrack-fleet-.example.com/api/v1/resources/RES-2075" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-A4F3>"
+curl -s "https://api.oretrack-fleet-.example.com/api/v1/objects/OBJ-2075" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-A4F3>" \
+  -H "X-Tenant-ID: ORG-A4F3"
 ```
-**Vulnerable:** Returns `tenantId: "ORG-A3EC"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
 
-### Step 3 — Variant tests based on Pattern 3.1
-No specific variant documented for Pattern 3.1 — use Steps 1-2.
+Expected secure: HTTP 403 or 404.  
+Expected vulnerable: HTTP 200 with `tenantId: "ORG-A3EC"` and `sensitiveData`.
+
+**Step 3 — Client-assumed write authority: tamper with competitor's fleet object:**
+
+```bash
+curl -s -X PATCH "https://api.oretrack-fleet-.example.com/api/v1/objects/OBJ-2075" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-A4F3>" \
+  -H "X-Tenant-ID: ORG-A4F3" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "suspended", "sensitive_data": "attacker_injected_command"}'
+```
+
+Expected secure: HTTP 403.  
+Expected vulnerable: HTTP 200 — competitor's mining fleet object status changed, potentially affecting IoT equipment operation.
+
+**Step 4 — Client-assumed delete authority:**
+
+```bash
+curl -s -X DELETE "https://api.oretrack-fleet-.example.com/api/v1/objects/OBJ-2075" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-A4F3>" \
+  -H "X-Tenant-ID: ORG-A4F3"
+```
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+
+- **Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub`** to GET/PATCH/DELETE handlers (RISK-31-075, unblock DB migration #DB-175).
+- **Redesign authorization at the design level**: the insecure design flaw is that authority is assumed rather than verified — authorization must be a first-class design requirement for every handler.
+- **Regression test**: Tenant A token requests Tenant B `object_id` via GET, PATCH, DELETE — assert HTTP 403/404.
