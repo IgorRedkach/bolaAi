@@ -1,22 +1,31 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0244-CLOUD-IAM
 
-This example (SF-0244) was generated independently for **VaultGuard IAM API** (Cloud IAM / Identity Provider).
+## What was wrong
 
-## Generation Method
-1. Selected industry: **Cloud IAM / Identity Provider**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 9.2 (SOQL and Salesforce record-level access)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Wrong controller action, parameter, and object type throughout
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `opportunityId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+Original response used `c.CaseController.getCaseDetails` with `caseId` on a `Case` object. HAR clearly shows `c.OpportunityController.getOpportunity` with `opportunityId` on an `Opportunity` object. Section 4.0 confirms `OpportunityController`. Fixed throughout.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 2. Generic org host used
 
-## Pattern Coverage
-- Primary: Pattern 9.2 — SOQL and Salesforce record-level access (Platform)
+Original Step 3 used `<ORG_ID>.lightning.force.com`. HAR shows `3f47cf4a.lightning.force.com`. Fixed.
+
+### 3. SSN from HAR not referenced
+
+HAR response shows `SensitiveData__c: "SSN: 000-32-9515"`. Added explicit reference.
+
+### 4. SOQL injection risk (Section 8.0) not mentioned
+
+Section 8.0 explicitly states: "Client-supplied `opportunityId` is directly interpolated into SOQL without validation" — this is a documented SOQL injection risk beyond the OWD bypass and ownership check failure. Added to evidence and remediation.
+
+### 5. Remediation used wrong controller name
+
+Fixed `CaseController` → `OpportunityController`, `caseId` → `opportunityId`.
+
+### 6. Method name inconsistency noted
+
+Section 4.0 names the method `getOpportunityDetails` but HAR uses `getOpportunity`. HAR is authoritative.
+
+## Domain context
+
+VaultGuard is a Cloud IAM / Identity Provider platform. Opportunity records represent IAM vendor deals, customer identity contracts, or access management proposals. SSN exposure enables identity theft. Internal review notes expose deal negotiation strategy and potentially customer access control architecture details — critical intelligence in an IAM context.

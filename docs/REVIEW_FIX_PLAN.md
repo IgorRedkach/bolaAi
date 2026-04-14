@@ -170,11 +170,11 @@
 - [x] **0123** [BOLA-0078-P34-CONSTRUCTI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0078-P34-CONSTRUCTI/context.txt)
 - [x] **0124** [GQL-0419-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/GQL-0419-MEDIA/context.txt)
 - [x] **0125** [GQL-0420-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/GQL-0420-FINTECH/context.txt)
-- [ ] **0126** [INJ-0110-SSTI-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/INJ-0110-SSTI-SAAS/context.txt)
-- [ ] **0127** [INJ-0111-XXE-SOCIAL-MED](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/INJ-0111-XXE-SOCIAL-MED/context.txt)
-- [ ] **0128** [SF-0244-CLOUD-IAM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0244-CLOUD-IAM/context.txt)
-- [ ] **0129** [SF-0245-DATA-ANALYTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0245-DATA-ANALYTICS/context.txt)
-- [ ] **0130** [SF-0246-HR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0246-HR/context.txt)
+- [x] **0126** [INJ-0110-SSTI-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/INJ-0110-SSTI-SAAS/context.txt)
+- [x] **0127** [INJ-0111-XXE-SOCIAL-MED](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/INJ-0111-XXE-SOCIAL-MED/context.txt)
+- [x] **0128** [SF-0244-CLOUD-IAM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0244-CLOUD-IAM/context.txt)
+- [x] **0129** [SF-0245-DATA-ANALYTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0245-DATA-ANALYTICS/context.txt)
+- [x] **0130** [SF-0246-HR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0246-HR/context.txt)
 #### folder-with-files-to-train-3
 
 - [ ] **0131** [BOLA-0079-P35-FOOD-&-BEV](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/BOLA-0079-P35-FOOD-&-BEV/context.txt)

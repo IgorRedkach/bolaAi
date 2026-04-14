@@ -1,22 +1,31 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0245-DATA-ANALYTICS
 
-This example (SF-0245) was generated independently for **InsightGraph Analytics API** (Data Analytics / BI Platform).
+## What was wrong
 
-## Generation Method
-1. Selected industry: **Data Analytics / BI Platform**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 10.2 (Parameter escalation (own session scope extension))** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Wrong controller action and parameter throughout
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `recordId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+Original response used `c.LeadController.getLeadData` with `leadId`. HAR shows `c.CustomObjectController.getRecord` with `recordId`. Section 5.0 also confirms `c.CustomObjectController.getRecord`. Fixed throughout.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 2. Generic org host used
 
-## Pattern Coverage
-- Primary: Pattern 10.2 — Parameter escalation (own session scope extension) (Single-User)
+Original Step 3 used `<ORG_ID>.lightning.force.com`. HAR shows `94e8d145.lightning.force.com`. Fixed.
+
+### 3. SSN from HAR not referenced
+
+HAR response shows `SensitiveData__c: "SSN: 000-99-4930"`. Added explicit reference.
+
+### 4. Pattern 10.2 (parameter escalation / session scope extension) not explained
+
+Original response described a simple BOLA read. Pattern 10.2 (Parameter Escalation — Own Session Scope Extension) requires explaining that the attacker's session is legitimately authenticated, but the `recordId` parameter escalates the session's authorized scope beyond what it was granted. The attack is not about stolen sessions — it's about extending a valid session's scope by substituting parameter values that should be session-bounded. Added explanation.
+
+### 5. Remediation used wrong controller name
+
+Fixed `LeadController` → `CustomRecordController`.
+
+### 6. Method name inconsistency noted
+
+Section 4.0 names the class `CustomRecordController` with method `getCustomRecordDetails` but HAR uses `CustomObjectController.getRecord`. HAR is authoritative.
+
+## Domain context
+
+InsightGraph is a Data Analytics / BI Platform. `CustomRecord` represents analytics dashboards, BI reports, or data pipeline configurations. Parameter escalation (Pattern 10.2) allows an analyst to extend their session scope from their own BI reports to all other analysts' proprietary reports and dashboard configurations. SSN in analytics records suggests PHI or PII was included in dataset processing — CCPA/GDPR violation.

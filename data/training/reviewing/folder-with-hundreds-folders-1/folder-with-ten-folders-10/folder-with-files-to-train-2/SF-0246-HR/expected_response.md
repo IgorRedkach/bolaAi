@@ -1,73 +1,66 @@
-# Expected Response
-
 ## System
-- Domain: HR / Payroll Processing
-- System: WageFlow Payroll API (Salesforce-Integrated)
+
+- System: WageFlow Payroll API (Salesforce-Integrated) v2.3.0
+- Domain: HR / PAYROLL PROCESSING
 - Example ID: SF-0246
+- Risk IDs: RISK-SF-246, RISK-SF-247
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Multi-tenant / cross-tenant access (Pattern 1.5)
-**Severity:** Critical
-**Category:** BOLA
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 1.5 — Cross-Tenant Salesforce Account Access: `c.AccountController.getAccounts` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.CaseController.getCaseDetails` is vulnerable to Pattern 1.5.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `caseId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+**HAR evidence**: Aura action `c.AccountController.getAccounts` with `accountId: "001DDE1"`, client-supplied `fields: ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]`. Response: `state: "SUCCESS"`, `OwnerId: "005VICTIM"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`, `SensitiveData__c: "SSN: 000-35-4589"`.
 
-**Evidence from HAR:**
-- Aura action: `c.CaseController.getCaseDetails`
-- Requested `caseId`: `001DDE1` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+**Pattern 1.5 (Multi-Tenant / Cross-Tenant Access)**: Section 7.0 — `Account OWD: Private`. The controller `AccountController` runs `without sharing` (Section 7.0, RISK-SF-246), bypassing OWD=Private entirely. SOQL filters only by `accountId` — missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` (Section 4.0, RISK-SF-247). An attacker with a valid Salesforce session substitutes any `accountId` to access any employer or employee Account record in the org.
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `caseId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `caseId` sourced directly from Aura params without server-side validation
+**HR / Payroll impact**: Account records in WageFlow represent employer payroll accounts, employee payroll profiles, or contractor billing records. SSN exposure (`SensitiveData__c: "SSN: 000-35-4589"`) enables identity theft and payroll fraud. Internal notes expose salary negotiation details and payroll configurations. Cross-tenant access by a competing employer allows intelligence gathering on another company's payroll structure. GLBA and state payroll data protection laws are violated.
 
-## Steps to Reproduce
+Note: Section 4.0 names the method `getAccountDetails` but HAR uses `getAccounts`. HAR is authoritative.
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.CaseController.getCaseDetails` action in the `message` POST body.
-Record your own `caseId` value (e.g., `001YOURRECORDID000000`).
+## Reproduction
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `caseId` values.
+**Step 1 — Capture baseline Aura request:**
 
-### Step 3 — Substitute victim ID in Aura request
+Intercept a legitimate Aura request via Burp Suite or DevTools. Identify `c.AccountController.getAccounts` in the `message` body. Record your own `accountId`.
+
+**Step 2 — Substitute victim `accountId` (primary HAR attack):**
+
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://11bcdde1.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D11BCDDE1!AR11bcdde1...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D11BCDDE1!AR11bcdde1...
 
-message={"actions":[{"id":"1;a","descriptor":"c.CaseController.getCaseDetails","callingDescriptor":"UNKNOWN",
-"params":{"caseId":"001DDE1","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.AccountController.getAccounts","callingDescriptor":"UNKNOWN",
+"params":{"accountId":"001DDE1","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+Expected secure: `state: "ERROR"` / INSUFFICIENT_ACCESS / empty `records`.  
+Expected vulnerable: `state: "SUCCESS"` with `OwnerId: "005VICTIM"`, `SensitiveData__c: "SSN: 000-35-4589"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`.
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 3 — Enumerate additional Account IDs for mass payroll data theft:**
+
+Salesforce Account IDs use `001` prefix. Enumerate to access all employer/employee Account records across the payroll org.
+
+## Evidence
+
+- **HAR**: `c.AccountController.getAccounts` with `accountId: "001DDE1"` → `SUCCESS` → `SensitiveData__c: "SSN: 000-35-4589"`, `OwnerId: "005VICTIM"`.
+- **Section 4.0**: Apex controller declared `public class AccountController` (no `with sharing`) — RISK-SF-246.
+- **Section 4.0**: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` — RISK-SF-247.
+- **Section 7.0**: `Account OWD: Private` — sharing rules bypassed.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+
+1. **Add `with sharing` to Apex class** (RISK-SF-246):
    ```apex
-   public with sharing class CaseController { ... }
+   public with sharing class AccountController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL** (RISK-SF-247):
    ```apex
-   WHERE Id = :caseId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :accountId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `caseId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Add `WITH SECURITY_ENFORCED`** to all SOQL queries.
+4. **Validate `accountId`** against user's accessible record list before querying.
+5. **Whitelist allowed fields server-side**: do not accept client-supplied `fields` array.
+6. **Regression test**: Apex test authenticates as User A, requests User B's `accountId` — assert `INSUFFICIENT_ACCESS` or empty `records`.

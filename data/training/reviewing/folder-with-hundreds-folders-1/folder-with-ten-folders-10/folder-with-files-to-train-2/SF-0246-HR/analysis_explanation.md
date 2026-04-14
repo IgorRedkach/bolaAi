@@ -1,22 +1,31 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0246-HR
 
-This example (SF-0246) was generated independently for **WageFlow Payroll API** (HR / Payroll Processing).
+## What was wrong
 
-## Generation Method
-1. Selected industry: **HR / Payroll Processing**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 1.5 (Multi-tenant / cross-tenant access)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Wrong controller action and parameter throughout
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `accountId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+Original response used `c.CaseController.getCaseDetails` with `caseId`. HAR clearly shows `c.AccountController.getAccounts` with `accountId`. Section 4.0 and 5.0 both confirm `AccountController`. Fixed throughout.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 2. Generic org host used
 
-## Pattern Coverage
-- Primary: Pattern 1.5 — Multi-tenant / cross-tenant access (BOLA)
+Original Step 3 used `<ORG_ID>.lightning.force.com`. HAR shows `11bcdde1.lightning.force.com`. Fixed.
+
+### 3. SSN from HAR not referenced
+
+HAR response shows `SensitiveData__c: "SSN: 000-35-4589"`. Added explicit reference.
+
+### 4. Remediation used wrong controller name
+
+Fixed `CaseController` → `AccountController`, `caseId` → `accountId`.
+
+### 5. HR/Payroll domain impact not articulated
+
+WageFlow is a HR / Payroll Processing platform. Account records represent employer payroll accounts or employee profiles. SSN exposure in a payroll context enables payroll fraud and identity theft. GLBA and state payroll data protection law violations noted.
+
+### 6. Method name inconsistency noted
+
+Section 4.0 names the method `getAccountDetails` but HAR uses `getAccounts`. HAR is authoritative.
+
+## Domain context
+
+WageFlow is an HR / Payroll Processing platform. Account records represent employer payroll accounts, employee payroll profiles, or contractor billing records. Cross-tenant access (Pattern 1.5) allows a competing employer to read another company's payroll Account records — exposing employee SSNs, salary data, and payroll configuration notes. This is a direct violation of payroll data privacy laws and GLBA for financial data.

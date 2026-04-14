@@ -1,73 +1,67 @@
-# Expected Response
-
 ## System
-- Domain: Cloud IAM / Identity Provider
-- System: VaultGuard IAM API (Salesforce-Integrated)
+
+- System: VaultGuard IAM API (Salesforce-Integrated) v4.6.0
+- Domain: CLOUD IAM / IDENTITY PROVIDER
 - Example ID: SF-0244
+- Risk IDs: RISK-SF-244, RISK-SF-245
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — SOQL and Salesforce record-level access (Pattern 9.2)
-**Severity:** Critical
-**Category:** Platform
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 9.2 — SOQL Authorization Bypass: `c.OpportunityController.getOpportunity` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.CaseController.getCaseDetails` is vulnerable to Pattern 9.2.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `caseId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+**HAR evidence**: Aura action `c.OpportunityController.getOpportunity` with `opportunityId: "001CF4A"`, client-supplied `fields: ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]`. Response: `state: "SUCCESS"`, `OwnerId: "005VICTIM"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`, `SensitiveData__c: "SSN: 000-32-9515"`.
 
-**Evidence from HAR:**
-- Aura action: `c.CaseController.getCaseDetails`
-- Requested `caseId`: `001CF4A` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+**Pattern 9.2 (SOQL and Salesforce Record-Level Access)**: the Apex controller exploits two SOQL authorization failures. First, the controller runs `without sharing` (Section 7.0, RISK-SF-244), bypassing Salesforce OWD=Private on the Opportunity object — all Opportunity records in the org become accessible regardless of sharing rules. Second, the SOQL query uses only `WHERE Id = :opportunityId` without `AND OwnerId = UserInfo.getUserId()` (Section 4.0, RISK-SF-245) — no record-level ownership check. Third, Section 8.0: "Client-supplied `opportunityId` is directly interpolated into SOQL without validation" — potential SOQL injection risk if SOQL metacharacters are not stripped.
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `caseId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `caseId` sourced directly from Aura params without server-side validation
+**Cloud IAM / Identity Provider impact**: Opportunity records represent IAM vendor deals, customer identity contracts, or access management proposals. SSN exposure (`SensitiveData__c: "SSN: 000-32-9515"`) from cross-user Opportunity access enables identity theft of IAM customers. Internal notes expose deal negotiation strategy. In an IAM context, unauthorized access to Opportunity records may also expose access control architecture details of customers.
 
-## Steps to Reproduce
+Note: Section 4.0 names the method `getOpportunityDetails` but HAR uses `getOpportunity`. HAR is authoritative.
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.CaseController.getCaseDetails` action in the `message` POST body.
-Record your own `caseId` value (e.g., `001YOURRECORDID000000`).
+## Reproduction
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `caseId` values.
+**Step 1 — Capture baseline Aura request:**
 
-### Step 3 — Substitute victim ID in Aura request
+Intercept a legitimate Aura request via Burp Suite or DevTools. Identify `c.OpportunityController.getOpportunity` in the `message` body. Record your own `opportunityId`.
+
+**Step 2 — Substitute victim `opportunityId` — SOQL authorization bypass (primary HAR attack):**
+
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://3f47cf4a.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D3F47CF4A!AR3f47cf4a...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D3F47CF4A!AR3f47cf4a...
 
-message={"actions":[{"id":"1;a","descriptor":"c.CaseController.getCaseDetails","callingDescriptor":"UNKNOWN",
-"params":{"caseId":"001CF4A","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.OpportunityController.getOpportunity","callingDescriptor":"UNKNOWN",
+"params":{"opportunityId":"001CF4A","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+Expected secure: `state: "ERROR"` / INSUFFICIENT_ACCESS / empty `records`.  
+Expected vulnerable: `state: "SUCCESS"` with `OwnerId: "005VICTIM"`, `SensitiveData__c: "SSN: 000-32-9515"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`.
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 3 — Enumerate other Opportunity IDs:**
+
+Salesforce Opportunity IDs use `006` prefix. Enumerate to access all IAM customer contract records in the org.
+
+## Evidence
+
+- **HAR**: `c.OpportunityController.getOpportunity` with `opportunityId: "001CF4A"` → `SUCCESS` → `SensitiveData__c: "SSN: 000-32-9515"`, `OwnerId: "005VICTIM"`.
+- **Section 4.0**: Apex controller declared `public class OpportunityController` (no `with sharing`) — RISK-SF-244.
+- **Section 4.0**: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` — RISK-SF-245.
+- **Section 7.0**: `Opportunity OWD: Private` — sharing rules bypassed by `without sharing`.
+- **Section 8.0**: Client-supplied `opportunityId` directly interpolated into SOQL — SOQL injection risk.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+
+1. **Add `with sharing` to Apex class** (RISK-SF-244):
    ```apex
-   public with sharing class CaseController { ... }
+   public with sharing class OpportunityController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL** (RISK-SF-245):
    ```apex
-   WHERE Id = :caseId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :opportunityId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `caseId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Add `WITH SECURITY_ENFORCED`** to all SOQL queries.
+4. **Validate `opportunityId`** format and against user's accessible record list before querying.
+5. **Whitelist allowed fields server-side**: do not accept client-supplied `fields` array.
+6. **Regression test**: Apex test authenticates as User A, requests User B's `opportunityId` — assert `INSUFFICIENT_ACCESS` or empty `records`.

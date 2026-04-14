@@ -1,73 +1,69 @@
-# Expected Response
-
 ## System
-- Domain: Data Analytics / BI Platform
-- System: InsightGraph Analytics API (Salesforce-Integrated)
+
+- System: InsightGraph Analytics API (Salesforce-Integrated) v3.0.0
+- Domain: DATA ANALYTICS / BI PLATFORM
 - Example ID: SF-0245
+- Risk IDs: RISK-SF-245, RISK-SF-246
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Parameter escalation (own session scope extension) (Pattern 10.2)
-**Severity:** Critical
-**Category:** Single-User
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Pattern 10.2 — Parameter Escalation: `c.CustomObjectController.getRecord` (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.LeadController.getLeadData` is vulnerable to Pattern 10.2.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `leadId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+**HAR evidence**: Aura action `c.CustomObjectController.getRecord` with `recordId: "001D145"`, client-supplied `fields: ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]`. Response: `state: "SUCCESS"`, `OwnerId: "005VICTIM"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`, `SensitiveData__c: "SSN: 000-99-4930"`.
 
-**Evidence from HAR:**
-- Aura action: `c.LeadController.getLeadData`
-- Requested `leadId`: `001D145` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+**Pattern 10.2 (Parameter Escalation — Own Session Scope Extension)**: the attacker extends their own session's authorized scope by substituting the `recordId` parameter with IDs beyond their session's authorized records. The session is valid (authentication succeeds), but the `recordId` value escalates the session's access scope to include other users' `CustomRecord` objects. The controller does not validate that `recordId` belongs to the current user's authorized scope.
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `leadId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `leadId` sourced directly from Aura params without server-side validation
+Root causes: Section 4.0 — controller runs `without sharing` (RISK-SF-245), bypassing OWD=Private on `CustomRecord`. SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` (RISK-SF-246). Section 8.0: client-supplied `recordId` directly interpolated into SOQL.
 
-## Steps to Reproduce
+**Data Analytics / BI impact**: `CustomRecord` represents analytics dashboards, BI reports, or data pipeline configurations with proprietary analytical models. Cross-user parameter escalation exposes another analyst's proprietary BI models, report configurations, and internal analysis notes. SSN exposure (`SensitiveData__c: "SSN: 000-99-4930"`) from analytics records containing PII violates CCPA/GDPR.
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.LeadController.getLeadData` action in the `message` POST body.
-Record your own `leadId` value (e.g., `001YOURRECORDID000000`).
+Note: Section 4.0 names the method `getCustomRecordDetails` but HAR uses `getRecord` under `CustomObjectController`. HAR is authoritative — `c.CustomObjectController.getRecord` is the correct production action.
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `leadId` values.
+## Reproduction
 
-### Step 3 — Substitute victim ID in Aura request
+**Step 1 — Capture baseline Aura request:**
+
+Intercept a legitimate Aura request via Burp Suite or DevTools. Identify `c.CustomObjectController.getRecord` in the `message` body. Record your own `recordId`.
+
+**Step 2 — Parameter escalation: substitute victim `recordId` (primary HAR attack):**
+
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://94e8d145.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D94E8D145!AR94e8d145...
 Content-Type: application/x-www-form-urlencoded
+X-SFDC-Session: 00D94E8D145!AR94e8d145...
 
-message={"actions":[{"id":"1;a","descriptor":"c.LeadController.getLeadData","callingDescriptor":"UNKNOWN",
-"params":{"leadId":"001D145","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.CustomObjectController.getRecord","callingDescriptor":"UNKNOWN",
+"params":{"recordId":"001D145","fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
+Expected secure: `state: "ERROR"` / INSUFFICIENT_ACCESS / empty `records`.  
+Expected vulnerable: `state: "SUCCESS"` with `OwnerId: "005VICTIM"`, `SensitiveData__c: "SSN: 000-99-4930"`, `InternalNotes__c: "CONFIDENTIAL: internal review notes"`.
 
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Step 3 — Enumerate additional analytics record IDs:**
+
+Increment `recordId` values to enumerate all BI dashboard and report records across users in the org.
+
+## Evidence
+
+- **HAR**: `c.CustomObjectController.getRecord` with `recordId: "001D145"` → `SUCCESS` → `SensitiveData__c: "SSN: 000-99-4930"`, `OwnerId: "005VICTIM"`.
+- **Section 4.0**: Apex controller declared `public class CustomRecordController` (no `with sharing`) — RISK-SF-245.
+- **Section 4.0**: SOQL missing `AND OwnerId = UserInfo.getUserId()` and `WITH SECURITY_ENFORCED` — RISK-SF-246.
+- **Section 7.0**: `CustomRecord OWD: Private` — sharing rules bypassed.
+- **Section 8.0**: Client-supplied `recordId` directly interpolated into SOQL.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
+
+1. **Add `with sharing` to Apex class** (RISK-SF-245):
    ```apex
-   public with sharing class LeadController { ... }
+   public with sharing class CustomRecordController { ... }
    ```
-2. **Add ownership filter to SOQL:**
+2. **Add ownership filter to SOQL** (RISK-SF-246):
    ```apex
-   WHERE Id = :leadId AND OwnerId = :UserInfo.getUserId()
+   WHERE Id = :recordId AND OwnerId = :UserInfo.getUserId()
    ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `leadId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+3. **Add `WITH SECURITY_ENFORCED`** to all SOQL queries.
+4. **Validate `recordId`** against user's accessible record list before querying.
+5. **Whitelist allowed fields server-side**: do not accept client-supplied `fields` array.
+6. **Regression test**: Apex test authenticates as User A, requests User B's `recordId` — assert `INSUFFICIENT_ACCESS` or empty `records`.
