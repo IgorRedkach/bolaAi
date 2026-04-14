@@ -1,72 +1,76 @@
-# Expected Response
-
 ## System
-- Domain: HR Tech / Talent Acquisition
-- System: JobCore Candidate Portal
+
+- System: JobCore Candidate Portal v2.8.0
+- Domain: HR TECH / TALENT ACQUISITION
 - Example ID: INJ-0109
-- Vulnerability: ORM Injection
+- Risk ID: RISK-INJ-109
 
-## Priority Findings
+## Findings
 
-### Finding 1: ORM Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. ORM Injection on `GET /api/v2/orders?search=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables ORM Injection (ORMi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+**HAR evidence**: Request `GET /api/v2/orders?search=1;%20DROP%20TABLE%20orders--`. Response: HTTP 200 with `[{"username":"admin","password_hash":"$2b$12$secret","role":"ADMIN"},...]` — cross-table credential data returned, confirming the injection reached beyond the `orders` table.
 
-**Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=1; DROP TABLE users--`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '1; DROP TABLE users--'`
-  evaluates to true for all rows when the payload is `1; DROP TABLE users--`
+**ORM Injection (ORMi)**: Section 2.0 identifies the backend as Hibernate/Sequelize raw queries. Section 3.0 vulnerable code: `SELECT * FROM orders WHERE search = '${req.query.search}'` — the `search` parameter is directly interpolated into a raw ORM query string without parameterization. ORM injection exploits the use of `raw()` or native query interfaces in Hibernate/Sequelize where user input is embedded in the query string rather than bound as a parameter.
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+**Payload**: `search=1; DROP TABLE orders--` — semicolon terminates the SELECT statement and injects a destructive DDL statement. Under `db_owner` privileges (section 6.0), the DROP is executable.
 
-## Steps to Reproduce
+**HR Tech impact**: `orders` in a recruitment platform represents job applications or hiring orders. A successful injection could destroy the entire candidate pipeline, exfiltrate PII from all applicants, or extract admin credentials enabling account takeover of the JobCore portal.
 
-### Step 1 — Normal request (baseline)
+### 2. Over-Privileged DB Account Amplifies Impact (Section 6.0)
+
+Section 6.0: DB account is `db_owner` — full DDL privileges (CREATE, DROP, ALTER) on the database. This means `DROP TABLE orders` would succeed, permanently destroying all recruitment records.
+
+## Evidence
+
+- **HAR**: `GET /api/v2/orders?search=1;%20DROP%20TABLE%20orders--` → HTTP 200 → user records including `password_hash`.
+- **Section 3.0**: raw Hibernate/Sequelize query with string interpolation of `req.query.search`.
+- **Section 6.0**: `db_owner` privileges, no WAF, verbose errors in production.
+- **Section 7.0 (RISK-INJ-109)**: `/api/v2/orders` missed in parameterization migration.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
-curl -s "https://api.jobcore-candida.example.com/api/v1/users?search=normalvalue" \
-  -H "Authorization: Bearer <VALID_TOKEN>"
-```
-Expected: Returns matching records only.
-
-### Step 2 — Inject ORMi payload
-```bash
-curl -s "https://api.jobcore-candida.example.com/api/v1/users?search=1;%20DROP%20TABLE%20users--" \
-  -H "Authorization: Bearer <VALID_TOKEN>"
-```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
-
-### Step 3 — Privilege escalation (if DB over-privileged)
-```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.jobcore-candida.example.com/api/v2/orders?search=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
 
-### Step 4 — Verbose error confirmation
+Expected: Returns matching order records only.
+
+**Step 2 — ORM injection: DROP TABLE payload (primary HAR attack):**
+
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.jobcore-candida.example.com/api/v2/orders?search=1;%20DROP%20TABLE%20orders--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
 
-## Secure Outcome
-```json
-{ "error": "Invalid input", "code": 400 }
+Expected secure: HTTP 400, query blocked by parameterization.  
+Expected vulnerable: HTTP 200 with cross-table data exfiltration (user credentials returned). Under `db_owner`, the DROP TABLE executes — all recruitment records destroyed.
+
+**Step 3 — Data exfiltration via SQL injection vector:**
+
+```bash
+curl -s "https://api.jobcore-candida.example.com/api/v2/orders?search=' OR '1'='1" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+
+Expected vulnerable: All orders returned (all rows match).
+
+**Step 4 — Verbose error confirmation:**
+
+```bash
+curl -s "https://api.jobcore-candida.example.com/api/v2/orders?search='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+
+Expected vulnerable: SQL syntax error leaking table name, column names, or Hibernate/Sequelize version.
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+
+- **Replace raw Hibernate/Sequelize queries with parameterized equivalents** (RISK-INJ-109): use `?` placeholders or named parameters — never interpolate `req.query.*` into query strings.
+- **Restrict DB account to minimum required role**: remove DDL privileges; application should not be able to DROP tables.
+- **Disable verbose error messages in production**.
+- **Deploy input validation middleware**: reject SQL metacharacters (`;`, `'`, `--`, `/*`).
+- **ORM raw query audit**: search all uses of `.raw()`, `db.execute()`, `sequelize.query()` in the codebase.
