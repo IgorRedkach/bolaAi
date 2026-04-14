@@ -1,73 +1,67 @@
-# Expected Response
-
 ## System
-- Domain: Waste Management / Smart Bins
-- System: CleanRoute IoT Platform (Salesforce-Integrated)
+
+- System: CleanRoute IoT Platform (Salesforce-Integrated) v3.8.0
+- Domain: WASTE MANAGEMENT / SMART BINS
 - Example ID: SF-0242
+- Risk IDs: RISK-SF-242, RISK-SF-243
 
-## Priority Findings
+## Findings
 
-### Finding 1: Salesforce Aura BOLA — Privilege escalation via parameter tampering (Pattern 2.4)
-**Severity:** Critical
-**Category:** BAC
-**OWASP API:** API1:2023 Broken Object Level Authorization
+### 1. Salesforce Aura BOLA on `c.LeadController.getLeadData` — Pattern 2.4 (HAR Primary)
 
-**Summary:**
-The Salesforce Aura controller action `c.CustomObjectController.getRecord` is vulnerable to Pattern 2.4.
-The Apex controller is declared `without sharing` and performs no ownership validation.
-An authenticated user can substitute any `recordId` value in the Aura framework
-`POST /aura` request payload to read records owned by other users.
+**HAR evidence**: POST to `https://2e5ed264.lightning.force.com/aura` with action descriptor `c.LeadController.getLeadData`, param `leadId: "001D264"`. Response: `state: "SUCCESS"` with `"OwnerId": "005VICTIM"`, `"InternalNotes__c": "CONFIDENTIAL: internal review notes"`, `"SensitiveData__c": "SSN: 000-42-4623"` — victim's Lead record including SSN returned to unauthorized caller.
 
-**Evidence from HAR:**
-- Aura action: `c.CustomObjectController.getRecord`
-- Requested `recordId`: `001D264` (belongs to a different user)
-- Response state: `SUCCESS` — no authorization error
-- Response body includes `SensitiveData__c` and `InternalNotes__c` belonging to another user
-- The session user's `OwnerId` does not match the returned record's `OwnerId`
+**Pattern 2.4 (BAC — Privilege Escalation via Parameter Tampering)**: the client substitutes the `leadId` Aura parameter with a victim record's ID. Two documented root causes (section 8.0):
 
-**Root Cause:**
-1. Apex class declared `without sharing` — Salesforce OWD/sharing rules are bypassed
-2. SOQL query filters only by `recordId` — no `AND OwnerId = UserInfo.getUserId()` predicate
-3. `recordId` sourced directly from Aura params without server-side validation
+- **RISK-SF-242**: `LeadController` declared without `with sharing` — Salesforce OWD (Private on Lead) and sharing rules are bypassed entirely at the Apex layer.
+- **RISK-SF-243**: SOQL WHERE clause filters only by `Id = :leadId` — no `AND OwnerId = UserInfo.getUserId()` predicate. The client-supplied `leadId` is directly interpolated into dynamic SOQL without validation.
 
-## Steps to Reproduce
+**Waste Management/Smart Bins impact**: Lead records in CleanRoute represent client accounts for waste collection services. `SensitiveData__c` contains SSNs (confirmed in HAR: `"SSN: 000-42-4623"`). `InternalNotes__c` contains internal review notes about clients. Cross-user Lead access exposes customer PII to unauthorized personnel.
 
-### Step 1 — Capture a baseline Aura request to your own record
-Intercept a legitimate Aura request using Burp Suite or browser DevTools.
-Identify the `c.CustomObjectController.getRecord` action in the `message` POST body.
-Record your own `recordId` value (e.g., `001YOURRECORDID000000`).
+## Evidence
 
-### Step 2 — Enumerate or guess victim record IDs
-Salesforce record IDs follow a predictable 18-character pattern with a 3-char prefix.
-Use the list endpoint or sequential enumeration to discover victim `recordId` values.
+- **HAR**: `c.LeadController.getLeadData(leadId: "001D264")` → `state: SUCCESS` → `OwnerId: 005VICTIM`, `SensitiveData__c: "SSN: 000-42-4623"`.
+- **Section 4.0**: Apex `LeadController` declared without `with sharing`; SOQL has no `OwnerId` filter.
+- **Section 5.0**: Pattern 2.4 — client-supplied `leadId` triggers privilege escalation.
+- **Section 7.0**: Lead OWD = Private; Apex class declaration omits `with sharing`.
+- **Section 8.0 (RISK-SF-242/243)**: documented risks.
 
-### Step 3 — Substitute victim ID in Aura request
+## Reproduction
+
+**Step 1 — Baseline (capture own record):**
+
+Intercept a legitimate Aura request via Burp Suite or browser DevTools on the CleanRoute Lightning page. Record the `leadId` from your own Lead record (e.g., `001YOURLEADID000001`).
+
+**Step 2 — Enumerate victim Lead IDs:**
+
+Salesforce record IDs follow a predictable 18-character format with `001` prefix for Lead objects. Sequential enumeration or list API calls may discover victim `leadId` values.
+
+**Step 3 — Substitute victim `leadId` in Aura request (primary HAR attack):**
+
 ```
-POST https://<ORG_ID>.lightning.force.com/aura HTTP/1.1
-Authorization: Bearer <YOUR_SESSION_TOKEN>
+POST https://2e5ed264.lightning.force.com/aura HTTP/1.1
+Authorization: Bearer 00D2E5ED264!AR2e5ed264...
 Content-Type: application/x-www-form-urlencoded
 
-message={"actions":[{"id":"1;a","descriptor":"c.CustomObjectController.getRecord","callingDescriptor":"UNKNOWN",
-"params":{"recordId":"001D264","fields":["Id","Name","OwnerId","SensitiveData__c","InternalNotes__c"]}}]}
+message={"actions":[{"id":"1;a","descriptor":"c.LeadController.getLeadData",
+"callingDescriptor":"UNKNOWN","params":{"leadId":"001D264",
+"fields":["Id","Name","OwnerId","InternalNotes__c","SensitiveData__c"]}}]}
 &aura.token=undefined
 ```
 
-### Step 4 — Verify BOLA
-**Vulnerable outcome:** Response `state: "SUCCESS"` with victim record data including
-`SensitiveData__c` and `InternalNotes__c`. The `OwnerId` in the response will differ
-from your authenticated user ID.
-
-**Secure outcome:** Response `state: "ERROR"` with an authorization message, or empty `records` array.
+**Vulnerable outcome**: `state: "SUCCESS"` with victim `OwnerId: "005VICTIM"`, `SensitiveData__c` (SSN), `InternalNotes__c` — OWD=Private bypassed.  
+**Secure outcome**: `state: "ERROR"` — `INSUFFICIENT_ACCESS_OR_READONLY` error, or empty records array.
 
 ## Remediation
-1. **Add `with sharing` to Apex class declaration:**
-   ```apex
-   public with sharing class CustomRecordController { ... }
-   ```
-2. **Add ownership filter to SOQL:**
-   ```apex
-   WHERE Id = :recordId AND OwnerId = :UserInfo.getUserId()
-   ```
-3. **Use `WITH SECURITY_ENFORCED` in all SOQL queries.**
-4. **Validate `recordId` against the user's accessible record IDs before querying.**
-5. **Automated test:** Write a Salesforce Apex test that authenticates as User A and requests User B's record ID — assert INSUFFICIENT_ACCESS or empty result.
+
+- **Add `with sharing` to `LeadController`** (RISK-SF-242):
+  ```apex
+  public with sharing class LeadController { ... }
+  ```
+- **Add ownership predicate to SOQL** (RISK-SF-243):
+  ```apex
+  WHERE Id = :leadId AND OwnerId = :UserInfo.getUserId()
+  ```
+- **Add `WITH SECURITY_ENFORCED`** to all SOQL queries in `LeadController`.
+- **Validate `leadId` is accessible to current user** before executing SOQL (use SOQL with sharing to pre-check).
+- **Regression test**: Apex test — User A requests User B's Lead `leadId` via `c.LeadController.getLeadData` — assert `INSUFFICIENT_ACCESS` or empty result.

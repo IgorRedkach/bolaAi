@@ -1,22 +1,11 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (SF-0242) was generated independently for **CleanRoute IoT Platform** (Waste Management / Smart Bins).
+1. **Wrong controller and parameter in original**: the original used `c.CustomObjectController.getRecord` with `recordId` — the context specifies `c.LeadController.getLeadData` with `leadId`. All corrected.
 
-## Generation Method
-1. Selected industry: **Waste Management / Smart Bins**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 2.4 (Privilege escalation via parameter tampering)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+2. **Two distinct documented risks must both be mentioned**: RISK-SF-242 (`without sharing` bypasses OWD) and RISK-SF-243 (no `OwnerId` WHERE clause) are separate documented risks that compound each other. Even if `with sharing` was added, the missing `OwnerId` check would still allow access to records explicitly shared with the attacker's profile that they shouldn't see directly. Both fixes are required.
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `contractId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+3. **SSN in HAR response is critical evidence**: the HAR response explicitly includes `"SensitiveData__c": "SSN: 000-42-4623"`. This is extremely sensitive PII (Social Security Number). The original response didn't reference this specific data. Including it in the analysis demonstrates the actual impact — not just "cross-tenant access" but specifically SSN exposure.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+4. **Minor inconsistency in context**: section 4.0 Apex method is named `getLeadDetails` but the HAR descriptor is `c.LeadController.getLeadData`. Using `getLeadData` as primary since the HAR is the evidence.
 
-## Pattern Coverage
-- Primary: Pattern 2.4 — Privilege escalation via parameter tampering (BAC)
+5. **Waste management domain context**: Lead records represent waste collection service clients. SSN exposure would be CCPA/GDPR reportable.
