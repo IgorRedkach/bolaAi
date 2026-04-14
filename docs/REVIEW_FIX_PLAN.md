@@ -150,7 +150,7 @@
 - [x] **0107** [INJ-0108-CMDi-GOVERNMENT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/INJ-0108-CMDi-GOVERNMENT/context.txt)
 - [x] **0108** [INJ-0109-ORMi-HR-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/INJ-0109-ORMi-HR-TECH/context.txt)
 - [x] **0109** [SF-0242-WASTE-MANAGEMEN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/SF-0242-WASTE-MANAGEMEN/context.txt)
-- [ ] **0110** [SF-0243-SMART-HOME](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/SF-0243-SMART-HOME/context.txt)
+- [x] **0110** [SF-0243-SMART-HOME](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/SF-0243-SMART-HOME/context.txt)
 #### folder-with-files-to-train-10
 
 - [ ] **0111** [BOLA-0095-P72-DATA-ANALY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/BOLA-0095-P72-DATA-ANALY/context.txt)

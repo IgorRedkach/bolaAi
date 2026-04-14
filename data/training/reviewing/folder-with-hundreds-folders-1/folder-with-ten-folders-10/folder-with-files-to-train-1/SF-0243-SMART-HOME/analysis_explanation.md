@@ -1,22 +1,11 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (SF-0243) was generated independently for **NeoBuild BAS Platform** (Smart Home / Building Automation).
+1. **Wrong controller, parameter, and object in original**: the original used `c.LeadController.getLeadData` with `leadId` — the context specifies `c.ContactController.updateContact` with `contactId` and `Contact` object. All corrected.
 
-## Generation Method
-1. Selected industry: **Smart Home / Building Automation**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 3.1 (Client-assumed authority)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+2. **Pattern 3.1 (Client-Assumed Authority) distinction**: the HAR action is `updateContact` (a write/update), which is more dangerous than a read — the client assumes authority to update any Contact by supplying its ID. The application design never validates this assumption server-side.
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `contractId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+3. **SSN evidence in HAR**: `"SensitiveData__c": "SSN: 000-79-1437"` is explicit PII. The original response didn't reference this. In a building automation context, Contact SSNs may belong to residents, homeowners, or contractors — CCPA/GDPR reportable.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+4. **Internal inconsistency noted**: section 4.0 method name is `getContactDetails` but HAR descriptor is `c.ContactController.updateContact`. Using HAR `updateContact` as primary since it's the evidence; the inconsistency is a synthetic artifact.
 
-## Pattern Coverage
-- Primary: Pattern 3.1 — Client-assumed authority (Insecure Design)
+5. **Two separate documented risks**: RISK-SF-243 (without sharing) and RISK-SF-244 (no OwnerId WHERE clause) must both be in remediation.
