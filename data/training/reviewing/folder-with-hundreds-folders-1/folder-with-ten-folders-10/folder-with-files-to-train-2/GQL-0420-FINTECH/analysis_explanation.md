@@ -1,21 +1,27 @@
-# Analysis Explanation
+# Analysis Explanation — GQL-0420-FINTECH
 
-This example (GQL-0420) was generated independently for the **PayBridge Transaction API** system (Fintech / Payments Gateway).
+## What was wrong
 
-## Generation Method
-1. Selected industry: **Fintech / Payments Gateway**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 1.2 (Related or linked resources)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+### 1. HAR primary (`bulkResourceLookup`) was in Step 3 — moved to Step 2
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+HAR sends `bulkResourceLookup(ids: ["R-2420", "R-1420", "R-3420"])`. Original response had `getResource` as Step 2 (primary) and `bulkResourceLookup` as Step 3. Swapped to align with HAR.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+### 2. HAR request/response mismatch acknowledged
 
-## Pattern Coverage
-- Primary: Pattern 1.2 — Related or linked resources (BOLA)
+HAR request sends `bulkResourceLookup` but response body shows `getResource`-shaped data. Noted as synthetic test harness artifact.
+
+### 3. Pattern 1.2 (related/linked resources) demonstration added
+
+Original response only showed flat ID substitution reads — not the linked resource traversal that Pattern 1.2 specifically describes. Pattern 1.2 (Related or Linked Resources) means the attacker accesses linked child resources through a parent without authorization checks on each child. `getResourceWithChildren` is the canonical Pattern 1.2 vector — it traverses from a transaction to its linked `items` (payment legs, sub-records) without per-item tenant validation. Added `getResourceWithChildren` as Finding 2.
+
+### 4. Speculative introspection removed; Redis cache added
+
+Original Step 4 was speculative introspection ("if Pattern 6.1 also present") — not documented in GQL-0420. Removed. Section 2.0 explicitly documents Redis cache without user dimension — added as Finding 4.
+
+### 5. `bulkResourceLookup` conditional qualifier removed
+
+Removed "if Pattern 1.9 also present" — `bulkResourceLookup` is documented in Section 4.0 as a confirmed vulnerability.
+
+## Domain context
+
+PayBridge is a Fintech / Payments Gateway. Resources represent payment transactions linked to sub-records (payment legs, settlement records, refunds). Cross-tenant `bulkResourceLookup` and `getResourceWithChildren` expose competitor transaction data — PCI DSS Requirement 7 (need-to-know) violation. Financial data exfiltration enables competitive intelligence on payment volumes, merchant relationships, and settlement timing.

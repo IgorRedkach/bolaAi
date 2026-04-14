@@ -165,11 +165,11 @@
 - [x] **0120** [SF-0269-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-10/SF-0269-MEDIA/context.txt)
 #### folder-with-files-to-train-2
 
-- [ ] **0121** [BOLA-0076-P32-AEROSPACE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0076-P32-AEROSPACE/context.txt)
-- [ ] **0122** [BOLA-0077-P33-NON-PROFIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0077-P33-NON-PROFIT/context.txt)
-- [ ] **0123** [BOLA-0078-P34-CONSTRUCTI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0078-P34-CONSTRUCTI/context.txt)
-- [ ] **0124** [GQL-0419-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/GQL-0419-MEDIA/context.txt)
-- [ ] **0125** [GQL-0420-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/GQL-0420-FINTECH/context.txt)
+- [x] **0121** [BOLA-0076-P32-AEROSPACE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0076-P32-AEROSPACE/context.txt)
+- [x] **0122** [BOLA-0077-P33-NON-PROFIT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0077-P33-NON-PROFIT/context.txt)
+- [x] **0123** [BOLA-0078-P34-CONSTRUCTI](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/BOLA-0078-P34-CONSTRUCTI/context.txt)
+- [x] **0124** [GQL-0419-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/GQL-0419-MEDIA/context.txt)
+- [x] **0125** [GQL-0420-FINTECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/GQL-0420-FINTECH/context.txt)
 - [ ] **0126** [INJ-0110-SSTI-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/INJ-0110-SSTI-SAAS/context.txt)
 - [ ] **0127** [INJ-0111-XXE-SOCIAL-MED](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/INJ-0111-XXE-SOCIAL-MED/context.txt)
 - [ ] **0128** [SF-0244-CLOUD-IAM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-2/SF-0244-CLOUD-IAM/context.txt)
