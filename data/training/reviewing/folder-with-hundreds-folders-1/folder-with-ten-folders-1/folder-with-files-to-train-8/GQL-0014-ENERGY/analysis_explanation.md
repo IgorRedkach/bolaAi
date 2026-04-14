@@ -1,21 +1,13 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0014) was generated independently for the **PowerGrid Customer Billing API** system (Energy / Utilities / Smart Grid).
+1. **HAR matches `getMeter` single-ID read**: HAR is `getMeter(id: "M-2014")` from `tenant-3061` returning `tenant-d34b` — kept as primary step.
 
-## Generation Method
-1. Selected industry: **Energy / Utilities / Smart Grid**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 4.2 (Persistence poisoning via lifecycle actions)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 4.2 (Persistence Poisoning via Lifecycle Actions) was entirely missing**: the original expected_response.md only demonstrated a read BOLA. Pattern 4.2 specifically concerns integrity attacks through write lifecycle operations. In a smart grid billing platform, `updateMeter` and `deleteMeter` share the same missing `tenant_id` check as `getMeter` — if the read BOLA works, the write and delete mutations also work cross-tenant. The training signal for Pattern 4.2 must demonstrate these write-path attacks.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Smart grid / energy domain makes persistence poisoning especially dangerous**: meter readings are SCADA-bridged billing records used for energy settlement between utilities and regulators. Falsifying readings (e.g., changing `status` to `"tampered"` or overwriting `internalNotes`) constitutes billing fraud and may trigger regulatory audit failure. Deleting meter records destroys evidence required for energy settlement and grid compliance.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Bulk lookup confirmed, not conditional**: section 4.0 explicitly documents `bulkMeterLookup` lacking per-ID ownership filtering.
 
-## Pattern Coverage
-- Primary: Pattern 4.2 — Persistence poisoning via lifecycle actions (Integrity)
+5. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+6. **Redis cache added**: section 2.0 documents `meterId`-only cache key. Cached meter readings without a tenant dimension could result in one utility seeing another's consumption data when a cache hit returns stale cross-tenant data.

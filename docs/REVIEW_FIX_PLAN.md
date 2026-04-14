@@ -122,12 +122,12 @@
 - [x] **0085** [GQL-0010-SAAS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0010-SAAS/context.txt)
 - [x] **0086** [GQL-0011-SOCIAL-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0011-SOCIAL-MEDIA/context.txt)
 - [x] **0087** [GQL-0012-INSURANCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0012-INSURANCE/context.txt)
-- [ ] **0088** [GQL-0013-LOGISTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0013-LOGISTICS/context.txt)
-- [ ] **0089** [GQL-0014-ENERGY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0014-ENERGY/context.txt)
-- [ ] **0090** [GQL-0015-TELECOM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0015-TELECOM/context.txt)
+- [x] **0088** [GQL-0013-LOGISTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0013-LOGISTICS/context.txt)
+- [x] **0089** [GQL-0014-ENERGY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0014-ENERGY/context.txt)
+- [x] **0090** [GQL-0015-TELECOM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-8/GQL-0015-TELECOM/context.txt)
 #### folder-with-files-to-train-9
 
-- [ ] **0091** [GQL-0016-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0016-EDUCATION/context.txt)
+- [x] **0091** [GQL-0016-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0016-EDUCATION/context.txt)
 - [ ] **0092** [GQL-0017-REAL-ESTATE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0017-REAL-ESTATE/context.txt)
 - [ ] **0093** [GQL-0018-TRAVEL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0018-TRAVEL/context.txt)
 - [ ] **0094** [GQL-0019-MEDIA](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-1/folder-with-files-to-train-9/GQL-0019-MEDIA/context.txt)

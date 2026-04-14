@@ -1,21 +1,15 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0016) was generated independently for the **LearnPath Assessment Platform** system (Education / EdTech LMS).
+1. **HAR matches `getResource` single-ID read**: HAR is `getResource(id: "R-2016")` from `tenant-f900` returning `tenant-5d44` — kept as primary step.
 
-## Generation Method
-1. Selected industry: **Education / EdTech LMS**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 5.2 (Resolver/graph traversal injection)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 5.2 (Resolver/Graph Traversal) requires the `getResourceWithChildren` step**: the pattern description in section 5.0 is explicit — "resolver chain follows nested relationships without re-validating authorization at each level." The `getResourceWithChildren` query is the canonical Pattern 5.2 exploit: use an authorized root query entry point, inject a cross-tenant `resourceId`, and traverse the graph to retrieve all nested `items` without any per-level auth check. The original expected_response.md showed only the flat `getResource` call and never demonstrated the traversal aspect.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **EdTech context makes traversal especially impactful**: in an assessment platform, `Item` objects are the most sensitive records — exam questions, answer keys, and student submissions. Reading these via traversal (rather than direct access) bypasses any direct access controls that might exist on `getItem` while exploiting the trust the resolver places in the authorized parent context.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Distinction between Pattern 1.1 (direct ID substitution) and Pattern 5.2 (traversal)**: Pattern 1.1 is a flat `getResource(id: cross-tenant-id)` call. Pattern 5.2 specifically uses graph traversal — the attacker starts from an authorized or cross-tenant parent and reads related children without separate authorization at the child resolver level.
 
-## Pattern Coverage
-- Primary: Pattern 5.2 — Resolver/graph traversal injection (Injection)
+5. **Bulk lookup confirmed, not conditional**: section 4.0 explicitly documents `bulkResourceLookup` lacking per-ID filter.
+
+6. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+7. **Redis cache added**: section 2.0 documents `resourceId`-only cache key.
