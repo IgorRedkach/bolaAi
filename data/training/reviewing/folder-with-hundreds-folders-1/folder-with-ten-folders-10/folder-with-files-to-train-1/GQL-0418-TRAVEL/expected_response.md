@@ -1,79 +1,92 @@
-# Expected Response
-
 ## System
-- Domain: Travel / GDS
-- System: SkyPort Global Distribution
+
+- System: SkyPort Global Distribution v4.8.5
+- Domain: TRAVEL / GDS
 - Example ID: GQL-0418
+- Risk ID: RISK-GQL-418
 
-## Priority Findings
+## Findings
 
-### Finding 1: GraphQL BOLA — Draft / non-published resource access (Pattern 10.5)
-**Severity:** Critical
-**Category:** Single-User
+### 1. Pattern 10.5 — Approve Cross-Tenant Draft Travel Resource via `updateResource` (HAR Primary)
 
-**Summary:**
-The GraphQL API at `POST /graphql` contains a Pattern 10.5 (Draft / non-published resource access) vulnerability.
-An authenticated user belonging to `tenant-9d75` can access or manipulate objects owned by
-`tenant-74b8` by supplying a cross-tenant `resourceId` in the GraphQL query/mutation.
+**Primary HAR attack**: The HAR shows `updateResource(id: "R-2418", input: {status: "approved", ownerId: "attacker-9d7574b8"})` from JWT `tenant-9d75`. Pattern 10.5 (Draft/Non-Published Resource Access): the attacker accesses a cross-tenant resource in draft/pending state and promotes it to "approved" — publishing another carrier or agency's unpublished GDS content without authorization.
 
-**Evidence from HAR:**
-- Request JWT claim `tenantId`: `tenant-9d75`
-- Response body `tenantId`: `tenant-74b8` — **mismatch confirms cross-tenant data access**
-- Response HTTP status: `200 OK` — no authorization error raised by the resolver
-- Response includes `sensitiveField` and `internalNotes` belonging to `tenant-74b8`
+**HAR evidence**: JWT `x-tenant-id: tenant-9d75`. Request: `updateResource(id: "R-2418", input: {status: "approved", ownerId: "attacker-9d7574b8"})`. Response: HTTP 200 OK with `"tenantId": "tenant-74b8"` — another carrier's draft GDS resource approved and ownership transferred.
 
-**Root Cause:**
-The resolver fetches the resource by `resourceId` directly from the database without joining
-against the authenticated user's `tenantId`. The JWT is validated (signature check passes) but the
-`tenantId` claim is never used as a WHERE clause predicate.
+**Travel/GDS impact**: `Resource` objects in a Global Distribution System may represent draft fare rules, unpublished booking configurations, or pending inventory allocations. Approving another carrier's draft fare rule prematurely can disrupt their pricing strategy, expose pre-launch pricing to competitors, or activate booking rules before their intended release date.
 
-## Steps to Reproduce
+### 2. Draft Resource Enumeration via `listResources(status: "draft")` (Pattern 10.5 Discovery)
 
-### Step 1 — Establish attacker baseline
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9D75>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-1418\") { resourceId tenantId ownerId data { sensitiveField } } }"}' 
+`listResources(status: "draft", tenantId: "tenant-74b8")` — enumerate all unpublished GDS resources for the target carrier before accessing or modifying them.
+
+### 3. BOLA on `getResource` — Missing `tenant_id` Filter (RISK-GQL-418)
+
+Section 4.0 (RISK-GQL-418): `getResource` lacks tenant check.
+
+### 4. BOLA on `bulkResourceLookup` — No Per-ID Ownership Filter
+
+Section 4.0: documented gap.
+
+### 5. Redis Cache Without Tenant Dimension
+
+Section 2.0: `resourceId`-only cache key.
+
+## Evidence
+
+- **HAR**: `updateResource(id: "R-2418", input: {status: "approved", ownerId: "attacker-9d7574b8"})` with `tenant-9d75` JWT → HTTP 200 with `tenantId: tenant-74b8`.
+- **Section 5.0**: Pattern 10.5 — draft resource access and status promotion without ownership check.
+- **Section 4.0 (RISK-GQL-418)**: `getResource` lacks tenant check.
+- **Section 4.0**: `bulkResourceLookup` lacks per-ID filter.
+
+## Reproduction
+
+**Step 1 — Baseline:**
+
+```graphql
+query { getResource(id: "R-1418") { resourceId tenantId status data { sensitiveField } } }
 ```
-**Expected baseline:** Returns `tenantId: "tenant-9d75"` — this is the attacker's own object.
 
-### Step 2 — Cross-tenant ID substitution
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9D75>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "query { getResource(id: \"R-2418\") { resourceId tenantId ownerId data { sensitiveField internalNotes } } }"}' 
+Expected: `tenantId: "tenant-9d75"`.
+
+**Step 2 — Draft enumeration across tenant (Pattern 10.5 discovery):**
+
+```graphql
+query { listResources(tenantId: "tenant-74b8", status: "draft") { resourceId tenantId status data { sensitiveField internalNotes } } }
 ```
-**Vulnerable outcome:** Returns `tenantId: "tenant-74b8"` and full `sensitiveField` — **BOLA confirmed**.
-**Secure outcome:** HTTP 403/404 or an empty data response with an authorization error.
 
-### Step 3 — Bulk enumeration (if Pattern 1.9 also present)
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9D75>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { bulkResourceLookup(ids: [\"R-2418\", \"R-3418\", \"R-4418\"]) { resourceId tenantId data { sensitiveField } } }"}'
+**Step 3 — Approve cross-tenant draft GDS resource + transfer ownership (primary HAR attack):**
+
+```graphql
+mutation {
+  updateResource(id: "R-2418", input: {
+    status: "approved",
+    ownerId: "attacker-9d7574b8"
+  }) {
+    resourceId status tenantId ownerId
+  }
+}
 ```
-**Vulnerable outcome:** Returns objects from multiple tenants in a single response.
 
-### Step 4 — Introspection probe (if Pattern 6.1 also present)
-```bash
-curl -s -X POST https://api.skyport-global-distr.example.com/graphql \
-  -H "Authorization: Bearer <ATTACKER_TOKEN_TENANT_TENANT-9D75>" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ __schema { types { name fields { name type { name } } } } }"}' 
+Expected secure: Mutation rejected — cross-tenant access blocked.  
+Expected vulnerable: HTTP 200 — competitor carrier's draft GDS configuration published and ownership transferred.
+
+**Step 4 — Read cross-tenant draft (RISK-GQL-418):**
+
+```graphql
+query { getResource(id: "R-2418") { resourceId tenantId status ownerId data { sensitiveField internalNotes } } }
 ```
-**Vulnerable outcome:** Full schema returned — confirms field names and relationships for deeper exploitation.
 
-## Secure Outcome Verification
-For **Step 2**, the secure implementation MUST return:
-```json
-{ "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN" } }], "data": { "getResource": null } }
+**Step 5 — Bulk cross-tenant lookup:**
+
+```graphql
+mutation { bulkResourceLookup(ids: ["R-2418", "R-3418", "R-4418"]) { resourceId tenantId status data { sensitiveField } } }
 ```
 
 ## Remediation
-1. **Resolver-level tenant check:** In every resolver that fetches an object by ID, add a WHERE clause: `WHERE resourceId = $id AND tenant_id = $jwtTenantId`.
-2. **Disable GraphQL introspection in production:** Set `introspection: false` in Apollo Server production config.
-3. **Per-ID ownership filter for bulk operations:** In `bulkResourceLookup`, filter results post-fetch to only return objects matching the JWT's `tenantId`.
-4. **Automated regression tests:** Add a test that authenticates as Tenant A and attempts to read Tenant B objects — assert HTTP 403 or null data.
+
+- **Enforce cross-tenant check before `updateResource`**: verify `resource.tenantId == jwt.tenantId`.
+- **Restrict status transitions**: `approved` state requires explicit workflow role and ownership verification.
+- **Ignore client-supplied `tenantId` in `listResources`**.
+- **Enforce `tenant_id` WHERE clause in `getResource`** (RISK-GQL-418).
+- **Filter `bulkResourceLookup` by JWT `tenantId`**.
+- **Add `tenantId` to Redis cache key**.

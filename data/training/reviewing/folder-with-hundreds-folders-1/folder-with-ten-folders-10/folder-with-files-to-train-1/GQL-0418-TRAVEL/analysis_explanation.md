@@ -1,21 +1,13 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (GQL-0418) was generated independently for the **SkyPort Global Distribution** system (Travel / GDS).
+1. **HAR shows `updateResource` write as primary**: HAR is `updateResource(id: "R-2418", input: {status: "approved"...})`. Original expected_response.md used `getResource` single-ID.
 
-## Generation Method
-1. Selected industry: **Travel / GDS**
-2. Designed realistic GraphQL architecture with schema, JWT auth, and multi-tenant data model.
-3. Embedded **Pattern 10.5 (Draft / non-published resource access)** from bola_patterns.md into the resolver logic.
-4. Generated HAR capture showing the cross-tenant request with mismatched tenantId evidence.
-5. Wrote expected response grounded exclusively in the context.txt of this example.
+2. **Pattern 10.5 (Draft/Non-Published) must show the discovery + promotion chain**: discovery via `listResources(status: "draft")`, then promotion via `updateResource(status: "approved")`. This is the full Pattern 10.5 attack sequence.
 
-## Why GraphQL?
-GraphQL's single-endpoint model means all authorization must be enforced inside individual resolvers.
-A missing WHERE clause in one resolver exposes the entire object graph.
+3. **Travel/GDS context for draft resources**: in a GDS, draft resources may be unpublished fare rules, pending inventory configurations, or unreleased booking policies. Approving these prematurely creates business harm — revealing pre-launch pricing, disrupting release schedules, or activating unvetted booking rules.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was retained.
-- All object IDs, tenant IDs, and field names are consistent within this folder only.
+4. **Bulk lookup confirmed**: section 4.0 documents the gap.
 
-## Pattern Coverage
-- Primary: Pattern 10.5 — Draft / non-published resource access (Single-User)
+5. **Introspection removed**: not documented in sections 4.0 or 5.0.
+
+6. **HAR response/request mismatch**: request is `updateResource` but response is `getResource`. Same synthetic artifact. Confirmed signal: `tenantId: tenant-74b8` with HTTP 200.
