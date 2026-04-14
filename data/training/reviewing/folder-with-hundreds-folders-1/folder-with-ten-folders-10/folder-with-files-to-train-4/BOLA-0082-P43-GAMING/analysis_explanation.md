@@ -1,17 +1,23 @@
-# Analysis Explanation
+# Analysis Explanation — BOLA-0082-P43-GAMING
 
-This example (BOLA-0082) was generated independently for **RealmForge Game API** (Gaming / MMO Backend).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Gaming / MMO Backend**
-2. Designed REST API architecture with PostgreSQL and JWT authentication.
-3. Embedded **Pattern 4.3 (Integrity downgrade via versioning)** from bola_patterns.md.
-4. Generated artifact (HAR/schema) showing the vulnerability evidence.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Corrected Endpoint and ID Format
+Original used `/api/v1/resources/RES-*`. Context Section 4.0 and HAR specify `GET/PATCH/DELETE /api/v1/items/:id` with IDs in format `ITE-*` (HAR shows `ITE-2082`). Corrected throughout.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was used.
-- All IDs, tenant values, and endpoints are self-consistent within this folder.
+### 2. Added X-Tenant-ID Header
+HAR shows `X-Tenant-ID: ORG-3B50` header. Added to all curl commands.
 
-## Pattern Coverage
-- Primary: Pattern 4.3 — Integrity downgrade via versioning (Integrity)
+### 3. Explained Pattern 4.3 Properly
+Original Step 3 stated "No specific variant documented for Pattern 4.3 — use Steps 1-2." Pattern 4.3 is "Integrity downgrade via versioning." In the Gaming/MMO context, this means an attacker can PATCH another player's game items to downgrade their version/status/tier. Added Step 3 demonstrating a PATCH that sets `status: "deprecated"` and modifies `sensitive_data` to show tier degradation — this is the pattern's core: using cross-tenant write access to degrade data integrity.
+
+### 4. Added PATCH and DELETE Operations
+Pattern 4.3 requires demonstrating integrity modification, not just reads. Added:
+- Step 3: PATCH with status/tier downgrade (Pattern 4.3 integrity downgrade)
+- Step 4: DELETE (irreversible virtual property destruction)
+
+### 5. Contextualized for Gaming/MMO Domain
+Explained the real-world impact: in-game economy sabotage, degradation of legendary/rare items to common tier, virtual property theft, competitive advantage destruction. These are the specific consequences of Pattern 4.3 in an MMO backend context.
+
+### 6. Corrected System Version
+Added version `v3.3.0` from context document version to system header.

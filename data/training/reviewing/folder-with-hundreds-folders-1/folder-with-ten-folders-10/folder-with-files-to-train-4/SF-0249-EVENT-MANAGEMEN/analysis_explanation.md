@@ -1,22 +1,25 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0249-EVENT-MANAGEMEN
 
-This example (SF-0249) was generated independently for **VenueCore Ticketing API** (Event Management / Ticketing).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Event Management / Ticketing**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 2.4 (Privilege escalation via parameter tampering)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Corrected Controller, Object, and Parameter Names
+Original used `c.ContactController.updateContact` with `contactId` on Contact object. Context Section 5.0 and HAR specify:
+- Controller: `c.ContractController.approveContract`
+- Parameter: `contractId`
+- Object: Contract (Section 3.0 schema)
+Corrected throughout.
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `recordId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+### 2. Corrected Org Host and Session Token
+Original used `<ORG_ID>.lightning.force.com`. HAR specifies `da3099c4.lightning.force.com` and session token `00DDA3099C4!ARda3099c4...`. Corrected in Step 2 reproduction.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 3. Explained Pattern 2.4 Correctly
+Pattern 2.4 is "Privilege escalation via parameter tampering (BAC)." The key distinction from plain BOLA: `approveContract` is an approval-authority action. By tampering with `contractId` to point to another user's contract, the attacker escalates their privileges to approve contracts they have no authority over — a vertical/horizontal BAC combined with parameter tampering. Added server-side role check for approval authority as a specific remediation.
 
-## Pattern Coverage
-- Primary: Pattern 2.4 — Privilege escalation via parameter tampering (BAC)
+### 4. Highlighted SSN Exposure
+HAR response contains `SensitiveData__c: "SSN: 000-28-5657"`. In Event Management/Ticketing, SSN exposure could represent attendee/contractor PII breach.
+
+### 5. Added Risk ID References
+RISK-SF-249 (`without sharing`) and RISK-SF-250 (no ownership check) from Section 8.0 referenced in remediation.
+
+### 6. Method Name Note
+Section 4.0 Apex code defines method `getContractDetails`, but Section 5.0 and HAR use `approveContract`. HAR is authoritative — using `approveContract`.

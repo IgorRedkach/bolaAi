@@ -1,22 +1,25 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0250-PARKING
 
-This example (SF-0250) was generated independently for **ParkIQ Management API** (Parking / Smart City).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Parking / Smart City**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 3.1 (Client-assumed authority)** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Corrected Controller, Object, and Parameter Names
+Original used `c.OpportunityController.getOpportunity` with `opportunityId`. Context Section 5.0 and HAR specify:
+- Controller: `c.ContactController.updateContact`
+- Parameter: `contactId`
+- Object: Contact (Section 3.0 schema)
+Corrected throughout.
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `leadId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+### 2. Corrected Org Host and Session Token
+Original used `<ORG_ID>.lightning.force.com`. HAR specifies `3be99e04.lightning.force.com` and session token `00D3BE99E04!AR3be99e04...`. Corrected in Step 2.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 3. Explained Pattern 3.1 Correctly
+Pattern 3.1 is "Client-assumed authority (Insecure Design)." This is an insecure design pattern where the server is designed to trust whatever the client supplies — it assumes client authority rather than verifying it. Distinguished from plain BOLA: the root cause here is a design decision (no server-side authority check), not just a missing WHERE clause. Added specific Pattern 3.1 remediation: "server must never assume the client has authority over a resource."
 
-## Pattern Coverage
-- Primary: Pattern 3.1 — Client-assumed authority (Insecure Design)
+### 4. Highlighted SSN Exposure
+HAR response contains `SensitiveData__c: "SSN: 000-49-6519"`. Added explicitly in finding and Step 4 verification.
+
+### 5. Risk ID References
+RISK-SF-250 (`without sharing`) and RISK-SF-251 (no ownership check) from Section 8.0 referenced in remediation steps.
+
+### 6. Method Name Note
+Section 4.0 Apex code defines method `getContactDetails`, but Section 5.0 and HAR both use `updateContact`. HAR and Section 5.0 are authoritative — using `updateContact`.

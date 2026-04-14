@@ -1,22 +1,25 @@
-# Analysis Explanation
+# Analysis Explanation — SF-0248-TAX-COMPLIANCE
 
-This example (SF-0248) was generated independently for **TaxGrid Compliance API** (Tax Compliance / RegTech).
+## Changes Made
 
-## Generation Method
-1. Selected industry: **Tax Compliance / RegTech**
-2. Designed Salesforce Lightning Aura architecture with Apex controller.
-3. Embedded **Pattern 2.1 (Functional pivot (vertical/horizontal))** via `without sharing` and missing WHERE predicate.
-4. Generated HAR capture of the Aura framework `POST /aura` request with injected victim ID.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+### 1. Corrected Controller, Object, and Parameter Names
+Original used `c.QuoteController.getQuoteDetails` with `quoteId`. Context Section 5.0 and HAR specify:
+- Controller: `c.ContactController.updateContact`
+- Parameter: `contactId`
+- Object: Contact (Section 3.0 schema)
+Corrected throughout.
 
-## Why Salesforce Aura?
-Aura framework requests are serialized `POST /aura` messages with a `message` field containing
-JSON-encoded actions. The `recordId` inside the `params` object is fully attacker-controlled.
-Without server-side ownership validation in the Apex controller, any record ID can be queried.
+### 2. Corrected Org Host and Session Token
+Original used `<ORG_ID>.lightning.force.com`. HAR specifies `9532bce9.lightning.force.com` and session token `00D9532BCE9!AR9532bce9...`. Corrected in Step 2 reproduction.
 
-## Consistency Guard
-- No context from other examples was used.
-- All record IDs and session tokens are unique to this folder.
+### 3. Explained Pattern 2.1 Correctly
+Pattern 2.1 is "Functional pivot (vertical/horizontal) (BAC)." In this context, the `updateContact` action is intended for the authenticated user's own Contact. The attacker pivots the function horizontally to operate on any other user's Contact record. Distinguished from plain BOLA by emphasizing that the function itself (contact update/read) is being repurposed across user boundaries — a BAC functional pivot rather than a simple ID substitution.
 
-## Pattern Coverage
-- Primary: Pattern 2.1 — Functional pivot (vertical/horizontal) (BAC)
+### 4. Highlighted SSN Exposure in Tax Compliance Context
+HAR response contains `SensitiveData__c: "SSN: 000-61-8487"`. In Tax Compliance/RegTech domain, SSN exposure has direct SOX/GLBA compliance implications (financial data PII). Added explicitly in finding and Step 4 verification.
+
+### 5. Risk ID References
+RISK-SF-248 (`without sharing`) and RISK-SF-249 (no ownership check) from Section 8.0 are now referenced in the remediation steps.
+
+### 6. Method Name Inconsistency Note
+Section 4.0 Apex code defines method `getContactDetails`, but Section 5.0 and HAR use `updateContact`. HAR is authoritative — using `updateContact`.

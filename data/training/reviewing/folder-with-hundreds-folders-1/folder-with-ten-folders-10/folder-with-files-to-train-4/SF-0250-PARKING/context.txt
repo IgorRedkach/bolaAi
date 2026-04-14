@@ -33,33 +33,28 @@ Contact (
 )
 ```
 
-## 4.0 Apex Controller (Vulnerable Implementation)
+## 4.0 Apex Controller Implementation
 ```apex
 public class ContactController {
     @AuraEnabled
     public static List<Contact> getContactDetails(String contactId, List<String> fields) {
-        // VULNERABILITY: runs 'without sharing' — bypasses OWD=Private sharing rules
-        // VULNERABILITY: no ownership check on contactId parameter
+        // Note: class declaration does not include 'with sharing'
+        // No ownership or tenancy check present in WHERE clause
         return [Contact]Database.query(
             'SELECT Id, Name, OwnerId, SensitiveData__c, InternalNotes__c ' +
             'FROM Contact ' +
             'WHERE Id = :' + contactId
-            // Missing: AND OwnerId = UserInfo.getUserId()
-            // Missing: WITH SECURITY_ENFORCED
         );
     }
 }
 ```
 
-## 5.0 Vulnerability Context
-**Pattern:** 3.1 — Client-assumed authority (Insecure Design)
+## 5.0 Behavioral Notes
 
-The Apex controller `c.ContactController.updateContact` accepts a `contactId` parameter from the client-side
-Aura component. The controller runs `without sharing` and does not validate that the
-authenticated user owns or has been granted access to the requested record.
-
-An attacker with a valid Salesforce session can substitute any `contactId` value in the
-Aura framework request payload to access records owned by other users.
+The Apex controller `c.ContactController.updateContact` accepts a `contactId` parameter from the
+client-side Aura component. The server processes whichever `contactId` value the client supplies
+without performing server-side verification that the authenticated user owns or has access to
+the requested record. The controller does not call `UserInfo.getUserId()` in its WHERE clause.
 
 ## 6.0 HAR Capture (Aura Framework Request)
 ```json
@@ -82,7 +77,7 @@ Aura framework request payload to access records owned by other users.
           "postData": {
             "mimeType": "application/x-www-form-urlencoded",
             "params": [
-              {"name": "message", "value": "{   "actions": [     {       "id": "1;a",       "descriptor": "c.ContactController.updateContact",       "callingDescriptor": "UNKNOWN",       "params": {         "contactId": "0019E04",         "fields": ["Id", "Name", "OwnerId", "InternalNotes__c", "SensitiveData__c"]       }     }   ] }"},
+              {"name": "message", "value": "{   \"actions\": [     {       \"id\": \"1;a\",       \"descriptor\": \"c.ContactController.updateContact\",       \"callingDescriptor\": \"UNKNOWN\",       \"params\": {         \"contactId\": \"0019E04\",         \"fields\": [\"Id\", \"Name\", \"OwnerId\", \"InternalNotes__c\", \"SensitiveData__c\"]       }     }   ] }"},
               {"name": "aura.token", "value": "undefined"}
             ]
           },
@@ -111,6 +106,6 @@ Apex Controller Declaration: "public class ContactController" (WITHOUT "with sha
 ```
 
 ## 8.0 Known Risks
-- **RISK-SF-250:** Controller declared without `with sharing`. Sharing rules not enforced.
-- **RISK-SF-251:** No ownership check in SOQL WHERE clause.
+- **RISK-SF-250:** Controller declared without `with sharing`. Sharing rules not enforced by Apex layer.
+- **RISK-SF-251:** No ownership check in SOQL WHERE clause. Any caller-supplied ID is accepted.
 - Client-supplied `contactId` is directly interpolated into SOQL without validation.

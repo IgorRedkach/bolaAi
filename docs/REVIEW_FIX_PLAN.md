@@ -8,6 +8,32 @@
 - analysis_explanation.md must describe the exact method used for that specific example
 - No generic placeholders (/api/v1/resources, RES-XXXX) unless they appear verbatim in context.txt
 - Each checkbox must be ticked only after all three files are verified and fixed
+- Process examples one by one — no scripts, each folder is analysed independently
+
+---
+
+## CONTEXT.TXT QUALITY RULE (apply to every example from this point forward)
+
+context.txt is raw evidence given to the AI agent — it simulates real-world pentest artifacts.
+
+**DO NOT include in context.txt:**
+- Explicit vulnerability pattern labels (e.g., "Pattern 1.5", "BOLA", "SQLi", "CMDi")
+- "VULNERABILITY:" code comments that directly name or describe the issue
+- "_Specific exploitation for Pattern X.Y:_" sentences
+- Section headers like "Vulnerability Context" with direct pattern identification
+- Statements like "this endpoint is vulnerable to X" — describe behavior, not vulnerability class
+
+**DO include in context.txt:**
+- Realistic code snippets with neutral comments (e.g., "Note: class does not include 'with sharing'")
+- HAR captures showing actual request/response evidence
+- Architecture specifications, database schemas, sharing rules
+- Behavioral observations (e.g., "NOTE: Application code does NOT use tenant_id in authorization checks")
+- Risk log IDs with symptom descriptions only (e.g., "RISK-XX-YYY: Endpoint uses raw string concatenation. Parameterized queries are used in newer endpoints but this one was missed.")
+- More supporting evidence data instead of direct problem identification
+
+**context.txt purpose:** present evidence for the agent to analyze
+**expected_response.md purpose:** show what the agent should find and how to reproduce it
+**analysis_explanation.md purpose:** explain the logical path from evidence to finding (bridge)
 
 **Total folders:** 5065
 
@@ -186,18 +212,18 @@
 - [x] **0137** [INJ-0113-SQLi-LOGISTICS](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0113-SQLi-LOGISTICS/context.txt)
 - [x] **0138** [INJ-0114-NoSQLi-ENERGY](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/INJ-0114-NoSQLi-ENERGY/context.txt)
 - [x] **0139** [SF-0247-DOCUMENT-SIGNIN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/SF-0247-DOCUMENT-SIGNIN/context.txt)
-- [ ] **0140** [SF-0248-TAX-COMPLIANCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/SF-0248-TAX-COMPLIANCE/context.txt)
+- [x] **0140** [SF-0248-TAX-COMPLIANCE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-3/SF-0248-TAX-COMPLIANCE/context.txt)
 #### folder-with-files-to-train-4
 
-- [ ] **0141** [BOLA-0082-P43-GAMING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/BOLA-0082-P43-GAMING/context.txt)
-- [ ] **0142** [BOLA-0083-P44-CYBERSECUR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/BOLA-0083-P44-CYBERSECUR/context.txt)
-- [ ] **0143** [GQL-0423-RETAIL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/GQL-0423-RETAIL/context.txt)
-- [ ] **0144** [GQL-0424-LEGAL-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/GQL-0424-LEGAL-TECH/context.txt)
-- [ ] **0145** [INJ-0115-LDAPi-TELECOM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/INJ-0115-LDAPi-TELECOM/context.txt)
-- [ ] **0146** [INJ-0116-CMDi-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/INJ-0116-CMDi-EDUCATION/context.txt)
-- [ ] **0147** [INJ-0117-ORMi-REAL-ESTAT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/INJ-0117-ORMi-REAL-ESTAT/context.txt)
-- [ ] **0148** [SF-0249-EVENT-MANAGEMEN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/SF-0249-EVENT-MANAGEMEN/context.txt)
-- [ ] **0149** [SF-0250-PARKING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/SF-0250-PARKING/context.txt)
+- [x] **0141** [BOLA-0082-P43-GAMING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/BOLA-0082-P43-GAMING/context.txt)
+- [x] **0142** [BOLA-0083-P44-CYBERSECUR](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/BOLA-0083-P44-CYBERSECUR/context.txt)
+- [x] **0143** [GQL-0423-RETAIL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/GQL-0423-RETAIL/context.txt)
+- [x] **0144** [GQL-0424-LEGAL-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/GQL-0424-LEGAL-TECH/context.txt)
+- [x] **0145** [INJ-0115-LDAPi-TELECOM](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/INJ-0115-LDAPi-TELECOM/context.txt)
+- [x] **0146** [INJ-0116-CMDi-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/INJ-0116-CMDi-EDUCATION/context.txt)
+- [x] **0147** [INJ-0117-ORMi-REAL-ESTAT](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/INJ-0117-ORMi-REAL-ESTAT/context.txt)
+- [x] **0148** [SF-0249-EVENT-MANAGEMEN](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/SF-0249-EVENT-MANAGEMEN/context.txt)
+- [x] **0149** [SF-0250-PARKING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/SF-0250-PARKING/context.txt)
 - [ ] **0150** [SF-0251-HEALTHCARE](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-4/SF-0251-HEALTHCARE/context.txt)
 #### folder-with-files-to-train-5
 

