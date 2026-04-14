@@ -141,7 +141,7 @@
 
 #### folder-with-files-to-train-1
 
-- [ ] **0101** [BOLA-0073-P24-RETAIL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/BOLA-0073-P24-RETAIL/context.txt)
+- [x] **0101** [BOLA-0073-P24-RETAIL](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/BOLA-0073-P24-RETAIL/context.txt)
 - [ ] **0102** [BOLA-0074-P25-LEGAL-TECH](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/BOLA-0074-P25-LEGAL-TECH/context.txt)
 - [ ] **0103** [BOLA-0075-P31-MINING](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/BOLA-0075-P31-MINING/context.txt)
 - [ ] **0104** [GQL-0416-EDUCATION](data/training/reviewing/folder-with-hundreds-folders-1/folder-with-ten-folders-10/folder-with-files-to-train-1/GQL-0416-EDUCATION/context.txt)

@@ -1,17 +1,11 @@
-# Analysis Explanation
+## Analysis reasoning
 
-This example (BOLA-0073) was generated independently for **RewardCore Loyalty API** (Retail / Loyalty Programme).
+1. **Wrong endpoint and ID format in original**: the original expected_response.md used `/api/v1/resources/RES-*` — the context.txt specifies `/api/v2/entitys/ENT-*` and the HAR uses `ENT-2073`. All references corrected.
 
-## Generation Method
-1. Selected industry: **Retail / Loyalty Programme**
-2. Designed REST API architecture with PostgreSQL and JWT authentication.
-3. Embedded **Pattern 2.4 (Privilege escalation via parameter tampering)** from bola_patterns.md.
-4. Generated artifact (HAR/schema) showing the vulnerability evidence.
-5. Wrote expected response grounded exclusively in this example's context.txt.
+2. **Pattern 2.4 (Privilege escalation via parameter tampering) must demonstrate write escalation**: the pattern is specifically about escalating privileges beyond the authorized level — not just reading unauthorized data (that is Pattern 1.1). Section 4.0 explicitly lists GET/PATCH/DELETE. Demonstrating a PATCH that modifies another retailer's loyalty status is what makes Pattern 2.4 distinct from a simple BOLA read. The original expected_response.md had "Step 3 — Variant tests based on Pattern 2.4: No specific variant documented" — this is wrong, the write path should be demonstrated.
 
-## Consistency Guard
-- Context refreshed for this example; no data from other examples was used.
-- All IDs, tenant values, and endpoints are self-consistent within this folder.
+3. **RISK-24-073 provides key context**: the risk is documented and remediation is blocked pending DB migration #DB-173. This confirms the handler was written before the tenant isolation policy and is a known gap — important context for impact assessment.
 
-## Pattern Coverage
-- Primary: Pattern 2.4 — Privilege escalation via parameter tampering (BAC)
+4. **Database schema comment is the strongest evidence**: section 3.0 includes an explicit SQL comment "Application code does NOT use tenant_id in authorization checks" — this is the definitive evidence for the root cause.
+
+5. **Loyalty programme context**: `status: "suspended"` via PATCH could disable another retailer's customer's loyalty account, causing customer service harm and financial disputes.
