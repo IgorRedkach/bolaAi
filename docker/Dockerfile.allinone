@@ -1,20 +1,19 @@
-# BOLA AI — All-in-one image: Ollama + pre-baked 3B-class model + taught RAG knowledge + app.
-# The model is downloaded, taught with few-shot examples, and RAG knowledge is pre-loaded
-# ALL during BUILD so the image is 100% self-contained. No internet needed at runtime.
+# BOLA AI — All-in-one image: Ollama + pre-baked qwen2.5-coder:3b + Modelfile + RAG knowledge + app.
+# Model is pulled from Ollama and taught at BUILD time — fully offline at runtime.
 # Users run: docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
 FROM python:3.11-slim AS base
 
-# Pinned Ollama — "latest" from ollama.com has regressed (e.g. 0.20.7) with merged+Q4 GGUF + llama_sampler on CPU.
+# Pinned Ollama — matches tested version; keeps llama_sampler stable on CPU.
 ARG OLLAMA_VERSION=0.20.5
 
-# Install ollama binary (keep curl and ca-certificates; skip autoremove to preserve /bin/sh)
+# Install ollama binary
 RUN apt-get update && apt-get install -y --no-install-recommends curl zstd ca-certificates && \
     curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" | tar x --zstd -C /usr && \
     rm -rf /var/lib/apt/lists/*
 
 # App dependencies
 WORKDIR /app
-# CPU-only PyTorch first — otherwise pip pulls CUDA/NVIDIA wheels (~multi-GB) and GitHub Actions runners hit ENOSPC during pip install.
+# CPU-only PyTorch first — prevents CUDA wheel pull which causes ENOSPC on CI runners.
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic chromadb sentence-transformers python-multipart jinja2 pyyaml
 
@@ -22,20 +21,29 @@ RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic chroma
 COPY pyproject.toml ./
 COPY src/ ./src/
 COPY data/ /app/data/
-COPY models/published/ /app/models/published/
 
-# Bake Modelfile into image (includes 15 few-shot teaching examples)
+# Bake Modelfile (system prompt + 15 domain few-shot examples)
 COPY docker/Modelfile /app/Modelfile
 
-# --- Stage 1: Model setup is deferred to first-run entrypoint ---
-# The trained model bundle in /app/models/published/ will be imported on first container start.
-# On first run: bundle is extracted → ollama create bola-analyzer from merged 0.5B weights.
-# Fallback: if bundle import fails and BOLA_AI_ALLOW_MODEL_PULL=1, pulls qwen2.5-coder:3b.
+# --- Stage 1: Pre-bake qwen2.5-coder:3b + create bola-analyzer model at BUILD time ---
+# This makes the image fully self-contained: no internet access needed at runtime.
+# We start Ollama, pull the base model, apply our Modelfile, then shut Ollama down.
+# The /root/.ollama/models directory is captured into the image layer.
+RUN /bin/bash -c '\
+    OLLAMA_DEBUG=WARN ollama serve &>/tmp/ollama-build.log & \
+    OLLAMA_PID=$! && \
+    echo "[build] Waiting for Ollama..." && \
+    for i in $(seq 1 60); do ollama list >/dev/null 2>&1 && break; sleep 2; done && \
+    echo "[build] Pulling qwen2.5-coder:3b..." && \
+    ollama pull qwen2.5-coder:3b && \
+    echo "[build] Creating bola-analyzer model from Modelfile..." && \
+    ollama create bola-analyzer -f /app/Modelfile && \
+    echo "[build] Model baked successfully." && \
+    kill $OLLAMA_PID 2>/dev/null; wait $OLLAMA_PID 2>/dev/null; true'
 
 # --- Stage 2: Pre-load RAG knowledge base during build ---
 # Loads all 215 BOLA training examples + knowledge patterns into ChromaDB.
 # Also downloads and caches the sentence-transformers embedding model (~90 MB).
-# Result: /data/chroma/ contains the fully indexed knowledge base.
 RUN PYTHONPATH=/app/src BOLA_AI_DATA=/data \
     python /app/src/training/load_knowledge.py && \
     echo "[build] RAG knowledge base pre-loaded into /data/chroma."
@@ -50,7 +58,6 @@ ENV OLLAMA_BASE_URL=http://127.0.0.1:11434
 ENV OLLAMA_MODEL=bola-analyzer
 ENV PYTHONPATH=/app/src
 ENV BOLA_AI_PRELOAD=1
-# Safer defaults inside container; sampling params also set in llm.py + Modelfile.
 ENV OLLAMA_FLASH_ATTENTION=0
 ENV BOLA_AI_OLLAMA_TEMPERATURE=0.7
 ENV BOLA_AI_OLLAMA_TOP_P=0.9
