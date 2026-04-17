@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl zstd ca-ce
 
 # App dependencies
 WORKDIR /app
+# CPU-only PyTorch first — otherwise pip pulls CUDA/NVIDIA wheels (~multi-GB) and GitHub Actions runners hit ENOSPC during pip install.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic chromadb sentence-transformers python-multipart jinja2 pyyaml
 
 # App source + training data
@@ -45,6 +47,12 @@ ENV OLLAMA_BASE_URL=http://127.0.0.1:11434
 ENV OLLAMA_MODEL=bola-analyzer
 ENV PYTHONPATH=/app/src
 ENV BOLA_AI_PRELOAD=1
+# Safer defaults inside container; sampling params also set in llm.py + Modelfile.
+ENV OLLAMA_FLASH_ATTENTION=0
+ENV BOLA_AI_OLLAMA_TEMPERATURE=0.7
+ENV BOLA_AI_OLLAMA_TOP_P=0.9
+ENV BOLA_AI_OLLAMA_TOP_K=40
+ENV BOLA_AI_OLLAMA_REPEAT_PENALTY=1.1
 
 EXPOSE 8000
 

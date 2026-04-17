@@ -7,7 +7,8 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 COPY data/ /app/data/
 
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic chromadb sentence-transformers python-multipart jinja2 pyyaml
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch && \
+    pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic chromadb sentence-transformers python-multipart jinja2 pyyaml
 
 ENV BOLA_AI_DATA=/data
 ENV OLLAMA_HOST=http://ollama:11434
