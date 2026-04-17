@@ -45,7 +45,7 @@ if [ "$MODEL_READY" = "0" ] && [ -f /app/models/published/LATEST ]; then
     cat "${BUNDLE_DIR}"/trained_model_bundle.part-* > /tmp/trained_model_bundle.tar && \
     tar -xf /tmp/trained_model_bundle.tar -C /app/models/published && \
     rm -f /tmp/trained_model_bundle.tar
-    # q4_K_M avoids llama_sampler_dist_apply assertion crashes on CPU with F16 GGUF from merged HF weights.
+    # q4_K_M avoids F16 path; pair with Ollama v0.20.5 in the image (0.20.7+ can still hit llama_sampler on some bundles).
     if ollama create "${MODEL_NAME}" --quantize q4_K_M -f /app/models/published/active/Modelfile 2>&1; then
       echo "[bola-ai] Trained bundle imported successfully."
       MODEL_READY=1
@@ -59,7 +59,8 @@ fi
 if [ "$MODEL_READY" = "0" ]; then
   if [ "$ALLOW_MODEL_PULL" = "1" ]; then
     echo "[bola-ai] Pulling qwen2.5-coder:3b base model (requires internet)..."
-    ollama pull qwen2.5-coder:3b && ollama create "${MODEL_NAME}" --quantize q4_K_M -f /app/Modelfile
+    # Base model is already quantized upstream; only add Modelfile/teaching — no re-quantize.
+    ollama pull qwen2.5-coder:3b && ollama create "${MODEL_NAME}" -f /app/Modelfile
     echo "[bola-ai] Base model ready."
     MODEL_READY=1
   else

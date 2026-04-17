@@ -4,9 +4,12 @@
 # Users run: docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
 FROM python:3.11-slim AS base
 
+# Pinned Ollama — "latest" from ollama.com has regressed (e.g. 0.20.7) with merged+Q4 GGUF + llama_sampler on CPU.
+ARG OLLAMA_VERSION=0.20.5
+
 # Install ollama binary (keep curl and ca-certificates; skip autoremove to preserve /bin/sh)
 RUN apt-get update && apt-get install -y --no-install-recommends curl zstd ca-certificates && \
-    curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst | tar x --zstd -C /usr && \
+    curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" | tar x --zstd -C /usr && \
     rm -rf /var/lib/apt/lists/*
 
 # App dependencies
