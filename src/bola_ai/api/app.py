@@ -170,7 +170,13 @@ _auto_analysis_status: str = "idle"
 _auto_analysis_result: Optional[str] = None
 _AUTO_ANALYZE_QUERY = (
     "Analyze only uploaded user documents for likely security vulnerabilities. "
-    "Prioritize object-level authorization findings when evidenced, and return up to 3 highest-confidence, source-grounded findings with exact endpoints and concise class-appropriate verification steps."
+    "Check in this order: "
+    "1) Field-level authorization gaps — can the authenticated user inject field names they should not see (add extra fields to the request)? "
+    "2) Write escalation — can the user set attributes outside their permission scope (add restricted fields to a write request)? "
+    "3) Object enumeration — can the user access objects they do not own by swapping IDs? "
+    "4) Cross-principal isolation — only if the above are insufficient. "
+    "Return up to 3 highest-confidence, source-grounded findings with exact endpoints, grounded field names or IDs from the artifact, and concise class-appropriate verification steps. "
+    "Do not default to a two-user comparison for findings that a single authenticated session can prove."
 )
 
 
