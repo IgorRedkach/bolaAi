@@ -49,9 +49,8 @@ htmlcov/
 # so trained model artifacts can be pushed with git and baked into images.
 models/*
 !models/published/
-!models/published/**
-!models/packaged/
-!models/packaged/**
+!models/published/LATEST
+!models/published/README.md
 *.bin
 *.gguf
 
