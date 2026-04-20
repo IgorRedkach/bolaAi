@@ -39,6 +39,7 @@ def run_analysis(
     model: Optional[str] = None,
     source_filter: Optional[list[str]] = None,
     timeout: Optional[float] = None,
+    num_predict: Optional[int] = None,
 ) -> str:
     """Orchestrates the Security Research Oracle logic."""
     log_memory(logger, "oracle_analysis start")
@@ -93,7 +94,7 @@ def run_analysis(
         {"role": "user", "content": user_prompt},
     ]
 
-    raw_output = chat(messages, model=model, timeout=timeout)
+    raw_output = chat(messages, model=model, timeout=timeout, num_predict=num_predict)
     
     # Normalization (Oracle Sanitization)
     sanitized_report = _normalize_report(
@@ -117,6 +118,7 @@ def analyze_for_bola(
     model: Optional[str] = None,
     source_filter: Optional[list[str]] = None,
     timeout: Optional[float] = None,
+    num_predict: Optional[int] = None,
 ) -> str:
     """Backward-compatible alias for run_analysis."""
     effective_query = custom_query if custom_query is not None else query
@@ -127,6 +129,7 @@ def analyze_for_bola(
         model=model,
         source_filter=source_filter,
         timeout=timeout,
+        num_predict=num_predict,
     )
 
 

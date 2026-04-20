@@ -53,7 +53,12 @@ LOG_LEVEL = os.environ.get("BOLA_AI_LOG_LEVEL", "INFO")
 
 # Startup automation
 AUTO_ANALYZE_ON_STARTUP = os.environ.get("BOLA_AI_AUTO_ANALYZE_ON_STARTUP", "1").lower() in ("1", "true", "yes")
-# Startup auto-analysis tuning: keep it quick and non-blocking for interactive users.
-AUTO_ANALYZE_TIMEOUT_SECONDS = float(os.environ.get("BOLA_AI_AUTO_ANALYZE_TIMEOUT", "420"))
-AUTO_ANALYZE_N_CONTEXT = int(os.environ.get("BOLA_AI_AUTO_ANALYZE_N_CONTEXT", "8"))
+# Startup auto-analysis tuning.
+# Timeout raised to 900 s (15 min) — CPU-only inference on a cold model can exceed 7 min
+# for large HAR files; 420 s was too tight for first-run cold starts.
+AUTO_ANALYZE_TIMEOUT_SECONDS = float(os.environ.get("BOLA_AI_AUTO_ANALYZE_TIMEOUT", "900"))
+AUTO_ANALYZE_N_CONTEXT = int(os.environ.get("BOLA_AI_AUTO_ANALYZE_N_CONTEXT", "6"))
 AUTO_ANALYZE_MAX_SOURCES = int(os.environ.get("BOLA_AI_AUTO_ANALYZE_MAX_SOURCES", "2"))
+# Limit output tokens for startup auto-analysis to keep generation fast.
+# Interactive /analyze calls use the full OLLAMA_NUM_PREDICT budget (768).
+AUTO_ANALYZE_NUM_PREDICT = int(os.environ.get("BOLA_AI_AUTO_ANALYZE_NUM_PREDICT", "512"))

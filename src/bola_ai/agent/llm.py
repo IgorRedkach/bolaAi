@@ -39,6 +39,7 @@ def chat(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     timeout: Optional[float] = None,
+    num_predict: Optional[int] = None,
 ) -> str:
     """Send chat messages to Ollama and return the assistant reply.
 
@@ -46,12 +47,15 @@ def chat(
     ``LLM_CHAT_TIMEOUT_SECONDS`` — do not increase to work around slow answers;
     use faster model/hardware or shorter prompts. For ingest/stack delays, use
     ``BOLA_AI_INGEST_TIMEOUT`` / ``BOLA_AI_STACK_WAIT_SECONDS`` instead.
+
+    ``num_predict`` overrides ``OLLAMA_NUM_PREDICT`` for this call only; useful
+    for startup auto-analysis which benefits from a tighter token budget.
     """
     t = LLM_CHAT_TIMEOUT_SECONDS if timeout is None else float(timeout)
     url = f"{base_url or OLLAMA_BASE_URL}/api/chat"
     options: dict = {
         "num_ctx": OLLAMA_NUM_CTX,
-        "num_predict": OLLAMA_NUM_PREDICT,
+        "num_predict": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
     }
     if _NUM_THREAD > 0:
         options["num_thread"] = _NUM_THREAD

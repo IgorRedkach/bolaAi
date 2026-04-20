@@ -256,6 +256,7 @@ def _auto_ingest_and_analyze():
             n_context=app_config.AUTO_ANALYZE_N_CONTEXT,
             source_filter=selected_sources,
             timeout=app_config.AUTO_ANALYZE_TIMEOUT_SECONDS,
+            num_predict=app_config.AUTO_ANALYZE_NUM_PREDICT,
         )
         _auto_analysis_result = result
         _auto_analysis_status = "done"
