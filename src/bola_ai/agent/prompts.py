@@ -137,7 +137,7 @@ GROUNDING_USER_SUFFIX = """
 
 ---
 **Mandatory grounding:**
-- Every path, operation name, field, and recordId you cite must be in the artifact. Do not add endpoints, operations, or product names that are **not** in that excerpt.
+- Every path, operation name, field, and recordId you cite must appear **verbatim** from the artifact. Do not add endpoints, operations, or product names that are **not** in that excerpt.
 - For runbooks and detailed steps: use **only** the real API surface from the excerpt — no filler examples from other contexts.
 - If the user asks for curls, use exact request shapes (URLs, descriptors, field arrays) from the artifact.
 - If a protocol requested by the user is not present in the excerpt, explicitly say it is not applicable for this artifact.
