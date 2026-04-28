@@ -40,6 +40,7 @@ def chat(
     base_url: Optional[str] = None,
     timeout: Optional[float] = None,
     num_predict: Optional[int] = None,
+    grammar: Optional[str] = None,
 ) -> str:
     """Send chat messages to Ollama and return the assistant reply.
 
@@ -59,6 +60,8 @@ def chat(
     }
     if _NUM_THREAD > 0:
         options["num_thread"] = _NUM_THREAD
+    if grammar is not None:
+        options["grammar"] = grammar
     payload = {
         "model": model or OLLAMA_MODEL,
         "messages": messages,
@@ -78,7 +81,52 @@ def chat(
     return msg.get("content", "").strip()
 
 
-def is_available(base_url: Optional[str] = None) -> bool:
+def generate(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    timeout: Optional[float] = None,
+    num_predict: Optional[int] = None,
+    num_ctx: Optional[int] = None,
+    grammar: Optional[str] = None,
+) -> str:
+    """Send a raw text prompt to Ollama /api/generate and return the completion.
+
+    Use this instead of ``chat`` when the model was fine-tuned on raw text (e.g.
+    the ``### Instruction / ### Context / ### Response`` template) rather than
+    through the model's chat template.  The generate endpoint does NOT apply any
+    chat template, so the model sees the prompt exactly as given.
+    """
+    t = LLM_CHAT_TIMEOUT_SECONDS if timeout is None else float(timeout)
+    url = f"{base_url or OLLAMA_BASE_URL}/api/generate"
+    options: dict = {
+        "num_ctx": num_ctx if num_ctx is not None else OLLAMA_NUM_CTX,
+        "num_predict": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
+    }
+    if _NUM_THREAD > 0:
+        options["num_thread"] = _NUM_THREAD
+    if grammar is not None:
+        options["grammar"] = grammar
+    payload = {
+        "model": model or OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": options,
+    }
+    logger.debug("POST %s (generate) model=%s num_ctx=%s num_thread=%s",
+                 url, payload.get("model"), options.get("num_ctx"), options.get("num_thread"))
+    with httpx.Client(timeout=t) as client:
+        resp = client.post(url, json=payload)
+        resp.raise_for_status()
+    data = resp.json()
+    response_text = data.get("response", "")
+    if not response_text:
+        logger.warning("Ollama generate returned empty response")
+    return response_text.strip()
+
+
+
     """Check if Ollama is reachable (startup probe; not chat inference)."""
     from bola_ai.config import OLLAMA_STARTUP_PROBE_TIMEOUT
 

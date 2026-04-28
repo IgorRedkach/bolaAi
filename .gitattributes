@@ -1,0 +1,1 @@
+models/merged/bola-har-q4km.gguf filter=lfs diff=lfs merge=lfs -text

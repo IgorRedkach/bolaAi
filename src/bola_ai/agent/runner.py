@@ -46,8 +46,23 @@ def run_analysis(
     timeout: Optional[float] = None,
     num_predict: Optional[int] = None,
 ) -> str:
-    """Orchestrates the Security Research Oracle logic."""
+    """Orchestrates the Security Research Oracle logic.
+
+    When the ingested content is a HAR file, this function routes through the
+    PRISM-HAR two-pass pipeline (deterministic extractor → bola-har specialist
+    LLM → mechanical validator → deterministic renderer). All other artifact
+    types follow the existing RAG + LLM path.
+    """
     log_memory(logger, "oracle_analysis start")
+
+    # ── HAR fast-path: route through PRISM-HAR pipeline ─────────────────────
+    if source_filter:
+        har_sources = [s for s in source_filter if s.lower().endswith(".har")]
+        if har_sources:
+            har_result = _run_har_pipeline(store, har_sources=har_sources, model=model)
+            if har_result is not None:
+                log_memory(logger, "oracle_analysis finish (har pipeline)")
+                return har_result
 
     # 1. Pattern Retrieval (The 'How' to audit)
     patterns = store.search(
@@ -990,6 +1005,85 @@ def _fix_curl_path_mismatch(report: str, allowed_paths: list[str]) -> str:
         result.append(part)
 
     return "".join(result)
+
+
+def _run_har_pipeline(
+    store: DocStore,
+    *,
+    har_sources: Optional[list[str]] = None,
+    model: Optional[str] = None,
+) -> Optional[str]:
+    """Execute the PRISM-HAR two-pass pipeline on a HAR document.
+
+    Retrieves the original raw HAR JSON from disk (persisted at ingest time)
+    instead of going through the chunk store, which discards the JSON structure.
+    Returns the rendered Markdown report or None if no HAR content is found.
+    """
+    try:
+        from bola_ai.rag.har_extractor import HarExtractor
+        from bola_ai.rag.fact_index import FactIndex
+        from bola_ai.agent.har_analyzer import HarAnalyzer
+        from bola_ai.agent.validator import FindingValidator
+        from bola_ai.agent.report_renderer import ReportRenderer
+    except ImportError as exc:
+        logger.warning("HAR pipeline modules not available: %s", exc)
+        return None
+
+    # Try to get the raw HAR JSON by source name (persisted at ingest time).
+    # Fall back to searching the chunk store if the raw file is not available
+    # (e.g. for sources ingested before this feature was added).
+    raw_text: Optional[str] = None
+    for src in (har_sources or []):
+        raw_text = store.get_raw_har(src)
+        if raw_text:
+            logger.debug("HAR pipeline: loaded raw HAR for source=%s (%d chars)", src, len(raw_text))
+            break
+
+    if raw_text is None:
+        # Legacy fallback: search chunks for HAR content
+        raw_docs = store.search("HAR HTTP Archive entries method url response",
+                                n_results=3, source_filter=har_sources)
+        for doc in raw_docs:
+            candidate = doc.get("content", "")
+            if '"log"' in candidate and '"entries"' in candidate:
+                raw_text = candidate
+                logger.debug("HAR pipeline: using chunk fallback for source detection")
+                break
+
+    if raw_text is None:
+        return None
+
+    extractor = HarExtractor()
+    if not extractor.is_har(raw_text):
+        return None
+
+    artifact = extractor.extract(raw_text)
+    if artifact is None:
+        return None
+
+    fact_index = FactIndex.build(artifact)
+    analyzer = HarAnalyzer(use_grammar=True)
+    analysis = analyzer.analyze(artifact, model=model)
+
+    if analysis.error:
+        logger.warning("HAR analyzer error: %s", analysis.error)
+        return None
+
+    validator = FindingValidator()
+    validation = validator.validate_all(analysis.findings, fact_index)
+
+    renderer = ReportRenderer()
+    report = renderer.render(
+        accepted=validation.accepted,
+        rejected=validation.rejected,
+        artifact=artifact,
+    )
+
+    logger.info(
+        "HAR pipeline complete: %d accepted / %d rejected (model=%s)",
+        report.finding_count, report.rejected_count, analysis.model_used,
+    )
+    return report.markdown
 
 
 def _extract_paths_from_context(context: str) -> list[str]:

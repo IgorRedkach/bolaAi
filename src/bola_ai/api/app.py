@@ -722,6 +722,83 @@ Bot: ## Verification steps ...
             logger.exception("Chat analyze failed: %s", e)
             return {"role": "assistant", "content": f"Error: {e}", "type": "error"}
 
+    @app.post("/api/analyze_har")
+    def analyze_har(
+        content: Optional[str] = Form(None),
+        file: Optional[UploadFile] = File(None),
+        model: Optional[str] = Form(None),
+    ):
+        """Run the PRISM-HAR pipeline directly on a raw HAR JSON without ingesting.
+
+        Accepts either:
+        - ``file``: a .har file upload (multipart)
+        - ``content``: raw HAR JSON as a form string
+
+        The HAR is NOT chunked or stored — it is fed directly through the
+        deterministic extractor → specialist LLM → validator → renderer pipeline.
+        Returns a structured Markdown security report.
+        """
+        if content:
+            raw_text = content
+        elif file:
+            raw_bytes = file.file.read()
+            try:
+                raw_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                raise HTTPException(400, "HAR file must be UTF-8 encoded.")
+        else:
+            raise HTTPException(400, "Provide either 'content' (raw HAR JSON) or 'file' upload.")
+
+        try:
+            from bola_ai.rag.har_extractor import HarExtractor
+            from bola_ai.rag.fact_index import FactIndex
+            from bola_ai.agent.har_analyzer import HarAnalyzer
+            from bola_ai.agent.validator import FindingValidator
+            from bola_ai.agent.report_renderer import ReportRenderer
+        except ImportError as exc:
+            raise HTTPException(500, f"HAR pipeline modules not available: {exc}")
+
+        extractor = HarExtractor()
+        if not extractor.is_har(raw_text):
+            raise HTTPException(400, "Provided content is not a valid HAR JSON file.")
+
+        artifact = extractor.extract(raw_text)
+        if artifact is None:
+            raise HTTPException(422, "HAR file parsed but no entries could be extracted.")
+
+        fact_index = FactIndex.build(artifact)
+        analyzer = HarAnalyzer(use_grammar=True)
+        analysis = analyzer.analyze(artifact, model=model or None)
+
+        if analysis.error:
+            logger.warning("analyze_har: model error: %s", analysis.error)
+
+        validator_obj = FindingValidator()
+        validation = validator_obj.validate_all(analysis.findings, fact_index)
+        renderer = ReportRenderer()
+        report = renderer.render(
+            accepted=validation.accepted,
+            rejected=validation.rejected,
+            artifact=artifact,
+        )
+
+        logger.info(
+            "analyze_har: complete entries=%d accepted=%d rejected=%d model=%s",
+            artifact.entry_count, report.finding_count,
+            report.rejected_count, analysis.model_used,
+        )
+        return {
+            "status": "ok",
+            "report": report.markdown,
+            "finding_count": report.finding_count,
+            "high_count": report.high_count,
+            "medium_count": report.medium_count,
+            "low_count": report.low_count,
+            "rejected_count": report.rejected_count,
+            "entries_analyzed": artifact.entry_count,
+            "model_used": analysis.model_used,
+        }
+
     @app.get("/", response_class=HTMLResponse)
     def index():
         """Minimal UI: ingest text and run analysis."""

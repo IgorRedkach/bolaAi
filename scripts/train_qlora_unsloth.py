@@ -143,7 +143,13 @@ def _resolve_target_modules(model, requested: list[str]) -> list[str]:
 
 def _resolve_torch_dtype(torch, cfg: dict, use_cuda: bool):
     if not use_cuda:
-        # CPU training must use float32 — bfloat16/float16 ops are not stable on CPU
+        # Allow explicit bfloat16 on CPU to halve model RAM (12GB → 6GB for 3B).
+        # LoRA adapter params are cast to float32 separately after get_peft_model().
+        # Only enable when config has precision.dtype = bfloat16 AND allow_bf16_cpu: true.
+        allow_bf16 = bool(cfg.get("allow_bf16_cpu", False))
+        pref_cpu = str(cfg.get("precision", {}).get("dtype", "float32")).strip().lower()
+        if allow_bf16 and pref_cpu == "bfloat16":
+            return torch.bfloat16
         return torch.float32
     pref = str(
         cfg.get("precision", {}).get("dtype", cfg.get("quantization", {}).get("compute_dtype", "bfloat16"))
@@ -299,9 +305,11 @@ def main() -> int:
     resume_ckpt: str | bool = False
     if args.resume:
         if args.resume.lower() == "latest":
+            # Sort by modification time (not step number) so we don't accidentally
+            # pick a completed run from a different model size / different run directory.
             candidates = sorted(
                 ROOT.glob("models/adapters/qlora_*/checkpoint-*"),
-                key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else 0,
+                key=lambda p: p.stat().st_mtime,
             )
             if candidates:
                 resume_ckpt = str(candidates[-1])
@@ -352,11 +360,24 @@ def main() -> int:
             "Install with: pip install -e \".[train]\""
         ) from exc
 
+    # Lower OOM kill priority for this process as much as permitted without root.
+    # Unprivileged processes can only increase oom_score_adj (not decrease below 0),
+    # but setting it explicitly to 0 removes the +100 default set by some cgroup configs.
+    try:
+        import pathlib as _pl
+        _oom_path = _pl.Path("/proc/self/oom_score_adj")
+        _cur = int(_oom_path.read_text().strip())
+        if _cur > 0:
+            _oom_path.write_text("0\n")
+            _print_progress(f"OOM score adj lowered: {_cur} → 0 (training process protected)")
+    except Exception as _e:
+        _print_progress(f"OOM adj note: {_e}")
+
     use_cuda = torch.cuda.is_available()
     device_info = f"CUDA ({torch.cuda.get_device_name(0)})" if use_cuda else "CPU (no GPU detected)"
     _print_progress(f"Compute device: {device_info}")
     if not use_cuda:
-        _print_progress("WARNING: CPU-only mode. Using float32 + no quantization. Max model: 0.5B recommended.")
+        _print_progress("WARNING: CPU-only mode. Using float32 (or bf16 if allow_bf16_cpu=true). Max model: 0.5B recommended in fp32.")
 
     train_cap = args.max_train_samples if args.max_train_samples > 0 else 0
     valid_cap = max(1, args.max_train_samples // 5 or 1) if args.max_train_samples > 0 else 0
@@ -380,6 +401,9 @@ def main() -> int:
         else None
     )
 
+    # Free any garbage before loading the large model to maximise available RAM.
+    import gc as _gc
+    _gc.collect()
     _print_progress(f"Loading model: {base_model} (dtype={torch_dtype}, quantization={quant_mode})")
     _write_heartbeat(run_id, "load_model", note="loading base model", base_model=base_model, dtype=str(torch_dtype))
     model = AutoModelForCausalLM.from_pretrained(
@@ -404,6 +428,18 @@ def main() -> int:
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_cfg)
+    # When base model is bfloat16 (memory-saving CPU mode), cast only the trainable
+    # LoRA adapter parameters to float32 so gradient accumulation stays numerically stable.
+    if not use_cuda and torch_dtype != torch.float32:
+        lora_fp32_count = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.data = param.data.to(torch.float32)
+                lora_fp32_count += 1
+        _print_progress(
+            f"Mixed-precision CPU mode: base model kept in {torch_dtype}, "
+            f"{lora_fp32_count} LoRA adapter tensors cast to float32 for stable gradients"
+        )
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     _print_progress(f"LoRA applied: {trainable:,} trainable / {total:,} total params ({100*trainable/total:.2f}%)")
@@ -522,8 +558,8 @@ def main() -> int:
         max_steps=max_steps if max_steps > 0 else -1,
         logging_steps=1,
         save_strategy="steps",
-        save_steps=50,           # Save checkpoint every 50 steps so we can resume if interrupted
-        save_total_limit=3,      # Keep last 3 checkpoints
+        save_steps=int(cfg["training"].get("save_steps", 50)),
+        save_total_limit=int(cfg["training"].get("save_total_limit", 3)),
         report_to=[],
         bf16=False,
         fp16=False,

@@ -25,6 +25,9 @@ COPY data/ /app/data/
 # Bake Modelfile (system prompt + 15 domain few-shot examples)
 COPY docker/Modelfile /app/Modelfile
 
+# Bake HAR specialist Modelfile
+COPY docker/Modelfile.bola-har /app/Modelfile.bola-har
+
 # --- Stage 1: Pre-bake qwen2.5-coder:3b + create bola-analyzer model at BUILD time ---
 # This makes the image fully self-contained: no internet access needed at runtime.
 # We start Ollama, pull the base model, apply our Modelfile, then shut Ollama down.
@@ -41,8 +44,25 @@ RUN /bin/bash -c '\
     echo "[build] Model baked successfully." && \
     kill $OLLAMA_PID 2>/dev/null; wait $OLLAMA_PID 2>/dev/null; true'
 
+# --- Stage 1b: Bake bola-har specialist model (Q4_K_M GGUF via Git LFS) ---
+# The GGUF file is tracked via Git LFS: models/merged/bola-har-q4km.gguf (~1.8 GiB).
+# Produced by: scripts/merge_adapter_fp16.py + llama-quantize Q4_K_M.
+# The file must be present (pulled from LFS) before docker build runs.
+COPY models/merged/bola-har-q4km.gguf /app/models/merged/bola-har-q4km.gguf
+RUN /bin/bash -c '\
+    OLLAMA_DEBUG=WARN ollama serve &>/tmp/ollama-build-har.log & \
+    OLLAMA_PID=$! && \
+    echo "[build] Waiting for Ollama (bola-har)..." && \
+    for i in $(seq 1 60); do ollama list >/dev/null 2>&1 && break; sleep 2; done && \
+    echo "[build] Creating bola-har specialist model..." && \
+    ollama create bola-har -f /app/Modelfile.bola-har && \
+    echo "[build] bola-har model baked successfully." && \
+    kill $OLLAMA_PID 2>/dev/null; wait $OLLAMA_PID 2>/dev/null; true'
+
 # --- Stage 2: Pre-load RAG knowledge base during build ---
-# Loads all 215 BOLA training examples + knowledge patterns into ChromaDB.
+# Loads canonical knowledge patterns from data/knowledge/*.md into ChromaDB.
+# Training examples are NOT loaded — they live in data/training/ and are used
+# only by the training pipeline, never by the inference RAG store.
 # Also downloads and caches the sentence-transformers embedding model (~90 MB).
 RUN PYTHONPATH=/app/src BOLA_AI_DATA=/data \
     python /app/src/training/load_knowledge.py && \

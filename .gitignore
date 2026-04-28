@@ -45,14 +45,13 @@ htmlcov/
 .pytest_cache/
 
 # Models
-# Keep local training cache ignored, but allow published split bundles and manifests
-# so trained model artifacts can be pushed with git and baked into images.
+# Ignore all local training cache.  The ONE exception is models/merged/bola-har-q4km.gguf
+# which is tracked via Git LFS so CI can COPY it into the Docker build context.
 models/*
-!models/published/
-!models/published/LATEST
-!models/published/README.md
+!models/merged/
+models/merged/*
+!models/merged/bola-har-q4km.gguf
 *.bin
-*.gguf
 
 # Env
 .env
