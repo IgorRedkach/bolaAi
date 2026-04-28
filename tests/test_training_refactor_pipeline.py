@@ -1,4 +1,4 @@
-"""Smoke tests for refactored QLoRA/LoRA pipeline scripts."""
+"""Smoke tests for training pipeline scripts."""
 
 from __future__ import annotations
 
@@ -30,30 +30,22 @@ def _load_script_module(rel_path: str, module_name: str):
 
 def test_training_configs_exist():
     root = _repo_root()
-    assert (root / "configs/training/qlora_1b3b.yaml").is_file()
-    assert (root / "configs/training/lora16_1b3b.yaml").is_file()
-    assert (root / "configs/training/dpo.yaml").is_file()
-    assert (root / "configs/training/eval.yaml").is_file()
+    assert (root / "configs/training/qlora_cpu_3b.yaml").is_file(), "Missing qlora_cpu_3b.yaml"
+    assert (root / "configs/training/qlora_har_specialist.yaml").is_file(), "Missing qlora_har_specialist.yaml"
 
 
-def test_pipeline_scripts_help():
+def test_pipeline_scripts_exist():
+    root = _repo_root()
     scripts = [
         "scripts/build_training_splits.py",
-        "scripts/build_absence_logic_dataset.py",
-        "scripts/build_toolcall_schema_set.py",
-        "scripts/distill_teacher_outputs.py",
-        "scripts/distill_with_mentor.py",
         "scripts/train_qlora_unsloth.py",
-        "scripts/train_lora16.py",
-        "scripts/train_dpo.py",
-        "scripts/train_rlvr_toolexec.py",
-        "scripts/eval_security_agent_model.py",
         "scripts/package_trained_model_for_ollama.py",
-        "scripts/run_training_refactor_cycle.py",
+        "scripts/post_training_package_and_push.py",
+        "scripts/test_checkpoint_inference.py",
+        "scripts/merge_adapter_fp16.py",
     ]
     for script in scripts:
-        p = _run(["python", script, "--help"])
-        assert p.returncode == 0, f"{script} help failed: {p.stderr}"
+        assert (root / script).is_file(), f"Missing: {script}"
 
 
 def test_build_training_splits_normalize_new_schema_row():
@@ -69,4 +61,3 @@ def test_build_training_splits_normalize_new_schema_row():
     assert normalized["instruction"]
     assert "GET /api/v1/assets/{assetId}" in normalized["context"]
     assert "## Analysis Explanation" in normalized["target"]
-

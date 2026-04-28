@@ -127,6 +127,7 @@ def generate(
 
 
 
+def is_available(*, base_url: Optional[str] = None) -> bool:
     """Check if Ollama is reachable (startup probe; not chat inference)."""
     from bola_ai.config import OLLAMA_STARTUP_PROBE_TIMEOUT
 
