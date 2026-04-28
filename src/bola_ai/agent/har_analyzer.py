@@ -129,18 +129,24 @@ class HarAnalyzer:
         text = raw.strip()
         # Attempt to extract the JSON array from the response even if
         # the model emitted surrounding prose.
+        # Use raw_decode from the first "[" to avoid issues when the model
+        # emits trailing content after the array (e.g. "[]↵explanation...").
         start = text.find("[")
-        end = text.rfind("]") + 1
-        if start == -1 or end == 0:
+        if start == -1:
             logger.warning("No JSON array found in model output: %r", text[:200])
             return HarAnalysisResult(model_used=model_used,
                                      error="no JSON array in output")
-        json_text = text[start:end]
         try:
-            items = json.loads(json_text)
+            decoder = json.JSONDecoder()
+            items, _ = decoder.raw_decode(text, start)
         except json.JSONDecodeError as exc:
-            return HarAnalysisResult(model_used=model_used,
-                                     error=f"JSON parse error: {exc}")
+            # Fallback: try to extract up to the matching closing bracket
+            end = text.rfind("]") + 1
+            try:
+                items = json.loads(text[start:end])
+            except json.JSONDecodeError:
+                return HarAnalysisResult(model_used=model_used,
+                                         error=f"JSON parse error: {exc}")
         if not isinstance(items, list):
             return HarAnalysisResult(model_used=model_used,
                                      error="top-level is not a list")

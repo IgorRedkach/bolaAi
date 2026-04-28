@@ -108,7 +108,7 @@ def _preprocess_har(text: str) -> str:
         if "content-type" in headers:
             lines.append(f"Content-Type: {headers['content-type']}")
 
-        post_data = req.get("postData", {})
+        post_data = req.get("postData") or {}
         body_text = post_data.get("text", "")
         if body_text:
             try:
