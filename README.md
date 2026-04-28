@@ -1,185 +1,216 @@
 # BOLA AI
 
-**World-class, portable AI agent that finds system vulnerabilities by investigating documentation and log traces.**  
-Free, local-only, disposable, no network at runtime. Covers BOLA, broken access control, insecure design, integrity failures, injection, misconfiguration, logging gaps, and more. For goals and architecture see [docs/GOALS.md](docs/GOALS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). **Low-memory:** [docs/MEMORY.md](docs/MEMORY.md).
+Portable, local-only AI agent that finds security vulnerabilities by analyzing API documentation, HAR captures, OpenAPI specs, and log traces. Covers BOLA/IDOR, broken access control, insecure design, integrity failures, injection, misconfiguration, and logging gaps.
 
-## Quick start
+Runs entirely offline inside a single Docker container — no cloud, no API keys, no internet at runtime.
 
-### 1. Install (Python 3.10+)
+---
+
+## Quickest start
+
+```bash
+docker run -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
+```
+
+Open **http://localhost:8000** in your browser.
+
+Drop your HAR files, API docs, or OpenAPI specs into `~/Downloads/shared` before (or after) running. The container auto-ingests everything it finds there on startup and produces a security analysis automatically — no typing required.
+
+To enforce strict network isolation:
+
+```bash
+docker run --network=none -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
+```
+
+---
+
+## What it does
+
+1. **Ingest** — paste or upload your artifact (HAR file, OpenAPI YAML, architecture doc, log trace).
+2. **Analyze** — the agent finds authorization gaps, enumeration opportunities, logic flaws, and more.
+3. **Report** — receives structured findings with evidence quotes, threat hypotheses, and copy-pasteable `curl` verification commands.
+
+Two analysis modes run automatically:
+
+- **PRISM-HAR pipeline** — activated when the input is a HAR file. Deterministically extracts structured facts, sends them to the fine-tuned `bola-har` specialist model under grammar constraints, validates each finding against extracted facts, and renders deterministic curl PoC commands. No hallucinated endpoints.
+- **General pipeline** — for all other inputs (docs, specs, logs). Uses RAG retrieval against a pre-loaded security knowledge base + the `bola-analyzer` model.
+
+---
+
+## Web UI
+
+Visit `http://localhost:8000` after `docker run`. The chat interface lets you:
+
+- Upload files via the UI or reference files already in `/shared-docs`
+- Type `ingest <filename>` to ingest a file from the shared volume
+- Type `analyze` or ask a question to trigger analysis
+- Read findings with markdown rendering directly in the browser
+
+---
+
+## REST API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Web chat UI |
+| `GET` | `/health` | Health check: Ollama status, chunk count, auto-ingest state |
+| `POST` | `/ingest` | Upload a file or paste text (`multipart/form-data`: `file` or `content` + `source`) |
+| `POST` | `/ingest_shared` | Ingest a file by name from the `/shared-docs` volume |
+| `POST` | `/analyze` | Run analysis. Optional JSON body: `{"query": "..."}` |
+| `GET` | `/api/auto_analysis` | Retrieve the cached result of the startup auto-analysis |
+| `POST` | `/reset` | Wipe user-ingested documents (keeps the pre-loaded knowledge base) |
+
+Example with `curl`:
+
+```bash
+# Ingest a HAR file
+curl -X POST http://localhost:8000/ingest \
+  -F "file=@/path/to/capture.har" -F "source=capture.har"
+
+# Run analysis
+curl -X POST http://localhost:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Check for IDOR in user endpoints"}' \
+  -m 360
+```
+
+---
+
+## CLI
+
+With the container (or local API) running on port 8000:
 
 ```bash
 pip install -e .
-# Optional: pip install -e ".[dev]"  # for pytest
+
+bola-ai health --wait
+bola-ai ingest --file docs/openapi.yaml --source openapi
+bola-ai analyze
+bola-ai analyze --query "Check for privilege escalation in admin routes"
 ```
 
-### 2. Run API (local)
+Override API URL: `bola-ai --api http://localhost:8000 health`
 
-**Option A — with Ollama (full analysis)**  
-Start Ollama and pull a model:
+---
+
+## docker compose
+
+Use `docker compose` to manage the lifecycle (persistent named volume, auto-restart):
+
+```yaml
+# docker-compose.yml (already in repo root)
+services:
+  bola-ai:
+    image: ghcr.io/igorredkach/bolai:latest
+    ports: ["8000:8000"]
+    volumes:
+      - ./shared_docs:/shared-docs
+      - ollama_data:/root/.ollama
+      - chroma_data:/data/chroma
+volumes:
+  ollama_data:
+  chroma_data:
+```
 
 ```bash
-ollama serve   # if not already running
+docker compose up -d
+docker compose logs -f bola-ai
+docker compose down            # keep volumes
+docker compose down -v         # wipe all data
+```
+
+---
+
+## Configuration
+
+Key environment variables (all optional):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BOLA_AI_SHARED_DOCS_DIR` | `/shared-docs` | Path scanned for auto-ingest on startup |
+| `BOLA_AI_LLM_CHAT_TIMEOUT` | `900` | Max seconds for one LLM reply |
+| `BOLA_AI_N_CONTEXT` | `12` | RAG chunks for interactive `/analyze` |
+| `BOLA_AI_OLLAMA_NUM_CTX` | `8192` | Context window (tokens) |
+| `BOLA_AI_LOG_MEMORY` | `` | Set to `1` to log process RSS at each step |
+| `BOLA_AI_LOG_LEVEL` | `INFO` | Logging verbosity |
+
+Full reference: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#configuration-reference-environment-variables)
+
+---
+
+## Local dev setup (without Docker)
+
+```bash
+git clone https://github.com/IgorRedkach/bolaAi
+cd bolaAi
+pip install -e ".[dev]"
+
+ollama serve
 ollama pull qwen2.5-coder:3b
+
+export PYTHONPATH=src
+uvicorn bola_ai.api.app:create_app --host 0.0.0.0 --port 8000 --factory --reload
 ```
 
-Then start the API:
-
-```bash
-export PYTHONPATH=src
-uvicorn bola_ai.api.app:create_app --host 0.0.0.0 --port 8000 --factory
-export PYTHONPATH=src
-uvicorn bola_ai.api.app:create_app --host 0.0.0.0 --port 8000 --factory
-# Or from repo root: sh scripts/run_api_lowmem.sh
-```
-
-Open: http://localhost:8000
-
-### 3. Use the CLI
-
-With the API running on port 8000:
-
-```bash
-export PYTHONPATH=src
-python -m bola_ai.cli health
-python -m bola_ai.cli ingest --file docs/GOALS.md --source goals
-python -m bola_ai.cli analyze
-python -m bola_ai.cli analyze --query "Check for IDOR in user endpoints"
-```
-
-Override API URL: `python -m bola_ai.cli --api http://localhost:8000 health`
-
-### 4. Docker — ready-to-go container (offline by default)
-
-Image includes **RAG preloaded** with BOLA patterns. The stack runs **without any requests to the open internet** at runtime (see [docs/GOALS.md](docs/GOALS.md) and [docs/OFFLINE_DEPLOY.md](docs/OFFLINE_DEPLOY.md)).
-
-**Offline (default):** Model must already be in the Ollama volume (e.g. from a previous one-time setup or from an imported chunked bundle). No pull at runtime.
+Or use the local dev compose (builds from source, live-reloads `src/`):
 
 ```bash
 docker compose -f docker/docker-compose.yml build bola-ai
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-**One-time online setup** (to fill the model volume, then run offline later):
+---
+
+## Tests
+
+Unit tests (no live stack required):
 
 ```bash
-OLLAMA_ONLINE_SETUP=1 docker compose -f docker/docker-compose.yml up -d
-# After model is ready, stop (without -v): docker compose -f docker/docker-compose.yml down
-# Then on this or an air-gapped machine: docker compose -f docker/docker-compose.yml up -d
+pip install -e ".[dev]"
+BOLA_AI_SKIP_LIVE_E2E=1 BOLA_AI_FAKE_EMBEDDER=1 PYTHONPATH=src pytest tests/ -v
 ```
 
-**Deploy by chunks (air-gapped):** Export image and optional Ollama volume as chunked files, transfer, reassemble, and run locally. See [docs/OFFLINE_DEPLOY.md](docs/OFFLINE_DEPLOY.md) and `scripts/export_image_chunks.sh`, `scripts/import_image_chunks.sh`, `scripts/export_ollama_volume_chunks.sh`.
-
-To wipe data when done: `docker compose -f docker/docker-compose.yml down -v`
-
-**Logs:** `docker logs bola-ai` shows app and entrypoint logs. The compose file mounts `../src` into the container so code changes apply without rebuilding.
-
-### 5. Fake system info → BOLA suggestions
-
-To communicate with the model using sample/fake system info and get suggestions: ingest the text (or file), then call analyze. Example:
+Live E2E tests (requires running API + Ollama):
 
 ```bash
-# With API running (e.g. docker compose up -d):
-sh scripts/demo_fake_system_info.sh
-# Or: curl -X POST http://localhost:8000/ingest -F "content=YOUR_DOCS" -F "source=my_system"
-#     curl -X POST http://localhost:8000/analyze
+PYTHONPATH=src pytest tests/ -v
 ```
 
-### 6. Training data and RAG knowledge
+---
 
-Generate BOLA examples (JSONL + RAG chunks):
+## Training the HAR specialist model
 
-```bash
-PYTHONPATH=src python src/training/generate_data.py
-# Writes data/training/bola_training.jsonl and data/training/bola_rag_chunks.txt
-```
-
-Load knowledge into the RAG store (requires real embedder; run with API deps installed):
-
-```bash
-PYTHONPATH=src python src/training/load_knowledge.py
-# Reads data/knowledge/*.md and data/training/bola_rag_chunks.txt
-```
-
-From-scratch local model rebuild only (no gradient training):
-
-```bash
-python scripts/retrain_model_from_scratch.py --model-name bola-analyzer --allow-shortcut-rebuild
-```
-
-Refactored adapter-training pipeline (QLoRA + LoRA16 + DPO + eval):
-
-```bash
-python scripts/run_training_refactor_cycle.py --track both
-```
-
-Git-pushable trained model artifacts for image builds:
-
-```bash
-# Produces split parts under models/published/<model>-<ts>/trained_model_bundle.part-*
-# and updates models/published/LATEST for Dockerfile.allinone consumption.
-python scripts/package_trained_model_for_ollama.py --run-dir models/adapters/<run_id> --model-name bola-analyzer
-```
-
-Memory-safe chunked teaching mode:
-
-```bash
-python scripts/run_training_refactor_cycle.py --track both --chunk-size-tokens 512 --chunk-overlap-tokens 64
-```
-
-This cycle runs real training stages (no simulation mode). Install training deps first:
+The `bola-har` model baked into the image was fine-tuned with QLoRA on `data/training/sft/bola_har_specialist_train.jsonl`. To retrain:
 
 ```bash
 pip install -e ".[train]"
+# Fine-tune
+python scripts/train_qlora_unsloth.py --config configs/training/qlora_har_specialist.yaml
+# Merge adapter → GGUF → upload as GitHub Release asset
+python scripts/post_training_package_and_push.py --run-dir models/adapters/<run_id>
 ```
 
-Runbook and promotion gates:
-- `docs/TRAINING_RUNBOOK_QLORA_LORA.md`
-- `docs/MODEL_PROMOTION_GATES.md`
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full training and build pipeline.
 
-**Training data for retraining:** The tool uses a RAG knowledge base (not full LLM weight fine-tuning). To add your own examples and optionally retrain or fine-tune elsewhere:
+---
 
-- **RAG:** Add markdown under `data/knowledge/` and/or append to the output of `generate_data.py`; run `load_knowledge.py` to reload. No weights: all chunks are used for retrieval.
-- **JSONL for external fine-tuning:** `data/training/bola_training.jsonl` holds BOLA examples. You can add rows (with optional weights in your own pipeline) and use them with Ollama or other tools for fine-tuning. See [docs/GOALS.md](docs/GOALS.md) Success criteria.
+## Architecture and goals
 
-## API
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — components, pipeline details, Docker build strategy, env vars
+- [docs/GOALS.md](docs/GOALS.md) — mission, vulnerability taxonomy, design principles
+- [docs/MEMORY.md](docs/MEMORY.md) — RAM profile and low-memory guidance
+- [docs/OFFLINE_DEPLOY.md](docs/OFFLINE_DEPLOY.md) — air-gapped deployment (chunk export/import)
 
-| Method | Path      | Description                    |
-|--------|-----------|--------------------------------|
-| GET    | /         | Simple HTML UI                 |
-| GET    | /health   | Health + Ollama + chunk count |
-| POST   | /ingest   | Body: form `content` or `file` |
-| POST   | /analyze  | Body: optional `{"query": "..."}` |
+---
 
-## Tests (low memory)
+## Data and disposability
 
-**Timeouts (Issue 16–17):**
+- Default data dir: `./data` (ChromaDB). Configure via `BOLA_AI_DATA`.
+- For a disposable run: delete the Docker volume after use — no sensitive content persists.
+- `docker compose down -v` wipes all volumes.
 
-| What | Env / behavior | Policy |
-|------|----------------|--------|
-| **LLM reply** (`/analyze`) | `BOLA_AI_LLM_CHAT_TIMEOUT` (default **900s**); client `BOLA_AI_ANALYZE_CLIENT_TIMEOUT` (**960s**) | Smaller local model on CPU can still require long runs for complex HAR analysis. |
-| **Ingest / learn docs** | `BOLA_AI_INGEST_TIMEOUT` (**600s**) | CLI `ingest`, scripts; embedding can be slow. |
-| **Stack startup** | `bola-ai health --wait`, `BOLA_AI_STACK_WAIT_SECONDS` (**900s**) | Wait for Ollama after `docker compose up`. |
-| **Ollama probe** | `BOLA_AI_OLLAMA_STARTUP_PROBE_TIMEOUT` (**60s**) | Cold `ollama list`, not chat. |
-
-For `curl` on `/analyze`, use e.g. `-m 360`. For large ingests, ensure client timeout ≥ `BOLA_AI_INGEST_TIMEOUT`.
-
-**Live API QA:** `docker compose up -d` then `sh scripts/qa_api_live.sh http://localhost:8000`. Or `pytest tests/test_api_live.py -v` with API running.
-
-**Per-test timing (live E2E):** [docs/PERFORMANCE_TESTING.md](docs/PERFORMANCE_TESTING.md) — `python scripts/run_live_e2e_tests_one_by_one.py` → `docs/live_e2e_test_timings.md`.
-
-**E2E (always live):** With the stack up, run **`PYTHONPATH=src pytest tests/`** — live E2E is **required** when those tests are collected (fails fast if API/Ollama down). See [docs/E2E_TESTING.md](docs/E2E_TESTING.md). Emergency without Docker: `BOLA_AI_SKIP_LIVE_E2E=1`. Issues: [docs/ISSUES.md](docs/ISSUES.md).
-
-Monitor memory: run `sh scripts/check_memory.sh 2` in another terminal; if Python exceeds ~10 GB, kill it. See [docs/MEMORY.md](docs/MEMORY.md).
-
-## Data and disposal
-
-- Default data dir: `./data` (ChromaDB + configurable path via `BOLA_AI_DATA`).
-- For a disposable run: use a temp dir or Docker volume and delete it after use so no sensitive docs or artifacts remain.
+---
 
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
-
----
-
-**When all goals are reached:** accept/keep the changes when Cursor prompts you, so the project is saved.

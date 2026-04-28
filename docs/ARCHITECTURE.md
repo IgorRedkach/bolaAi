@@ -71,7 +71,7 @@ Primary vulnerability taxonomy (checked in priority order): field-level authoriz
 - **Custom model:** `bola-har` — created from `docker/Modelfile.bola-har`. Sampling: `temperature 0.3`, `top_p 0.85`, `repeat_penalty 1.2`. System prompt enforces verbatim evidence quoting and JSON-only output.
 - **GBNF grammar constraint:** Every inference call from `HarAnalyzer` passes the `FINDING_GRAMMAR` constant to Ollama's `/api/chat` as `options.grammar`. This prevents structurally invalid JSON at the token level — not just post-hoc.
 - **Used for:** HAR inputs routed through the PRISM-HAR pipeline exclusively.
-- **Build-time baking:** Merged adapter weights are copied from `models/merged/bola-har-merged/` during `docker build`. A second `ollama create bola-har` run captures them in a separate image layer.
+- **Build-time baking:** The merged adapter is stored as a Q4_K_M GGUF file (`bola-har-q4km.gguf`, ~1.8 GiB) and published as a GitHub Release asset. During `docker build`, the Dockerfile downloads the GGUF using a build secret (`gh_token`) and runs `ollama create bola-har -f Modelfile.bola-har` to bake it into a separate image layer. The `scripts/merge_adapter_fp16.py` script produces the merged safetensors; `llama.cpp` tools then quantize to GGUF.
 
 **Ollama version:** Pinned to `v0.20.5` (`ARG OLLAMA_VERSION=0.20.5`) to keep `llama_sampler` stable on CPU.  
 **Internal endpoint:** `http://127.0.0.1:11434/api/chat` (container-local only).
@@ -215,7 +215,7 @@ docker build -f docker/Dockerfile.allinone -t bolai .
 Three baking stages run inside the build:
 
 1. **`bola-analyzer` model bake:** Ollama starts, pulls `qwen2.5-coder:3b`, runs `ollama create bola-analyzer -f /app/Modelfile`, then shuts down. General-purpose model weights are captured in the `/root/.ollama/models` layer.
-2. **`bola-har` model bake:** Merged adapter weights are copied from `models/merged/bola-har-merged/`. Ollama starts again, runs `ollama create bola-har -f /app/Modelfile.bola-har`, then shuts down. HAR specialist model weights are captured in a second layer. The merge step (`scripts/post_training_package_and_push.py`) must have run before the Docker build.
+2. **`bola-har` model bake:** The Dockerfile downloads `bola-har-q4km.gguf` (~1.8 GiB Q4_K_M) from a GitHub Release asset using a Docker build secret (`--secret id=gh_token`). Ollama starts, runs `ollama create bola-har -f /app/Modelfile.bola-har`, then shuts down. HAR specialist model weights are captured in a second layer. Pass the secret at build time: `docker build --secret id=gh_token,env=GITHUB_TOKEN -f docker/Dockerfile.allinone .`
 3. **RAG bake:** `src/training/load_knowledge.py` loads the canonical knowledge base into ChromaDB at `/data/chroma` and downloads + caches the `all-MiniLM-L6-v2` embedding model. Both are captured in the `/data` layer.
 
 ### Published Image
@@ -321,8 +321,7 @@ bolaAi/
 │   └── training/
 │       ├── load_knowledge.py           # Loads knowledge into ChromaDB (build time + dev)
 │       ├── generate_data.py            # Generates JSONL + RAG chunks from seeds
-│       ├── ai_teacher_prompts.py       # AI-assisted training data prompts
-│       └── reviewing_iter.py           # Review iteration helper
+│       └── ai_teacher_prompts.py       # AI-assisted training data prompts
 ├── docker/
 │   ├── Dockerfile.allinone             # Production image (both models + RAG baked in)
 │   ├── Modelfile                       # bola-analyzer: system prompt + sampling params
@@ -362,16 +361,14 @@ bolaAi/
 │   └── fixtures/                       # Test document corpus (30+ scenarios)
 ├── docs/
 │   ├── ARCHITECTURE.md                 # This file
-│   ├── GOALS.md
-│   ├── MEMORY.md
-│   ├── proposals/
-│   │   └── REFACTORING_PLAN.md         # PRISM-HAR implementation specification
-│   └── eval_reports/                   # Model evaluation reports
-├── shared_docs/                        # Developer test documents (not in image)
+│   ├── GOALS.md                        # Mission, vulnerability taxonomy, design principles
+│   ├── MEMORY.md                       # RAM profile and low-memory guidance
+│   ├── OFFLINE_DEPLOY.md               # Air-gapped deployment (chunk export/import)
+│   └── proposals/                      # Design proposals and data generation standards
+├── shared_docs/                        # Developer test documents (not in image; volume-mounted at runtime)
 ├── .github/workflows/
 │   └── publish-image.yml               # CI: build + push to ghcr.io on src/data/docker changes
 ├── pyproject.toml                      # Package metadata + optional train/dev deps
-├── QUICKSTART.md
 └── README.md
 ```
 

@@ -33,11 +33,11 @@ Set `BOLA_AI_LOG_LEVEL=DEBUG` for verbose logs (e.g. in docker-compose or when r
 **Check consumption regularly** so Python does not exceed the tool limit (~10 GB). If you see a Python process above 10 GB, kill it to avoid OOM.
 
 ```bash
-# One-off check (from repo root)
-sh scripts/check_memory.sh
+# One-off check
+ps aux --sort=-%mem | head -10
 
 # Watch every 2 seconds while running tests or API
-sh scripts/check_memory.sh 2
+watch -n 2 'ps aux --sort=-%mem | head -10'
 ```
 
 Targets: **tool (BOLA AI / uvicorn / pytest) ≤ 10 GB**; **agent/IDE ≤ 6 GB**. On a 32 GB system both can run if kept under these limits.

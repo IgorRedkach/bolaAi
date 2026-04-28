@@ -809,52 +809,6 @@ def _normalize_report(
     return report.strip()
 
 
-def _enforce_comparative_block(
-    report: str,
-    *,
-    user_query: str,
-    allowed_paths: List[str],
-    base_urls: List[str],
-) -> str:
-    """Guarantee explicit comparative curl verification when user asks for it."""
-    q = (user_query or "").lower()
-    asks_comparative = (
-        ("two token" in q)
-        or ("two-token" in q)
-        or ("same object path" in q)
-        or ("comparative verification" in q)
-    )
-    if not asks_comparative or not allowed_paths:
-        return report
-
-    low = (report or "").lower()
-    has_token_pair = (
-        ("auth_token_1" in low and "auth_token_2" in low)
-        or ("principal 1" in low and "principal 2" in low)
-        or ("user a" in low and "user b" in low)
-    )
-    has_curl = "curl" in low
-    if has_token_pair and has_curl:
-        return report
-
-    base = base_urls[0].rstrip("/") if base_urls else "https://api.example.com"
-    path = _select_primary_api_path(allowed_paths)
-    method = "POST" if (" post " in low or "post /" in low or " -x post" in low) else "GET"
-    addendum = (
-        "\n\n## Comparative Verification (Enforced)\n"
-        "Use two different identities against the same endpoint path:\n\n"
-        "```bash\n"
-        f"curl -i -X {method} \"{base}{path}\" \\\n"
-        "  -H \"Authorization: Bearer AUTH_TOKEN_1\" \\\n"
-        "  -H \"Content-Type: application/json\"\n"
-        "```\n\n"
-        "```bash\n"
-        f"curl -i -X {method} \"{base}{path}\" \\\n"
-        "  -H \"Authorization: Bearer AUTH_TOKEN_2\" \\\n"
-        "  -H \"Content-Type: application/json\"\n"
-        "```\n"
-    )
-    return (report or "").rstrip() + addendum
 
 
 def _extract_method_path_pairs(context: str) -> list[tuple[str, str]]:

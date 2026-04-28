@@ -21,6 +21,7 @@ from bola_ai.agent.runner import analyze_for_bola, run_analysis, is_fast_path_qu
 from bola_ai import config as app_config
 from bola_ai.logging_config import setup_logging
 from bola_ai.memory import log_memory
+from bola_ai.rag.rag_isolation import build_session_source_filter, warn_if_contaminated
 from bola_ai.rag.store import DocStore
 
 # Lazy singleton store (thread-safe)
@@ -214,6 +215,7 @@ def _auto_ingest_and_analyze():
     _auto_ingest_status = "done"
     logger.info("Auto-ingest: done. User docs: %s, total chunks: %d",
                  list(_user_doc_sources), store.count())
+    warn_if_contaminated(store)
 
     if not has_user_docs():
         logger.info("Auto-analyze: no user docs ingested, skipping")
@@ -240,7 +242,8 @@ def _auto_ingest_and_analyze():
     _auto_analysis_status = "analyzing"
     logger.info("Auto-analyze: starting security analysis on %d user doc(s)...", len(_user_doc_sources))
     try:
-        user_sources = list(_user_doc_ingest_order) if _user_doc_ingest_order else sorted(_user_doc_sources)
+        raw_sources = list(_user_doc_ingest_order) if _user_doc_ingest_order else sorted(_user_doc_sources)
+        user_sources = build_session_source_filter(raw_sources)
         max_sources = max(1, int(app_config.AUTO_ANALYZE_MAX_SOURCES))
         selected_sources = user_sources[-max_sources:] if len(user_sources) > max_sources else user_sources
         if len(user_sources) > max_sources:
@@ -415,7 +418,7 @@ def create_app() -> FastAPI:
                 "or check GET /api/auto_analysis, then retry your query.",
             )
         try:
-            user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
+            user_sources = build_session_source_filter(sorted(_user_doc_sources)) if _user_doc_sources else None
             if is_fast_path_query(query):
                 result = analyze_for_bola(
                     store,
@@ -696,7 +699,7 @@ Bot: ## Verification steps ...
                     ),
                     "type": "info",
                 }
-            user_sources = sorted(_user_doc_sources) if _user_doc_sources else None
+            user_sources = build_session_source_filter(sorted(_user_doc_sources)) if _user_doc_sources else None
             if is_fast_path_query(msg):
                 result = analyze_for_bola(
                     store,

@@ -2,7 +2,7 @@
 
 ## Mission
 
-Build a **world-class, portable AI agent** that finds system vulnerabilities by investigating documentation and/or log traces. The tool serves government and regulated organizations (healthcare, finance, defense, critical infrastructure) in keeping **critical systems safe**. It runs **entirely offline**, produces **auditor-actionable findings** grounded in provided artifacts, and treats **quality as non-negotiable**: problems are analyzed and fixed at the root, never worked around.
+Build a **portable AI agent** that finds system vulnerabilities by investigating documentation and/or log traces. The tool serves government and regulated organizations (healthcare, finance, defense, critical infrastructure) in keeping **critical systems safe**. It runs **entirely offline**, produces **auditor-actionable findings** grounded in provided artifacts, and treats **quality as non-negotiable**: problems are analyzed and fixed at the root, never worked around.
 
 Mission interpretation guardrails:
 - The vulnerability taxonomy is **non-exhaustive** and continuously extensible.

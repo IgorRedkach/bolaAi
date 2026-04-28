@@ -2,7 +2,7 @@
 
 Runs after pytests and any manual test scripts when you are doing full quality sign-off.
 
-**Agent quality loop:** Full-cycle agents follow **`docs/AGENT_PROMPT_FULL_CYCLE.md`**, track weak spots in **`docs/AGENT_WEAK_PLACES.md`**, and continue until registry + ISSUES are clear (see **`docs/ANALYSIS_AGENT_LOOP_STOP_GAP.md`**).
+**Agent quality loop:** Run full analysis cycles, track gaps in `docs/GOALS.md`, and continue until all tests pass and findings are grounded.
 
 **E2E is always live:** Tests that hit the real API + LLM **do not silently skip** — **`pytest tests/` fails at collection** if the API + Ollama are not reachable at `BOLA_AI_LIVE_URL` (default `http://localhost:8000`). If something fails, file or update an **OPEN** issue, fix it, and re-run the loop.
 
@@ -106,7 +106,7 @@ Before ingesting (or after reset), any analysis question should return a `type: 
    | Security analysis | Finding headings (`###`) or path + rationale | No paths and no rationale language |
    | Outcome interpretation | Explanation of both 200 and 403 | One or both outcomes missing |
 
-   `scripts/run_agent_e2e_loop_once.py` runs `_check_logical_correctness(query, report)` for every step and reports failures in the `automated_checks.logical_correctness_summary` field of the output JSON. Any `logical_match: false` entry **must** be investigated and logged as an OPEN issue if it is a repeatable tool failure.
+   Verify per-response logical correctness manually. Any repeatable tool failure should be tracked in `docs/GOALS.md` as a pending goal or filed as a code fix.
 
 1. **Fresh documentation every meaningful E2E cycle**  
    Generate new test documentation from scratch for that run: think through the **system under test**, **plausible vulnerability angles**, and **what you expect** the tool to surface before you write the doc.  
@@ -143,23 +143,14 @@ Before ingesting (or after reset), any analysis question should return a `type: 
    | **Per-response analysis** | For **every** response: grounded? vulnerability-relevant? verification sound? |
 
 6. **Improvements become work items**  
-   Anything that should change product or process → **`docs/ISSUES.md`** and/or **`docs/GOALS.md`**.
+   Anything that should change product or process → **`docs/GOALS.md`** (new or updated goal entries).
 
 ---
 
 ## Scripted smoke is support only (not a substitute for adaptive E2E)
 
-`scripts/run_agent_e2e_loop_once.py` runs a baseline multi-question flow. Use it to **regress** grounding and follow-up shape; **still** run adaptive person-style passes when you care about depth.
+Run `pytest tests/test_api_live.py -v` with the stack up for a scripted baseline smoke pass. **Still** run adaptive person-style passes when you care about depth.
 
-When `BOLA_AI_E2E_FIXTURE` is **not** set, the script auto-selects fixtures using diversity rotation and records the selection metadata in `docs/e2e_loop_last_run.json`.
-
-The script now:
-1. Cleans `shared_docs/` before starting
-2. Stages the fixture into `shared_docs/`
-3. Verifies auto-ingest or explicitly ingests via chat
-4. Verifies answers reference the ingested document's endpoints
-
-Log output: **`docs/e2e_loop_last_run.json`**.
 Release sign-off = full **`pytest tests/`** with stack up.
 
 ---
@@ -178,7 +169,7 @@ After API-level E2E completes, verify the **interactive web chat** works:
 
 **Pass criteria:** All 7 steps succeed. The chat UI renders markdown correctly, auto-scrolls, and the loading spinner appears during analysis.
 
-If any step fails, file an **OPEN** issue in `docs/ISSUES.md` and fix before claiming E2E completion.
+If any step fails, track it in `docs/GOALS.md` and fix before claiming E2E completion.
 
 ---
 
@@ -212,7 +203,8 @@ If any step above is not possible, the cycle must be reported as **OPEN/BLOCKED*
 
 When promoting a newly trained adapter-based model:
 
-1. Run training/eval pipeline and confirm all metric gates in `docs/MODEL_PROMOTION_GATES.md`.
-2. Package model assets with `scripts/package_trained_model_for_ollama.py`.
-3. Re-run this E2E workflow against the promoted model image.
-4. Block promotion if placeholder-path artifacts or q5 grounding failures appear.
+1. Run training/eval pipeline and verify quality metrics.
+2. Merge adapter and quantize to GGUF: `scripts/merge_adapter_fp16.py` + `llama-quantize Q4_K_M`.
+3. Upload new GGUF as a GitHub Release asset and update `ARG BOLA_HAR_ASSET_ID` in `docker/Dockerfile.allinone`.
+4. Re-run this E2E workflow against the promoted model image.
+5. Block promotion if placeholder-path artifacts or grounding failures appear.
