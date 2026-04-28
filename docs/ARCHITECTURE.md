@@ -14,7 +14,7 @@ Primary vulnerability taxonomy (checked in priority order): field-level authoriz
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                  Docker host  (optional: --network=none)               │
+│                            Docker host                                 │
 │                                                                        │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
 │  │  Container: ghcr.io/igorredkach/bolai:latest (all-in-one)        │  │
@@ -229,14 +229,12 @@ Published automatically by GitHub Actions on every push to `main` that touches `
 ### Running
 
 ```bash
-# Standard — auto-ingests and analyzes any files in ~/my-docs on startup
+# Drop your files into a shared folder, then start the container
+cp capture.har ~/my-docs/
 docker run -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
-
-# Strict isolation — no outbound traffic
-docker run --network=none -p 8000:8000 -v ~/my-docs:/shared-docs ghcr.io/igorredkach/bolai:latest
 ```
 
-Open `http://localhost:8000/chat`.
+Open `http://localhost:8000/chat`. Files in the shared folder are auto-ingested and analyzed on startup — no internet required.
 
 ---
 
@@ -258,7 +256,6 @@ Open `http://localhost:8000/chat`.
 | `BOLA_AI_MAX_CONTEXT_CHARS` | `12000` | Max total RAG context characters sent to LLM |
 | `BOLA_AI_SHARED_DOCS_DIR` | `/shared-docs` | Path scanned for auto-ingest on startup |
 | `BOLA_AI_DATA` | `data` | Root path for ChromaDB and training data |
-| `BOLA_AI_ALLOW_MODEL_PULL` | `1` | Pull model from internet if pre-baked model missing |
 | `BOLA_AI_FAKE_EMBEDDER` | `` | Set to `1` to skip sentence-transformers (tests only) |
 | `BOLA_AI_LOG_MEMORY` | `` | Set to `1` to log process RSS at each pipeline step |
 | `BOLA_AI_LOG_LEVEL` | `INFO` | Logging verbosity |
@@ -282,7 +279,7 @@ Only one model is resident in memory at a time; Ollama unloads and reloads as ne
 
 ## Security and Disposability
 
-- **No telemetry or outbound calls** from the application or LLM at runtime (use `--network=none` for strict enforcement).
+- **No telemetry or outbound calls** from the application or LLM at runtime — all inference is local.
 - **No persistence of user inputs** beyond the container/volume lifecycle — wipe the ChromaDB volume between sessions.
 - **No API keys or cloud credentials required** — fully offline after `docker pull`.
 - **RAG contamination prevention** — `rag_isolation.py` enforces source-level filtering per analysis session; fixture and adversarial docs are blocklisted and never surface in retrieval even if mistakenly ingested.

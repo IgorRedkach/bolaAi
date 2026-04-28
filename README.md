@@ -8,19 +8,24 @@ Runs entirely offline inside a single Docker container — no cloud, no API keys
 
 ## Quickest start
 
+1. Drop your files (HAR captures, API docs, OpenAPI specs) into a local folder first:
+
+```bash
+mkdir -p ~/Downloads/shared
+cp your-api-capture.har ~/Downloads/shared/
+```
+
+2. Start the container:
+
 ```bash
 docker run -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
 ```
 
-Open **http://localhost:8000** in your browser.
+3. Open **http://localhost:8000/chat** in your browser.
 
-Drop your HAR files, API docs, or OpenAPI specs into `~/Downloads/shared` before (or after) running. The container auto-ingests everything it finds there on startup and produces a security analysis automatically — no typing required.
+The container auto-ingests every file in the shared folder on startup and runs a security analysis pass automatically — findings appear in the chat without you having to type anything.
 
-To enforce strict network isolation:
-
-```bash
-docker run --network=none -p 8000:8000 -v ~/Downloads/shared:/shared-docs ghcr.io/igorredkach/bolai:latest
-```
+The tool makes no outbound network calls during analysis — everything runs locally inside the container.
 
 ---
 
@@ -95,28 +100,18 @@ Override API URL: `bola-ai --api http://localhost:8000 health`
 
 ## docker compose
 
-Use `docker compose` to manage the lifecycle (persistent named volume, auto-restart):
-
-```yaml
-# docker-compose.yml (already in repo root)
-services:
-  bola-ai:
-    image: ghcr.io/igorredkach/bolai:latest
-    ports: ["8000:8000"]
-    volumes:
-      - ./shared_docs:/shared-docs
-      - ollama_data:/root/.ollama
-      - chroma_data:/data/chroma
-volumes:
-  ollama_data:
-  chroma_data:
-```
+The `docker-compose.yml` in the repo root wraps the same all-in-one image with named volumes for easier lifecycle management:
 
 ```bash
+# Copy your files to shared_docs/ first (auto-ingested on startup)
+cp your-capture.har shared_docs/
+
 docker compose up -d
+# Open http://localhost:8000/chat
+
 docker compose logs -f bola-ai
-docker compose down            # keep volumes
-docker compose down -v         # wipe all data
+docker compose down            # keep volumes (data persists)
+docker compose down -v         # wipe all data (clean slate)
 ```
 
 ---

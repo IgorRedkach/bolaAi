@@ -28,28 +28,13 @@ done
 
 # --- 2. Verify model is available (pre-baked at build time) ---
 MODEL_NAME="${OLLAMA_MODEL:-bola-analyzer}"
-ALLOW_MODEL_PULL="${BOLA_AI_ALLOW_MODEL_PULL:-1}"
-MODEL_READY=0
 
 if ollama list 2>/dev/null | grep -q "${MODEL_NAME}"; then
   echo "[bola-ai] Model ${MODEL_NAME} ready (pre-baked)."
-  MODEL_READY=1
-fi
-
-# Fallback: pull base model from internet if pre-baked model is missing
-# (should not normally happen; image is self-contained)
-if [ "$MODEL_READY" = "0" ]; then
-  if [ "$ALLOW_MODEL_PULL" = "1" ]; then
-    echo "[bola-ai] Pre-baked model not found — pulling qwen2.5-coder:3b from internet..."
-    ollama pull qwen2.5-coder:3b && \
-      ollama create "${MODEL_NAME}" -f /app/Modelfile && \
-      echo "[bola-ai] Base model ready." && \
-      MODEL_READY=1
-  fi
-fi
-
-if [ "$MODEL_READY" = "0" ]; then
-  echo "[bola-ai] ERROR: No model available. Set BOLA_AI_ALLOW_MODEL_PULL=1 to allow internet fallback."
+else
+  echo "[bola-ai] ERROR: Pre-baked model '${MODEL_NAME}' not found in this image."
+  echo "[bola-ai] This image is self-contained — all models are baked in at build time."
+  echo "[bola-ai] Pull a fresh image: docker pull ghcr.io/igorredkach/bolai:latest"
   exit 1
 fi
 
