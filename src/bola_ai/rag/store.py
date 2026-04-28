@@ -1,5 +1,6 @@
 """ChromaDB document store for RAG. ChromaDB is imported lazily in __init__ to avoid multi-GB load until a store is used."""
 
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -12,6 +13,21 @@ from bola_ai.rag.fake_embedder import FakeEmbedder
 logger = get_logger("rag.store")
 
 CHROMA_MAX_BATCH = 5000
+
+
+def _is_har_json(text: str) -> bool:
+    """Return True if *text* is a HAR JSON (has {"log": {"entries": [...]}})."""
+    stripped = (text or "").lstrip()
+    if not stripped.startswith("{"):
+        return False
+    if '"log"' not in stripped[:1000]:
+        return False
+    try:
+        import json as _json
+        data = _json.loads(stripped)
+        return isinstance(data, dict) and "log" in data and "entries" in data["log"]
+    except Exception:
+        return False
 
 # LocalEmbedder imported lazily to avoid loading sentence_transformers in tests
 
@@ -54,7 +70,16 @@ class DocStore:
         source: str = "upload",
         doc_id: Optional[str] = None,
     ) -> list[str]:
-        """Chunk content, embed, and add to store. Returns list of chunk ids."""
+        """Chunk content, embed, and add to store. Returns list of chunk ids.
+
+        When content is a valid HAR JSON file, the original text is also persisted
+        to disk so the PRISM-HAR pipeline can retrieve it intact later via
+        ``get_raw_har``.
+        """
+        # Persist the original HAR JSON before preprocessing
+        if _is_har_json(content):
+            self._persist_raw_har(source, content)
+            logger.debug("add_document: persisted raw HAR for source=%s", source)
         chunks = chunk_text(content)
         if not chunks:
             logger.debug("add_document: no chunks from content len=%s", len(content or ""))
@@ -125,6 +150,29 @@ class DocStore:
                 "distance": dists[i] if i < len(dists) else None,
             })
         return out
+
+    def get_raw_har(self, source: str) -> Optional[str]:
+        """Return the original HAR JSON text for ``source``, or None if not stored.
+
+        The raw text is written by ``add_document`` when it detects a HAR file and
+        is persisted across restarts under ``{persist_directory}/raw_har/``.
+        """
+        path = self._raw_har_path(source)
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8")
+            except Exception as exc:
+                logger.warning("get_raw_har: failed to read %s: %s", path, exc)
+        return None
+
+    def _persist_raw_har(self, source: str, content: str) -> None:
+        path = self._raw_har_path(source)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def _raw_har_path(self, source: str) -> Path:
+        safe = hashlib.md5(source.encode()).hexdigest()[:16]
+        return self.persist_directory / "raw_har" / f"{safe}.json"
 
     def count(self) -> int:
         """Return number of chunks in the collection."""

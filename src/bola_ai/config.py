@@ -48,6 +48,14 @@ N_CONTEXT = int(os.environ.get("BOLA_AI_N_CONTEXT", "12"))
 # Optional cap on total context string length (chars); 0 = no cap
 MAX_CONTEXT_CHARS = int(os.environ.get("BOLA_AI_MAX_CONTEXT_CHARS", "12000"))
 
+# HAR specialist model tuning
+# Context window for the bola-har specialist model (HAR files can be large).
+BOLA_HAR_NUM_CTX = int(os.environ.get("BOLA_HAR_NUM_CTX", "8192"))
+# Max new tokens from the HAR specialist model (JSON array of findings).
+BOLA_HAR_NUM_PREDICT = int(os.environ.get("BOLA_HAR_NUM_PREDICT", "2048"))
+# Ollama model tag for the fine-tuned HAR specialist adapter.
+BOLA_HAR_MODEL = os.environ.get("BOLA_HAR_MODEL", "bola-har")
+
 # Logging
 LOG_LEVEL = os.environ.get("BOLA_AI_LOG_LEVEL", "INFO")
 

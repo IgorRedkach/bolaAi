@@ -1,0 +1,53 @@
+run_name: qlora_har_specialist
+mode: qlora
+# HAR-specialist fine-tuning for PRISM-HAR pipeline.
+# Target: bola-har model that outputs structured Finding JSON from HAR ENTRIES LIST.
+# GPU: L4 24GB (g2-standard-8). T4 also works — reduce per_device_train_batch_size to 4.
+# Expected runtime: ~4-5h on L4 Spot, ~9h on T4 Spot.
+base_model: Qwen/Qwen2.5-Coder-3B-Instruct
+dataset:
+  sft_train: data/training/sft/bola_har_specialist_train.jsonl
+  sft_valid: data/training/sft/bola_har_specialist_eval.jsonl
+quantization:
+  load_in_4bit: true
+  quant_type: nf4
+  compute_dtype: bfloat16
+precision:
+  dtype: bfloat16
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+training:
+  per_device_train_batch_size: 8   # L4 24GB — use 4 for T4 16GB
+  gradient_accumulation_steps: 2   # effective batch = 16
+  learning_rate: 0.0002
+  num_train_epochs: 3
+  max_steps: 0
+  gradient_checkpointing: true
+  optimizer: paged_adamw_8bit
+  max_seq_length: 2048
+  sample_packing: false
+  warmup_steps: 50
+  lr_scheduler_type: cosine
+  weight_decay: 0.01
+  save_strategy: steps
+  save_steps: 50                   # checkpoint every ~15min — spot preemption safety
+  save_total_limit: 3
+  evaluation_strategy: steps
+  eval_steps: 100
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  logging_steps: 10
+  report_to: none
+outputs:
+  adapters_dir: models/adapters
+  merged_dir: models/merged

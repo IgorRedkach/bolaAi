@@ -1,6 +1,16 @@
 """
-Load BOLA knowledge (patterns + generated examples) into the RAG store.
-Run after generate_data.py. Use with: python -m training.load_knowledge (from repo root).
+Load BOLA knowledge patterns into the RAG store.
+
+Loads ONLY canonical knowledge files from data/knowledge/*.md:
+  - bola_patterns.md
+  - ai_teacher_bola_quality_patterns.md
+  - phase1_small_model_guidelines.md
+
+Training examples (data/training/*.jsonl, bola_rag_chunks.txt) are intentionally
+excluded from the RAG store to prevent training-inference overlap: the model
+must reason from retrieved evidence, not pattern-match against memorised examples.
+
+Use with: python -m training.load_knowledge (from repo root).
 """
 
 import os
@@ -47,12 +57,11 @@ def main():
         store.reset()
 
     knowledge_dir = repo_root / "data" / "knowledge"
-    training_dir = repo_root / "data" / "training"
 
     loaded = 0
 
     if knowledge_dir.exists():
-        for f in knowledge_dir.glob("*.md"):
+        for f in sorted(knowledge_dir.glob("*.md")):
             logger.info("Loading knowledge file: %s", f.name)
             text = f.read_text(encoding="utf-8")
             store.add_document(text, source=f.name)
@@ -60,21 +69,9 @@ def main():
     else:
         logger.warning("Knowledge dir not found: %s", knowledge_dir)
 
-    rag_chunks = training_dir / "bola_rag_chunks.txt"
-    if rag_chunks.exists():
-        logger.info("Loading RAG chunks: %s", rag_chunks)
-        text = rag_chunks.read_text(encoding="utf-8")
-        for block in text.split("\n---\n"):
-            block = block.strip()
-            if block:
-                store.add_document(block, source="bola_training")
-                loaded += 1
-    else:
-        logger.warning("RAG chunks file not found: %s", rag_chunks)
-
     n = store.count()
-    logger.info("Loaded %s document(s) into RAG. Total chunks: %s", loaded, n)
-    print(f"Loaded {loaded} document(s) into RAG. Total chunks: {n}")
+    logger.info("Loaded %s knowledge file(s) into RAG. Total chunks: %s", loaded, n)
+    print(f"Loaded {loaded} knowledge file(s) into RAG. Total chunks: {n}")
     return 0
 
 

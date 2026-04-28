@@ -1,0 +1,81 @@
+run_name: qlora_har_specialist_cpu_3b
+mode: qlora
+# CPU-only training for bola-har specialist — Qwen2.5-Coder-3B-Instruct.
+#
+# IMPORTANT: Use float32 (allow_bf16_cpu: false). x86 CPUs have no native bfloat16 SIMD;
+# bfloat16 forces an implicit cast on every operation and uses only ~1.5 cores.
+# float32 engages AVX2 SIMD and reaches 500%+ CPU utilization — roughly 4-6x faster.
+#
+# Time estimates (300+ SFT examples, 3 epochs, 128-token windows, float32):
+#   14-core desktop CPU:  ~40-60 hours total
+#   Resumable at any checkpoint — safe to stop/restart at any time.
+#
+# Memory usage (float32):
+#   Base model  ~12 GB  (3B params × 4 bytes)
+#   LoRA params ~0.5 GB (fp32 adapters)
+#   Optimizer   ~1 GB   (AdamW states)
+#   Total:      ~13-14 GB  — fits in 32 GB RAM with headroom.
+#
+# Resume from latest checkpoint:
+#   python scripts/train_qlora_unsloth.py --config configs/training/qlora_cpu_3b.yaml --resume latest
+#
+# Run from scratch:
+#   python scripts/train_qlora_unsloth.py --config configs/training/qlora_cpu_3b.yaml
+
+base_model: Qwen/Qwen2.5-Coder-3B-Instruct
+
+# float32 = native AVX2 SIMD on x86 CPU.
+# DO NOT set allow_bf16_cpu: true — bfloat16 is 4-6x slower on x86 CPU.
+allow_bf16_cpu: false
+
+dataset:
+  sft_train: data/training/sft/bola_har_specialist_train.jsonl
+  sft_valid: data/training/sft/bola_har_specialist_eval.jsonl
+
+quantization:
+  load_in_4bit: false    # 4-bit requires CUDA; ignored on CPU
+  quant_type: nf4
+  compute_dtype: float32
+
+precision:
+  dtype: float32         # float32 throughout; native AVX2 path
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8   # effective batch = 8; same training quality as GPU run
+  learning_rate: 0.0002
+  num_train_epochs: 3
+  max_steps: 0
+  gradient_checkpointing: false    # OFF: at 128-token windows activations are small; faster without
+  optimizer: adamw_torch
+  max_seq_length: 128              # 128-token windows: 16x less attention than 512, still covers entry structure
+  sample_packing: false
+  warmup_steps: 10
+  lr_scheduler_type: cosine
+  weight_decay: 0.01
+  save_strategy: steps
+  save_steps: 20                   # checkpoint every 20 steps — resume safely at any time
+  save_total_limit: 10             # keep 10 checkpoints (covers ~200 steps of rollback)
+  evaluation_strategy: steps
+  eval_steps: 40
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  logging_steps: 5
+  report_to: none
+
+outputs:
+  adapters_dir: models/adapters
+  merged_dir: models/merged

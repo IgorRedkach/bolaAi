@@ -44,15 +44,9 @@ data/training/retrain_runs/
 htmlcov/
 .pytest_cache/
 
-# Models
-# Keep local training cache ignored, but allow published split bundles and manifests
-# so trained model artifacts can be pushed with git and baked into images.
+# Models — fully ignored; model weights are downloaded at Docker build time from GitHub Releases.
 models/*
-!models/published/
-!models/published/LATEST
-!models/published/README.md
 *.bin
-*.gguf
 
 # Env
 .env

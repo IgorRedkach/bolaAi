@@ -1,5 +1,0 @@
-{
-  "target": "ollama_direct_compact",
-  "ctx_len": 5682,
-  "error": "timed out"
-}
