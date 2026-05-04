@@ -44,7 +44,7 @@ Two analysis modes run automatically:
 
 ## Web UI
 
-Visit `http://localhost:8000` after `docker run`. The chat interface lets you:
+Visit `http://localhost:8000/chat` after `docker run`. The chat interface lets you:
 
 - Upload files via the UI or reference files already in `/shared-docs`
 - Type `ingest <filename>` to ingest a file from the shared volume
