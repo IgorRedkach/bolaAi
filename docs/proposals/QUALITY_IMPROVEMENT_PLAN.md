@@ -21,10 +21,10 @@
 | 4A. Vuln type 1 — 8 examples (field-level injection) | DONE | 7 train + 1 holdout |
 | 4B. Vuln type 2 — 8 examples (write escalation) | DONE | 7 train + 1 holdout |
 | 5. Combined training: 7+7 examples | DONE | combined_train.jsonl (14 lines) created |
-| 6. Test 8th from each + combined | PENDING | Needs running model (Ollama not running) |
-| 6.5. Prompt refine loop until 3 types pass | PENDING | Needs running model |
-| 7. Curl example prompt refinement | DONE | Gate 1/2 PoC curls in all examples and prompts |
-| 8. E2E test + publish + pull + test | PENDING | Needs Docker + running environment |
+| 6. Test 8th from each + combined | PARTIAL | Gate bias eliminated; URL hallucination remains (needs fine-tuning) |
+| 6.5. Prompt refine loop until 3 types pass | PARTIAL | Single-user verified; template fill-in blocked by 3B model capacity |
+| 7. Curl example prompt refinement | PARTIAL | Method correct; URL grounding needs fine-tuning |
+| 8. E2E test + publish + pull + test | DONE | CI success; image pulled; API health ok; analysis completes |
 
 **BLOCKER:** No GPU / no `unsloth` — QLoRA fine-tuning deferred. Prompt improvements applied. Need Docker environment running for live testing.
 

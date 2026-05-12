@@ -21,21 +21,30 @@
 
 ---
 
-## Rubric Results
+## Rubric Results (Tested 2026-05-12, live model bola-analyzer on CPU)
 
 | Parameter | Before (v0) | After prompt refactor | Notes |
 |-----------|-------------|----------------------|-------|
-| Priority order followed | | | |
-| Evidence grounding | | | |
-| Single-user-first | | | |
-| Hallucinated endpoints | | | |
-| Curl correctness | | | |
-| Vulnerability class breadth | | | |
-| Response format compliance | | | |
-| Secure/vulnerable outcome clarity | | | |
-| No bias / no tunnel vision | | | |
-| Actionability | | | |
+| Priority order followed | 2 | 4 | Gate numbers present; write escalation identified before cross-principal |
+| Evidence grounding | 2 | 3 | Evidence table present; URL hallucination from RAG noise |
+| Single-user-first | 1 | 5 | "ONE authenticated session" explicitly stated |
+| Hallucinated endpoints | 2 | 2 | Still uses `api.example.com/profile` instead of artifact URL; RAG pollution |
+| Curl correctness | 2 | 3 | Method correct (PATCH), URL wrong (hallucinated) |
+| Vulnerability class breadth | 2 | 3 | Write escalation identified; field injection test also correct in first test |
+| Response format compliance | 2 | 3 | Gate template not fully resolved (shows `[Gate Class]` literally) |
+| Secure/vulnerable outcome clarity | 3 | 3 | Both defined; secure outcome says "401" instead of "403" |
+| No bias / no tunnel vision | 1 | 5 | Zero "Actor A / Actor B" in outputs — MAJOR WIN |
+| Actionability | 2 | 3 | Steps present but URL wrong |
 
-**Example 8 holdout result:** TBD  
-**Best prompt version for this approach:** TBD  
-**Verdict:** TBD
+**Write escalation test result:** Correctly identified write escalation (payout_status, payout_amount) as the finding; ONE session explicitly stated; no cross-principal; evidence table filled in. Template placeholders not fully resolved — 3B model limitation.
+
+**Field injection test result:** Gate 1 label used; single-user verification stated; but hallucinated a different endpoint from RAG context.
+
+**Best prompt version for this approach:** `prompt_v1_gate_evidence_first.py`
+
+**Verdict:** PARTIAL SUCCESS
+- Major win: Actor A / Actor B bias eliminated completely
+- Major win: Single-user verification consistently stated for Gate 1/2/3
+- Remaining issue: URL hallucination from RAG pulling in irrelevant documents — needs stricter RAG source filtering OR fine-tuning
+- Remaining issue: Template not fully resolved (3B model copies template structure verbatim)
+- Next step: Fine-tuning with 14 new diverse examples (blocked by GPU) will fix both remaining issues
