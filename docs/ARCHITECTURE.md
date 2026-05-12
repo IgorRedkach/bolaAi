@@ -6,7 +6,12 @@ BOLA AI is a local-only security analysis agent that runs in a single Docker con
 
 Primary vulnerability taxonomy (checked in priority order): field-level authorization injection, write escalation, object enumeration, cross-principal isolation, logic/integrity failures, injection, misconfiguration, and logging gaps — with explicit support for GraphQL, REST, HAR-based API traces, DB schemas, etc.
 
-**PRISM-HAR pipeline** (post-refactoring): When the input is detected as a HAR file, a purpose-built two-pass pipeline runs instead of the general-purpose RAG+LLM flow. It deterministically extracts structured facts from the HAR, sends a compact ENTRIES LIST to the fine-tuned `bola-har` specialist model under GBNF grammar constraints, validates each finding against the extracted fact index, and renders a report with deterministically built curl commands. The existing flow is fully preserved for non-HAR inputs.
+**Unified pipeline** (current): A single pipeline that handles HAR and general inputs together, with the HAR path producing richer output by default. When HAR input is detected, a purpose-built two-pass HAR analysis runs (PRISM-HAR): deterministic extraction → `bola-har` specialist LLM under GBNF grammar constraints → mechanical validation. After validation, two new steps run for both paths:
+
+1. **DocEnricher** (`agent/doc_enricher.py`): Searches any additional (non-HAR) documents ingested in the same session — OpenAPI specs, schemas, code docs — and cross-validates each finding. Corroborating evidence upgrades confidence; contradicting evidence adds a verification note.
+2. **ExampleGenerator** (`agent/example_generator.py`): Produces typed, copy-pasteable verification examples for each finding: GraphQL queries, REST curl pairs, or SOQL statements, depending on detected API type. Uses isolated prompts (`agent/prompts_examples.py`) so this step can be separately fine-tuned.
+
+The general RAG+LLM flow is fully preserved for non-HAR inputs and also used by DocEnricher for context retrieval.
 
 ---
 
@@ -33,15 +38,29 @@ Primary vulnerability taxonomy (checked in priority order): field-level authoriz
 │  │  └───────────┬─────────────┘  └──────┬────────┘  └─────┬─────┘  │  │
 │  │              │                       │                  │        │  │
 │  │  ┌───────────▼───────────────────────▼──────────────────▼──────┐ │  │
-│  │  │                   Agent / RAG Pipeline                       │ │  │
+│  │  │                   Agent / RAG Pipeline (Unified)              │ │  │
 │  │  │                                                              │ │  │
-│  │  │   HAR input?  ─yes─▶  PRISM-HAR Pipeline                    │ │  │
+│  │  │   HAR input?  ─yes─▶  Phase 1: PRISM-HAR                    │ │  │
 │  │  │        │               HarExtractor → FactIndex              │ │  │
 │  │  │        │               → HarAnalyzer (bola-har + GBNF)       │ │  │
-│  │  │        │               → FindingValidator → ReportRenderer   │ │  │
-│  │  │        │                                                      │ │  │
-│  │  │        └─no──▶  General Pipeline                             │ │  │
+│  │  │        │               → FindingValidator                    │ │  │
+│  │  │        │                        │                            │ │  │
+│  │  │        └─no──▶  General Pipeline│                            │ │  │
 │  │  │                  RAG retrieval → bola-analyzer → normalize   │ │  │
+│  │  │                                 │                            │ │  │
+│  │  │   ┌─────────────────────────────▼──────────────────────────┐ │ │  │
+│  │  │   │  Phase 2: DocEnricher                                  │ │ │  │
+│  │  │   │  RAG search non-HAR docs → corroborate/contradict      │ │ │  │
+│  │  │   │  → EnrichedFinding (adjusted confidence + doc notes)   │ │ │  │
+│  │  │   └─────────────────────────────┬──────────────────────────┘ │ │  │
+│  │  │                                 │                            │ │  │
+│  │  │   ┌─────────────────────────────▼──────────────────────────┐ │ │  │
+│  │  │   │  Phase 3: ExampleGenerator                             │ │ │  │
+│  │  │   │  Detect API type → GraphQL/REST/SOQL examples          │ │ │  │
+│  │  │   │  → VerificationExample[] per finding                   │ │ │  │
+│  │  │   └─────────────────────────────┬──────────────────────────┘ │ │  │
+│  │  │                                 │                            │ │  │
+│  │  │                          ReportRenderer                      │ │  │
 │  │  └──────────────────────────────────────────────────────────────┘ │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 │                                                                        │
@@ -139,11 +158,29 @@ A threading lock (`_analysis_lock`) ensures only one LLM call runs at a time —
 
 #### PRISM-HAR Pipeline (`src/bola_ai/agent/`)
 
-Activated by `runner.py` when `HarExtractor.is_har(query)` is true or when the ChromaDB collection contains a HAR-tagged source. Falls back to the general pipeline on any unhandled exception.
+Activated by `runner.py` when `HarExtractor.is_har(query)` is true or when the ChromaDB collection contains a HAR-tagged source. Falls back to the general pipeline on any unhandled exception. After validation, control flows into DocEnricher and ExampleGenerator (phases 2 and 3 below).
 
 - **`har_analyzer.py`:** `HarAnalyzer.analyze()` takes a `StructuredArtifact`, calls `artifact.to_entries_list_text()` to produce the ENTRIES LIST, and sends it to the `bola-har` Ollama model with `FINDING_GRAMMAR` (GBNF) enforced. Returns a `list[RawFinding]` — each finding carries `entry_id`, `pattern_id`, `pattern_name`, `evidence_quote`, `attack_delta`, `poc_entry_id`, `confidence`, and `note`. Parse errors return an empty list.
-- **`validator.py`:** `FindingValidator.validate_all()` checks each `RawFinding` against the `FactIndex`. Validation rules: (1) `entry_id` must exist — otherwise status `"rejected"` and finding is dropped; (2) `poc_entry_id` must exist — otherwise confidence is demoted to `"low"`; (3) `evidence_quote` must appear verbatim in the raw text of the referenced entry — otherwise status `"warn_evidence"` (finding kept but flagged). All rejections are logged for auditability.
-- **`report_renderer.py`:** `ReportRenderer.render()` converts `list[ValidatedFinding]` + `StructuredArtifact` into a Markdown report. curl commands are built deterministically from `HarEntry` fields (method, host, path, query_string, body_params / body_json, auth from `AuthContext`) — the LLM never generates a curl. `PATTERN_LABELS` maps pattern IDs (1.1–1.12, 10.1–10.6) to human-readable names. `CONFIDENCE_ICON` provides visual severity indicators.
+- **`validator.py`:** `FindingValidator.validate_all()` checks each `RawFinding` against the `FactIndex`. Validation rules: (1) `entry_id` must exist — otherwise rejected; (2) `poc_entry_id` must exist; (3) `evidence_quote` must appear verbatim in the raw text of the referenced entry. All rejections are logged for auditability.
+- **`report_renderer.py`:** `ReportRenderer.render()` converts `list[ValidatedFinding]` + `StructuredArtifact` into a Markdown report. curl commands are built deterministically from `HarEntry` fields — the LLM never generates a curl. Accepts optional `enriched` and `examples` keyword arguments to include DocEnricher and ExampleGenerator output per finding.
+
+#### DocEnricher (`src/bola_ai/agent/doc_enricher.py`) — Phase 2
+
+Runs after HAR validation when additional (non-HAR) documents are ingested in the same session. No LLM call in the mechanical path; an optional LLM classification is available for ambiguous cases.
+
+- **`DocEnricher.enrich_all(findings)`:** For each `ValidatedFinding`, builds a targeted RAG query from `pattern_id` + `attack_delta` + `evidence_quote`. Searches `DocStore` restricted to non-HAR sources. Classifies each retrieved chunk as `corroborates`, `contradicts`, or `context` using keyword heuristics.
+- **`EnrichedFinding`:** Extends `ValidatedFinding` with `doc_evidences: list[DocEvidence]`, `enriched_confidence` (may upgrade or downgrade from the raw finding), and `enrichment_note`.
+- **Confidence adjustment:** Corroborated findings (no contradicting evidence) may be upgraded one level (low→medium, medium→high). Contradicted findings (existing control documented) may be downgraded with a runtime-verification note.
+- **Graceful skip:** If no non-HAR sources are present, enrichment returns `EnrichedFinding(validated=vf)` with empty evidence list — report content is unchanged.
+
+#### ExampleGenerator (`src/bola_ai/agent/example_generator.py`) — Phase 3
+
+A separate knowledge step that produces typed, copy-pasteable verification examples. Intentionally isolated from the core analysis so it can be trained or fine-tuned independently.
+
+- **`ExampleGenerator.generate(enriched)`:** Detects the API type from the artifact (`graphql`, `soql`, `rest`, `mixed`) using signals in `prompts_examples.detect_api_type()`. For each `EnrichedFinding`, calls `bola-analyzer` (or a future `bola-examples` specialist, set via `BOLA_AI_EXAMPLES_MODEL`) with an API-type-specific prompt.
+- **`VerificationExample`:** Carries `pattern_id`, `api_type`, `endpoint`, `method`, `examples: list[str]` (extracted fenced code blocks), and `generation_note`.
+- **`prompts_examples.py`:** Isolated prompt module with `EXAMPLES_SYSTEM_PROMPT`, per-type prompt builders (`build_rest_example_prompt`, `build_graphql_example_prompt`, `build_soql_example_prompt`, `build_mixed_example_prompt`), and `select_prompt()` dispatcher. This file is the only surface that needs to change when improving example quality or adding training data.
+- **Graceful skip:** If the LLM returns `NO_EXAMPLE: <reason>` or an empty response, the finding is skipped and counted in `skipped_count`. The report renders without an examples section for that finding.
 
 #### General Pipeline (`src/bola_ai/agent/runner.py`)
 
@@ -260,6 +297,10 @@ Open `http://localhost:8000/chat`. Files in the shared folder are auto-ingested 
 | `BOLA_AI_LOG_MEMORY` | `` | Set to `1` to log process RSS at each pipeline step |
 | `BOLA_AI_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `BOLA_AI_NUM_THREAD` | auto (2–8) | CPU thread count passed to Ollama |
+| `BOLA_AI_EXAMPLES_MODEL` | `` | Model for ExampleGenerator (defaults to `bola-analyzer`; set to `bola-examples` when a specialist model is available) |
+| `BOLA_HAR_MODEL` | `bola-har` | Model used by HarAnalyzer |
+| `BOLA_HAR_NUM_PREDICT` | `2048` | Max output tokens for HAR specialist LLM pass |
+| `BOLA_HAR_NUM_CTX` | `8192` | Context window for HAR specialist LLM pass |
 
 ---
 
@@ -298,11 +339,14 @@ bolaAi/
 │   │   │   └── app.py                  # FastAPI app, all routes, startup automation, HAR metadata at ingest
 │   │   ├── agent/
 │   │   │   ├── prompts.py              # BOLA_SYSTEM_PROMPT, build_analysis_prompt (general pipeline)
-│   │   │   ├── runner.py               # HAR detection gate, _run_har_pipeline, run_analysis, normalize_report
+│   │   │   ├── prompts_examples.py     # Isolated prompts for ExampleGenerator (REST/GraphQL/SOQL)
+│   │   │   ├── runner.py               # Unified pipeline: HAR gate → enrichment → examples → report
 │   │   │   ├── llm.py                  # Ollama httpx client, chat() with grammar param, is_available()
 │   │   │   ├── har_analyzer.py         # HarAnalyzer: ENTRIES LIST → bola-har + GBNF → list[RawFinding]
 │   │   │   ├── validator.py            # FindingValidator: RawFinding + FactIndex → list[ValidatedFinding]
-│   │   │   └── report_renderer.py      # ReportRenderer: ValidatedFinding + StructuredArtifact → Markdown
+│   │   │   ├── doc_enricher.py         # DocEnricher: ValidatedFinding + DocStore → list[EnrichedFinding]
+│   │   │   ├── example_generator.py    # ExampleGenerator: EnrichedFinding → VerificationExample[]
+│   │   │   └── report_renderer.py      # ReportRenderer: ValidatedFinding + enriched + examples → Markdown
 │   │   ├── rag/
 │   │   │   ├── store.py                # DocStore (ChromaDB wrapper)
 │   │   │   ├── chunking.py             # chunk_text, HAR preprocessor

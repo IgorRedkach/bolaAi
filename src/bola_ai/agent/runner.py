@@ -55,11 +55,16 @@ def run_analysis(
     """
     log_memory(logger, "oracle_analysis start")
 
-    # ── HAR fast-path: route through PRISM-HAR pipeline ─────────────────────
+    # ── HAR fast-path: route through unified HAR pipeline ───────────────────
     if source_filter:
         har_sources = [s for s in source_filter if s.lower().endswith(".har")]
         if har_sources:
-            har_result = _run_har_pipeline(store, har_sources=har_sources, model=model)
+            har_result = _run_har_pipeline(
+                store,
+                har_sources=har_sources,
+                model=model,
+                source_filter=source_filter,
+            )
             if har_result is not None:
                 log_memory(logger, "oracle_analysis finish (har pipeline)")
                 return har_result
@@ -966,12 +971,20 @@ def _run_har_pipeline(
     *,
     har_sources: Optional[list[str]] = None,
     model: Optional[str] = None,
+    source_filter: Optional[list[str]] = None,
+    enable_enrichment: bool = True,
+    enable_examples: bool = True,
 ) -> Optional[str]:
-    """Execute the PRISM-HAR two-pass pipeline on a HAR document.
+    """Execute the unified HAR pipeline with optional DocEnricher + ExampleGenerator.
 
-    Retrieves the original raw HAR JSON from disk (persisted at ingest time)
-    instead of going through the chunk store, which discards the JSON structure.
-    Returns the rendered Markdown report or None if no HAR content is found.
+    Phase 1 — HAR extraction + specialist LLM analysis (unchanged).
+    Phase 2 — DocEnricher: cross-validates findings against any additional (non-HAR)
+               documents ingested in the same session.
+    Phase 3 — ExampleGenerator: produces typed GraphQL/REST/SOQL verification examples
+               for each enriched finding.
+
+    Falls back gracefully: enrichment/examples are skipped on import errors or when
+    no additional documents are present; core findings are always returned.
     """
     try:
         from bola_ai.rag.har_extractor import HarExtractor
@@ -983,9 +996,7 @@ def _run_har_pipeline(
         logger.warning("HAR pipeline modules not available: %s", exc)
         return None
 
-    # Try to get the raw HAR JSON by source name (persisted at ingest time).
-    # Fall back to searching the chunk store if the raw file is not available
-    # (e.g. for sources ingested before this feature was added).
+    # ── Phase 0: Load raw HAR ────────────────────────────────────────────────
     raw_text: Optional[str] = None
     for src in (har_sources or []):
         raw_text = store.get_raw_har(src)
@@ -994,7 +1005,6 @@ def _run_har_pipeline(
             break
 
     if raw_text is None:
-        # Legacy fallback: search chunks for HAR content
         raw_docs = store.search("HAR HTTP Archive entries method url response",
                                 n_results=3, source_filter=har_sources)
         for doc in raw_docs:
@@ -1015,6 +1025,7 @@ def _run_har_pipeline(
     if artifact is None:
         return None
 
+    # ── Phase 1: HAR specialist analysis ────────────────────────────────────
     fact_index = FactIndex.build(artifact)
     analyzer = HarAnalyzer(use_grammar=True)
     analysis = analyzer.analyze(artifact, model=model)
@@ -1026,16 +1037,72 @@ def _run_har_pipeline(
     validator = FindingValidator()
     validation = validator.validate_all(analysis.findings, fact_index)
 
+    if not validation.accepted and not validation.rejected:
+        logger.info("HAR pipeline: no findings produced")
+
+    # ── Phase 2: Doc enrichment ──────────────────────────────────────────────
+    # Identify non-HAR sources that were also ingested in this session
+    non_har_sources: list[str] = []
+    if enable_enrichment and source_filter:
+        non_har_sources = [s for s in source_filter if not s.lower().endswith(".har")]
+
+    enriched_findings = None
+    if enable_enrichment and non_har_sources and validation.accepted:
+        try:
+            from bola_ai.agent.doc_enricher import DocEnricher
+            enricher = DocEnricher(
+                store,
+                non_har_sources=non_har_sources,
+                n_results_per_finding=4,
+            )
+            enriched_findings = enricher.enrich_all(validation.accepted)
+            logger.info(
+                "HAR pipeline: doc enrichment complete (%d enriched findings, %d non-HAR sources)",
+                len(enriched_findings), len(non_har_sources),
+            )
+        except Exception as exc:
+            logger.warning("Doc enrichment step failed (skipping): %s", exc)
+
+    # ── Phase 3: Example generation ─────────────────────────────────────────
+    examples_result = None
+    if enable_examples and (enriched_findings or validation.accepted):
+        try:
+            from bola_ai.agent.example_generator import ExampleGenerator
+            from bola_ai.agent.doc_enricher import EnrichedFinding
+
+            # If enrichment ran, pass enriched findings; otherwise wrap raw validated findings
+            if enriched_findings is None:
+                enriched_findings = [
+                    EnrichedFinding(validated=vf)
+                    for vf in validation.accepted
+                ]
+
+            gen = ExampleGenerator(artifact=artifact, model=model)
+            examples_result = gen.generate(enriched_findings)
+            logger.info(
+                "HAR pipeline: example generation complete (%d examples, api_type=%s)",
+                len(examples_result.examples), examples_result.api_type,
+            )
+        except Exception as exc:
+            logger.warning("Example generation step failed (skipping): %s", exc)
+
+    # ── Phase 4: Report rendering ────────────────────────────────────────────
     renderer = ReportRenderer()
     report = renderer.render(
         accepted=validation.accepted,
         rejected=validation.rejected,
         artifact=artifact,
+        enriched=enriched_findings,
+        examples=examples_result.examples if examples_result else None,
     )
 
     logger.info(
-        "HAR pipeline complete: %d accepted / %d rejected (model=%s)",
-        report.finding_count, report.rejected_count, analysis.model_used,
+        "HAR pipeline complete: %d accepted / %d rejected / enriched=%s / examples=%d (model=%s)",
+        report.finding_count,
+        report.rejected_count,
+        "yes" if enriched_findings else "no",
+        len(examples_result.examples) if examples_result else 0,
+        analysis.model_used,
     )
     return report.markdown
 

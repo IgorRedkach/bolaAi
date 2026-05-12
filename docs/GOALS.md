@@ -95,14 +95,6 @@ The Logic: **identity boundary failure** where authentication mechanisms can be 
 - **Session fixation/confusion:** ability to force or predict session identifiers, binding a victim's authentication to an attacker-controlled session.
 - **OAuth/OIDC misconfiguration:** redirect URI validation gaps, implicit flow token leakage, or insecure token storage patterns.
 
-### 2.10 Cryptographic Failures Affecting Authorization
-
-The Logic: **cryptographic weakness** enabling unauthorized data access or identity impersonation.
-
-- **Weak or missing encryption of sensitive data at rest:** object-level data (PII, PHI, credentials) stored unencrypted or with weak algorithms.
-- **Signature bypass on tokens or assertions:** JWTs with `alg:none`, SAML response manipulation, or HMAC/RSA confusion attacks.
-- **Insufficient transport security:** internal service-to-service communication lacking TLS, enabling credential or token interception.
-
 ### Additional Related Classes (non-exhaustive)
 
 This taxonomy is deliberately not closed. Any vulnerability class evidenced in provided artifacts is in scope, including but not limited to: object state machine abuse, webhook callback trust failures, API gateway routing bypasses, GraphQL depth/complexity attacks, deserialization vulnerabilities, business logic bypasses, and time-of-check-to-time-of-use (TOCTOU) flaws.
@@ -214,6 +206,26 @@ This checklist tracks implementation progress and can include concrete mechanism
 - [x] **Artifact syntax validation gate in teaching cycle:** generated artifacts are parsed/validated by type (`json/yaml`, HAR JSON shape, SQL parse) before acceptance.
 - [x] **Memory-safe task generation batching:** task pack writing uses bounded batch flushing to keep local RAM stable.
 - [x] **From-scratch retrain policy:** model rebuild must start from base model in `docker/Modelfile` (not previous custom model), with old local custom model removed before `ollama create`.
+
+---
+
+## Unified Pipeline with Doc Enrichment and Example Generation
+
+The analysis pipeline now runs HAR and general-document analysis together, with two additional steps after findings are validated:
+
+1. **Doc enrichment** — after HAR findings are validated, any additional ingested documents (OpenAPI specs, schemas, code docs) are searched for evidence that corroborates or contradicts each finding. Corroborating evidence may upgrade confidence; contradicting evidence adds a verification note that the control may be documented but needs runtime verification. This lets the tool reason across multiple artifact types in a single session.
+
+2. **Separate example generation step** — a dedicated, isolated step that produces typed verification examples (GraphQL queries, REST curl pairs, SOQL statements) per finding. Prompts are isolated in `prompts_examples.py` so this step can evolve independently of the core security analysis. A future specialist model (`bola-examples`) may be trained on example-generation data without touching the BOLA analysis model.
+
+Design invariants:
+- Enrichment and example generation are **optional and graceful-skip**: if no additional documents are available, or if the LLM returns no example, the report renders the core findings unchanged.
+- Confidence adjustment is **mechanical first**: keyword heuristics classify chunks before any LLM classification is attempted.
+- Example prompts are **evidence-grounded**: the system prompt prohibits inventing endpoints, field names, or operation types not present in the artifact evidence.
+
+- [ ] **Unified HAR + doc enrichment pipeline:** after HAR analysis, cross-validate findings against additional ingested documents; adjust confidence; surface corroborating/contradicting sources in the report.
+- [ ] **Separate example generation step:** generate typed GraphQL, REST, and SOQL verification examples per finding; isolate prompts for independent improvement and future specialist model training.
+- [ ] **Example generation training data:** create JSONL training examples specifically for the example generation task (rest/graphql/soql per pattern, grounded to artifact evidence).
+- [ ] **bola-examples specialist model (future):** fine-tune a dedicated model on example-generation data, separate from bola-har and bola-analyzer, to improve example syntax accuracy for GraphQL and SOQL.
 
 ---
 
