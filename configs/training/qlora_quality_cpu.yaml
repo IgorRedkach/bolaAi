@@ -1,0 +1,78 @@
+run_name: qlora_quality_improvement_cpu
+mode: qlora
+# CPU-only training for quality improvement — 14 diverse examples (Gate 1 + Gate 2).
+#
+# Memory budget (3B float32, r=8 LoRA):
+#   Base model (float32):     ~12.0 GB  (3B × 4 bytes)
+#   LoRA adapters (fp32, r=8):  ~0.06 GB
+#   AdamW optimizer states:     ~0.12 GB  (2 × LoRA params)
+#   Activations (128 tokens):   ~0.04 GB
+#   Python + PyTorch overhead:  ~1.00 GB
+#   Total:                     ~13.2 GB  — needs 15 GB available; run mem_guard.py alongside.
+#
+# Time estimate (3B float32, AVX2, 128-token chunks):
+#   251 chunks / 8 grad_accum = ~31 steps/epoch × 5 epochs = ~155 steps
+#   At ~35-45s/step (float32 + AVX2): ~90-115 min total
+#
+# Run with memory guard:
+#   python scripts/train_qlora_unsloth.py --config configs/training/qlora_quality_cpu.yaml \
+#     --chunk-size-tokens 128 --chunk-overlap-tokens 32 > logs/training_quality_cpu.log 2>&1 &
+#   python scripts/mem_guard.py --pid <PID> --min-avail-gb 1.5 > logs/mem_guard.log 2>&1 &
+#
+# Resume: python scripts/train_qlora_unsloth.py --config configs/training/qlora_quality_cpu.yaml --resume latest
+
+base_model: Qwen/Qwen2.5-Coder-3B-Instruct
+
+# float32 = native AVX2 SIMD on x86 (this CPU has AVX2 only, no AMX-BF16).
+# bfloat16 would save 6GB RAM but is 4-6x slower without native SIMD.
+allow_bf16_cpu: false
+
+dataset:
+  sft_train: data/training/sft/quality_improvement/combined_train.jsonl
+  sft_valid: data/training/sft/quality_improvement/example_08_holdout_combined.jsonl
+
+quantization:
+  load_in_4bit: false
+  quant_type: nf4
+  compute_dtype: float32
+
+precision:
+  dtype: float32
+
+lora:
+  r: 8               # r=8 saves ~120MB optimizer vs r=16; enough capacity for 14 examples
+  alpha: 16
+  dropout: 0.1
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.0001
+  num_train_epochs: 5
+  max_steps: 0
+  gradient_checkpointing: true   # saves ~75% activation memory; important for 3B on CPU
+  optimizer: adamw_torch
+  max_seq_length: 512
+  sample_packing: false
+  warmup_steps: 5
+  lr_scheduler_type: cosine
+  weight_decay: 0.05
+  save_strategy: steps
+  save_steps: 10
+  save_total_limit: 5
+  evaluation_strategy: steps
+  eval_steps: 25
+  logging_steps: 1
+  report_to: none
+
+outputs:
+  adapters_dir: models/adapters
+  merged_dir: models/merged
