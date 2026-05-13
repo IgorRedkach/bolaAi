@@ -98,7 +98,9 @@ def _merge_adapter(run_dir: Path, merged_dir: Path, base_model: str) -> None:
         ) from exc
 
     merged_dir.mkdir(parents=True, exist_ok=True)
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    # Force float16 on CPU too — float32 doubles peak RAM (~12 GB vs ~6 GB for 3B model)
+    # and causes OOM on systems with <16 GB free; PyTorch supports float16 save on CPU.
+    dtype = torch.float16
     base = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=dtype,

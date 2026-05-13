@@ -1,17 +1,10 @@
 {
-  "ts_utc": "2026-05-12T22:05:52.399605+00:00",
-  "state": "train_progress",
+  "ts_utc": "2026-05-13T02:49:42.924458+00:00",
+  "state": "completed",
   "run_id": "qlora_20260512T215936Z",
   "note": "",
   "progress": {
-    "global_step": 3,
-    "max_steps": 160,
-    "pct_done": 1.9,
-    "elapsed_sec": 361.8,
-    "eta_sec": 18932.1,
-    "eta_human": "5h 15m 32s",
-    "loss": 2.587467670440674,
-    "learning_rate": 9.875000000000002e-05,
-    "epoch": 0.09561752988047809
+    "status": "trained",
+    "training_result": "/home/iredkach/Downloads/bola/bolaAi/models/adapters/qlora_20260512T215936Z/training_result.json"
   }
 }

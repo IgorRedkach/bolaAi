@@ -49,8 +49,8 @@ RUN /bin/bash -c '\
 # Produced by: scripts/merge_adapter_fp16.py + llama-quantize Q4_K_M.
 # Uses a Docker build secret (gh_token) to authenticate the download from a private repo.
 # Pass at build time: --secret id=gh_token,env=GITHUB_TOKEN
-# Asset ID 407507931 = bola-har-q4km.gguf in release bola-har-v1.
-ARG BOLA_HAR_ASSET_ID=407507931
+# Asset ID 418946375 = bola-har-q4km.gguf in release bola-har-v2 (qlora_20260512T215936Z, 5 epochs).
+ARG BOLA_HAR_ASSET_ID=418946375
 RUN --mount=type=secret,id=gh_token \
     mkdir -p /app/models/merged && \
     GH_TOKEN=$(cat /run/secrets/gh_token) && \
