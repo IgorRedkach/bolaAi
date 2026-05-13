@@ -13,6 +13,8 @@ Primary vulnerability taxonomy (checked in priority order): field-level authoriz
 
 The general RAG+LLM flow is fully preserved for non-HAR inputs and also used by DocEnricher for context retrieval.
 
+**DocFactExtractor pre-step** (added): For the general (non-HAR) path, a deterministic fact extraction pass runs against the RAG-retrieved evidence *before* the LLM call. This mirrors the HarExtractor → FactIndex pattern, extended to every document type that reaches the generic oracle. See [DocFactExtractor Pre-Step](#docfactextractor-pre-step) for details.
+
 ---
 
 ## High-Level Components
@@ -46,7 +48,9 @@ The general RAG+LLM flow is fully preserved for non-HAR inputs and also used by 
 │  │  │        │               → FindingValidator                    │ │  │
 │  │  │        │                        │                            │ │  │
 │  │  │        └─no──▶  General Pipeline│                            │ │  │
-│  │  │                  RAG retrieval → bola-analyzer → normalize   │ │  │
+│  │  │                  RAG retrieval                               │ │  │
+│  │  │                  → DocFactExtractor (deterministic pre-step) │ │  │
+│  │  │                  → bola-analyzer → normalize                 │ │  │
 │  │  │                                 │                            │ │  │
 │  │  │   ┌─────────────────────────────▼──────────────────────────┐ │ │  │
 │  │  │   │  Phase 2: DocEnricher                                  │ │ │  │
@@ -154,6 +158,8 @@ A threading lock (`_analysis_lock`) ensures only one LLM call runs at a time —
 - **`embeddings.py`:** Wraps `sentence-transformers` with lazy load. `fake_embedder.py` provides deterministic zero-vectors for tests.
 - **`har_extractor.py`:** Deterministic HAR JSON parser — no LLM involvement. `HarExtractor.extract()` parses raw HAR text into a `StructuredArtifact` containing `HarEntry` objects with security-relevant fields: method, URL, host, path, parsed query/body, auth-relevant headers, response status, response body excerpt, and derived signals (path ID segments, `is_auth_flow`, `is_analytics`, `is_static_resource`, `is_internal_endpoint`). `StructuredArtifact` also carries aggregate signals: `has_sequential_int_ids`, `has_tenant_params`, `has_batch_endpoints`, and `security_relevant_entry_ids` (entries where all noise flags are false). `HarExtractor.is_har()` is the HAR detection gate used in `runner.py`.
 - **`fact_index.py`:** `FactIndex.build()` indexes a `StructuredArtifact` into O(1) lookup tables: `entry_by_id`, `all_hosts`, `all_paths`, `all_path_id_segments`, and `entry_raw_texts`. Used by `FindingValidator` to verify that model-generated findings reference real content.
+- **`doc_facts.py`:** Data classes for structured facts extracted from general documents: `StructuredDocFacts`, `EndpointFact`, `SchemaFact`, `CodeFlowFact`, `AuthModelFact`, `SystemMetaFact`. `StructuredDocFacts.to_prompt_block()` renders a compact, LLM-readable summary. `DocSection` enum covers all detectable section types.
+- **`doc_fact_extractor.py`:** `DocTypeDetector` classifies which section types are present using fast regex scans (no LLM). `DocFactExtractor.extract()` runs per-type extractors for each detected section and aggregates risk signals (`has_field_selector_endpoints`, `has_id_params_without_ownership`, `has_bypassed_auth_checks`, `has_explicit_bug_notes`). See [DocFactExtractor Pre-Step](#docfactextractor-pre-step).
 - **`rag_isolation.py`:** Defines `KNOWLEDGE_SOURCES` (canonical knowledge whitelist) and `CONTAMINATING_DOCS` (fixture/adversarial doc blocklist). `build_session_source_filter()` constructs the ChromaDB source filter for each analysis call. `get_contaminating_docs_in_store()` scans the collection at startup to warn about contamination.
 
 #### PRISM-HAR Pipeline (`src/bola_ai/agent/`)
@@ -182,6 +188,83 @@ A separate knowledge step that produces typed, copy-pasteable verification examp
 - **`prompts_examples.py`:** Isolated prompt module with `EXAMPLES_SYSTEM_PROMPT`, per-type prompt builders (`build_rest_example_prompt`, `build_graphql_example_prompt`, `build_soql_example_prompt`, `build_mixed_example_prompt`), and `select_prompt()` dispatcher. This file is the only surface that needs to change when improving example quality or adding training data.
 - **Graceful skip:** If the LLM returns `NO_EXAMPLE: <reason>` or an empty response, the finding is skipped and counted in `skipped_count`. The report renders without an examples section for that finding.
 
+#### DocFactExtractor Pre-Step
+
+Before any LLM call in the general pipeline, a deterministic fact-extraction pass processes the RAG-retrieved evidence. This is the same philosophy as PRISM-HAR (HarExtractor → FactIndex → LLM) applied to all document types.
+
+**Why this matters:**  
+The chunking layer (`chunking.py`) splits documents by paragraph/character count, destroying section structure. A SQL column definition lands in the same chunk as architectural prose; a Go handler gets split at 512 chars. Without the pre-step, the LLM receives unstructured soup; with it, the LLM sees a compact structured summary that identifies what the document actually contains and what security signals are present.
+
+**Supported document section types (`DocSection` enum):**
+
+| Section type | Extraction strategy |
+|---|---|
+| `ARCH_SPEC` | System name, domain, classification, auth model, explicit BUG-XXX notes |
+| `SQL_SCHEMA` | Tables, ownership columns (userId/accountId/tenantId/…), missing FK bindings, sensitive fields, PK type |
+| `SOURCE_CODE` | Handlers, auth/ownership checks present vs. bypassed (commented-out code), BUG IDs, identity/resource ID sources |
+| `REST_CONTRACT` | Method + path, path params (caller-controlled IDs), query params (field selectors `?fields=`), auth, restricted fields |
+| `GRAPHQL_SCHEMA` | Types with ID fields, queries/mutations, auth directives |
+| `EMBEDDED_HAR` | HAR JSON extracted and handed to the existing `HarExtractor` |
+| `OPENAPI_YAML` | Paths, security schemes, operation parameters |
+| `EVENT_SCHEMA` | Kafka/MQTT/SQS message schema presence (signals event-driven attack surface) |
+| `LOG_TRACE` | Structured log lines (signals runtime evidence) |
+| `USER_GUIDE` | Prose fallback; risk keyword hints only |
+
+**Pipeline position:**
+
+```
+RAG evidence chunks
+        │
+        ▼
+DocTypeDetector.detect()          ← regex scan, no LLM
+        │
+        ▼
+per-type extractors               ← regex/parse, no LLM
+ ├── _extract_system_meta()
+ ├── _extract_auth_model()
+ ├── _extract_sql_schemas()
+ ├── _extract_endpoints()
+ ├── _extract_code_flows()
+ └── _extract_embedded_har()
+        │
+        ▼
+StructuredDocFacts
+ ├── system: SystemMetaFact
+ ├── auth_model: AuthModelFact
+ ├── schemas: list[SchemaFact]    ← ownership columns, FK gaps, sensitive fields
+ ├── endpoints: list[EndpointFact] ← Gate1/2/3 signals, bypassed checks
+ ├── code_flows: list[CodeFlowFact] ← BUG IDs, bypassed ownership
+ └── risk signals:
+     ├── has_field_selector_endpoints   → Gate 1 hint
+     ├── has_write_endpoints_with_restricted_fields → Gate 2 hint
+     ├── has_id_params_without_ownership → Gate 3 hint
+     ├── has_bypassed_auth_checks
+     └── has_explicit_bug_notes
+        │
+        ▼
+StructuredDocFacts.to_prompt_block()  ← compact LLM-readable block
+        │
+        ▼
+Prepended to context as:
+  "### STRUCTURED DOCUMENT FACTS (PRE-EXTRACTED):\n{fact_block}\n\n"
+  "### SOURCE ARTIFACT EVIDENCE (FACTS):\n{evidence_str}\n\n"
+  "### SECURITY LOGIC PATTERNS (REFERENCE ONLY):\n{pattern_str}"
+        │
+        ▼
+LLM (bola-analyzer)
+```
+
+**Key design invariants:**
+- Zero LLM calls — all extraction is deterministic regex/parse
+- Stateless singleton (`_doc_fact_extractor` in `runner.py`) — safe across concurrent requests
+- Falls back gracefully: `facts.is_empty()` → pre-step block is omitted, existing behaviour preserved
+- Prompt block is compact (fits in ~200 token slice): only security-relevant fields, not raw text
+
+**Implementation:** `src/bola_ai/rag/doc_facts.py` (data classes) + `src/bola_ai/rag/doc_fact_extractor.py` (extractor logic).  
+**Tests:** `tests/test_doc_fact_extractor.py` — 44 tests covering all section types, composite documents, risk signal detection, and edge cases.
+
+---
+
 #### General Pipeline (`src/bola_ai/agent/runner.py`)
 
 Used for all non-HAR inputs. `run_analysis()` orchestrates:
@@ -189,10 +272,11 @@ Used for all non-HAR inputs. `run_analysis()` orchestrates:
 1. **HAR detection gate** — `HarExtractor.is_har(query)` or `_context_contains_har(store, source_filter)`. If true, dispatches `_run_har_pipeline()` which sequences HarExtractor → FactIndex → HarAnalyzer → FindingValidator → ReportRenderer.
 2. **Pattern retrieval** — semantic search against canonical knowledge docs only using `_SECURITY_RAG_QUERY`. Returns `n_context // 2` chunks.
 3. **Evidence retrieval** — semantic search against user-ingested documents using the analysis query via session-scoped source filter from `rag_isolation.build_session_source_filter()`. Returns up to `n_context` chunks (default 12 for `/analyze`, 6 for startup auto-analysis).
-4. **Context assembly** — evidence and patterns combined into a structured `[EVIDENCE SOURCE]` / `[SECURITY LOGIC PATTERNS]` block, capped at `MAX_CONTEXT_CHARS` (default 12 000 chars).
-5. **Prompt construction** — `BOLA_SYSTEM_PROMPT` (from `prompts.py`) + `build_analysis_prompt()` user message.
-6. **LLM call** — `chat()` → `POST /api/chat` to Ollama (`bola-analyzer`). Supports per-call `num_predict` override.
-7. **Normalization** — `_normalize_report()` post-processes the output: strips RAG pattern bleed-through, aligns curl block paths to the heading endpoint via `_fix_curl_path_mismatch()`, grounds unknown paths to closest extracted allowed path, removes placeholder marker variants, appends comparative verification block when user explicitly requests two-token comparison.
+4. **DocFactExtractor pre-step** *(new)* — `_doc_fact_extractor.extract(evidence_str)` produces `StructuredDocFacts` from the retrieved chunks. If non-empty, `to_prompt_block()` is prepended to the context as `### STRUCTURED DOCUMENT FACTS (PRE-EXTRACTED)`. This ensures the LLM receives a structured, high-signal summary before the raw chunks.
+5. **Context assembly** — structured fact block + evidence + patterns combined, capped at `MAX_CONTEXT_CHARS`.
+6. **Prompt construction** — `BOLA_SYSTEM_PROMPT` (from `prompts.py`) + `build_analysis_prompt()` user message.
+7. **LLM call** — `chat()` → `POST /api/chat` to Ollama (`bola-analyzer`). Supports per-call `num_predict` override.
+8. **Normalization** — `_normalize_report()` post-processes the output: strips RAG pattern bleed-through, aligns curl block paths to the heading endpoint via `_fix_curl_path_mismatch()`, grounds unknown paths to closest extracted allowed path, removes placeholder marker variants, appends comparative verification block when user explicitly requests two-token comparison.
 
 #### LLM Client (`src/bola_ai/agent/llm.py`)
 
@@ -232,12 +316,40 @@ The training pipeline lives in `src/training/` and `scripts/`. It is not install
 | `scripts/train_qlora_unsloth.py` | QLoRA fine-tuning via Unsloth + HuggingFace PEFT/TRL |
 | `scripts/post_training_package_and_push.py` | Merges QLoRA adapter into base model weights, packages for Ollama, pushes to registry |
 | `scripts/test_checkpoint_inference.py` | Smoke-tests a checkpoint with a real HAR input before packaging |
+| `scripts/build_sft_from_reviewing.py` | *(new)* Converts reviewing-folder cases into SFT JSONL training data. Applies quality filters (min context/target lengths), detects document section types via `DocTypeDetector`, and stratifies output by section type to ensure diversity. Usage: `python scripts/build_sft_from_reviewing.py --stratify --max 500` |
 | `configs/training/qlora_har_specialist.yaml` | QLoRA config for `bola-har`: rank 32, bfloat16, 3 epochs, HAR specialist splits |
 | `configs/training/` | Additional YAML configs for qlora/lora/dpo runs at different sizes (0.5B, 1B, 3B) |
 | `models/adapters/` | Local LoRA/QLoRA checkpoint outputs (dev only) |
 | `models/merged/` | Merged adapter + base model weights, ready for `ollama create` |
 | `models/packaged/` | Modelfile-only packages for tested checkpoints |
-| `data/training/sft/` | JSONL splits: `bola_har_specialist_train.jsonl`, `bola_har_specialist_eval.jsonl`, general `train.jsonl` / `valid.jsonl` |
+| `data/training/sft/` | JSONL splits: `bola_har_specialist_train.jsonl`, `bola_har_specialist_eval.jsonl`, general `train.jsonl` / `valid.jsonl`, `reviewing_combined.jsonl` *(new — 500 stratified examples from reviewing folder)* |
+| `data/training/reviewing/` | Source for training examples: 5065 cases in 6 folder groups, each with `context.txt` (composite artifact), `expected_response.md` (ideal analysis), and `analysis_explanation.md` (reasoning chain). Case IDs encode vulnerability type: `BOLA-*` (3003), `INJ-*` (1003), `REVIEW-NEW-SYSTEM-*` (20), `REVIEW-SYSTEM-*` (11). Document section distribution: 99% ARCH_SPEC, 89% EMBEDDED_HAR, 69% GraphQL, 69% REST, 23% SOURCE_CODE (in stratified sample). |
+
+#### Training Data Gap Analysis
+
+Current state (as of May 2026, post-`qlora_20260512T215936Z` run):
+- **Active SFT training set:** 14 quality-improvement examples + 350 HAR specialist examples + 717 general train.jsonl = ~1081 total
+- **Reviewing folder:** 5065 curated cases with ground-truth responses — the largest source of labeled data
+- **Gap:** Only 14/5065 reviewing cases were in the training set. The `build_sft_from_reviewing.py` script closes this gap.
+
+**Document type coverage gaps** (identified by running `DocTypeDetector` across 500 sampled cases):
+
+| Section type | Coverage in raw data | Action |
+|---|---|---|
+| `ARCH_SPEC` | 99% | Well-represented |
+| `EMBEDDED_HAR` | 89% | Well-represented (PRISM-HAR path) |
+| `GRAPHQL_SCHEMA` | 69% | Good |
+| `REST_CONTRACT` | 69% | Good |
+| `SOURCE_CODE` | 1% raw / 23% stratified | Prioritized by `--stratify` flag |
+| `SQL_SCHEMA` | 1% raw / 76% stratified | Prioritized by `--stratify` flag |
+| `OPENAPI_YAML` | <1% | Add synthetic OpenAPI spec cases |
+| `LOG_TRACE` | <1% | Add access-log anomaly cases |
+
+**Plan for next training run:**
+1. Run `build_sft_from_reviewing.py --stratify --max 500` → `reviewing_combined.jsonl` (done)
+2. Merge with existing quality-improvement JSONL: `cat data/training/sft/quality_improvement/combined_train.jsonl reviewing_combined.jsonl > data/training/sft/train_v3.jsonl`
+3. Add 10–20 synthetic OpenAPI YAML cases (target: `DocSection.OPENAPI_YAML`)
+4. Train on `train_v3.jsonl` — projected: ~514 total examples vs. 14 before (37× increase)
 
 ---
 

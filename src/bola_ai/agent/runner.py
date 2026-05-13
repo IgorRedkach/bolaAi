@@ -9,9 +9,13 @@ from bola_ai.agent.llm import chat
 from bola_ai.agent.prompts import BOLA_SYSTEM_PROMPT, build_analysis_prompt
 from bola_ai.logging_config import get_logger
 from bola_ai.memory import log_memory
+from bola_ai.rag.doc_fact_extractor import DocFactExtractor
 from bola_ai.rag.store import DocStore
 
 logger = get_logger("agent")
+
+# Singleton extractor — stateless, safe to share across requests
+_doc_fact_extractor = DocFactExtractor()
 
 # Semantic RAG query for evidence retrieval
 _SECURITY_RAG_QUERY = (
@@ -89,7 +93,30 @@ def run_analysis(
 
     pattern_str = "\n".join(p["content"] for p in patterns if p.get("content")).strip()
 
+    # ── Pre-step: deterministic fact extraction ──────────────────────────────
+    # Extract structured security-relevant facts from the evidence chunks before
+    # the LLM call. This mirrors the HarExtractor → FactIndex pattern used in
+    # PRISM-HAR, but for general document types (SQL schemas, source code, API
+    # contracts, architecture specs, embedded HAR traces, GraphQL schemas).
+    # The compact fact block is prepended to the context so the LLM sees a
+    # structured summary of what matters, not just raw chunked text.
+    doc_facts = _doc_fact_extractor.extract(evidence_str)
+    fact_block = ""
+    if not doc_facts.is_empty():
+        fact_block = doc_facts.to_prompt_block()
+        logger.debug(
+            "DocFactExtractor produced fact block (%d chars, sections: %s)",
+            len(fact_block),
+            doc_facts.doc_sections_found,
+        )
+
+    # Build enriched context: structured facts first, then raw evidence, then patterns
+    fact_section = (
+        f"### STRUCTURED DOCUMENT FACTS (PRE-EXTRACTED):\n{fact_block}\n\n"
+        if fact_block else ""
+    )
     context = (
+        f"{fact_section}"
         f"### SOURCE ARTIFACT EVIDENCE (FACTS):\n{evidence_str}\n\n"
         f"### SECURITY LOGIC PATTERNS (REFERENCE ONLY):\n{pattern_str}"
     ).strip()
