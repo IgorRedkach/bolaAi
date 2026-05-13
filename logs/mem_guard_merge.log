@@ -1,0 +1,6 @@
+[03:13:23] [INFO] Memory guard started — watching PID 692313, min_avail=1.5 GB, interval=10.0s
+[03:13:43] [INFO] WARNING: available RAM 1.85 GB approaching threshold 1.5 GB
+[03:14:34] [WARN] CRITICAL: available RAM 1.48 GB < threshold 1.5 GB. Sending SIGTERM to PID 692313 to prevent OOM kill.
+[03:14:34] [WARN] CRITICAL: available RAM 1.48 GB < threshold 1.5 GB. Sending SIGTERM to PID 692313 to prevent OOM kill.
+[03:19:39] [INFO] Memory guard started — watching PID 712604, min_avail=2.0 GB, interval=10.0s
+[03:20:39] [INFO] PID 712604 no longer alive — guard exiting normally.
